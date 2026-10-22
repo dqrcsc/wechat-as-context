@@ -909,8 +909,15 @@ ${
         };
       }
 
+      const cliFailStep = tieredRes.tierPath.find((s) =>
+        s.startsWith("cli:agy(failed:")
+      );
+      const cliFailNote = cliFailStep
+        ? `\n> ⚠️ 本地 AGY 生图未完成（\`${cliFailStep.slice(0, 180)}\`），已自动降级由云端模型提供分镜与 Prompt：\n`
+        : "";
+
       return {
-        replyText: `🎨 视觉生成响应（${tieredRes.modelUsed}）：\n\n${tieredRes.text}`,
+        replyText: `🎨 视觉生成响应（${tieredRes.modelUsed}）：${cliFailNote}\n${tieredRes.text}`,
         modelUsed: tieredRes.modelUsed,
       };
     } catch (err: any) {

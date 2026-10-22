@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
+  readdirSync,
   realpathSync,
   readFileSync,
   statSync,
@@ -370,11 +371,12 @@ export function selectAgyModel(
   complexity: "fast" | "deep"
 ): string {
   const lower = userText.toLowerCase();
-  if (lower.includes("opus")) return "claude-opus-4-6";
+  if (lower.includes("opus")) return "claude-opus-5-5-high";
   if (lower.includes("sonnet") || lower.includes("claude")) {
-    return "claude-sonnet-4-6";
+    return "claude-sonnet-5-5-high";
   }
-  return complexity === "deep" ? "gemini-2.5-pro" : "gemini-2.5-flash";
+  if (lower.includes("flash")) return "gemini-3.8-flash-high";
+  return complexity === "deep" ? "gemini-4-argon-high" : "gemini-3.8-flash-medium";
 }
 
 export interface TieredExecutionParams {
@@ -634,13 +636,13 @@ export async function executeTieredAgentTask(
 
 async function executeAgyCli(req: SubagentRunRequest): Promise<SubagentRunResult> {
   const agyBin = resolveAgyBinary();
-  const model = req.preferredModel || "gemini-2.5-pro";
+  const model = req.preferredModel || "gemini-4-argon-high";
   const generatedDir = join(req.config.dataDir, "generated");
   mkdirSync(generatedDir, { recursive: true });
 
   const startMs = Date.now();
   const workDir = req.workingDir || req.config.vaultRoot;
-  const timeoutMs = req.timeoutMs ?? 150_000;
+  const timeoutMs = req.timeoutMs ?? (req.expectGeneratedImage ? 240_000 : 150_000);
 
   let fullPrompt = req.prompt;
   if (req.imagePaths && req.imagePaths.length > 0) {
@@ -658,26 +660,48 @@ async function executeAgyCli(req: SubagentRunRequest): Promise<SubagentRunResult
     fullPrompt += `\n\n【图片生成输出要求】\n请调用你的 image-generator 子智能体（或生图工具）生成图片，并将最终图片文件保存到（或复制到）此目录：${generatedDir}（建议路径：${targetImgPath}），并在回复末尾附上生成的图片完整绝对路径。`;
   }
 
-  const args = [
-    "--print",
-    fullPrompt,
-    "--dangerously-skip-permissions",
-    "--model",
-    model,
-    "--add-dir",
-    req.config.vaultRoot,
-    "--add-dir",
-    req.config.dataDir,
-  ];
+  const agyBrainDir = join(homedir(), ".gemini", "antigravity", "brain");
+  const buildArgs = (includeModel: boolean): string[] => {
+    const cliArgs = [
+      "--print",
+      fullPrompt,
+      "--dangerously-skip-permissions",
+    ];
+    if (includeModel && model) {
+      cliArgs.push("--model", model);
+    }
+    cliArgs.push("--add-dir", req.config.vaultRoot, "--add-dir", req.config.dataDir);
+    if (existsSync(agyBrainDir)) {
+      cliArgs.push("--add-dir", agyBrainDir);
+    }
+    return cliArgs;
+  };
 
-  const { cleanOut, stderrText, exitCode, timedOut } = await spawnCliWithTimeout(
+  const effectiveCwd = existsSync(workDir) ? workDir : req.config.projectRoot;
+  let { cleanOut, stderrText, exitCode, timedOut } = await spawnCliWithTimeout(
     agyBin,
-    args,
-    existsSync(workDir) ? workDir : req.config.projectRoot,
+    buildArgs(true),
+    effectiveCwd,
     timeoutMs,
     undefined,
     req.onActivity
   );
+
+  // If the configured/selected model ID is not recognized by the user's current AGY CLI version,
+  // automatically retry without `--model` so AGY uses its built-in default model.
+  if (
+    exitCode !== 0 &&
+    /invalid model selection|not recognized as a known model/i.test(stderrText)
+  ) {
+    ({ cleanOut, stderrText, exitCode, timedOut } = await spawnCliWithTimeout(
+      agyBin,
+      buildArgs(false),
+      effectiveCwd,
+      timeoutMs,
+      undefined,
+      req.onActivity
+    ));
+  }
 
   const { images, files } = discoverGeneratedArtifacts(
     generatedDir,
@@ -686,6 +710,14 @@ async function executeAgyCli(req: SubagentRunRequest): Promise<SubagentRunResult
     req.config.vaultRoot,
     expectedArtifacts
   );
+
+  // If AGY's image-generator subagent wrote a new image into ~/.gemini/antigravity/brain/<conv-id>/
+  // during this invocation without echoing the full path in final stdout, recover it by timestamp.
+  if (req.expectGeneratedImage && images.length === 0) {
+    for (const recentImg of findRecentImagesInDirs([generatedDir, agyBrainDir], startMs)) {
+      images.push(recentImg);
+    }
+  }
 
   if (timedOut && images.length === 0 && files.length === 0) {
     throw new Error(
@@ -1275,7 +1307,8 @@ export function discoverGeneratedArtifacts(
 ): { images: string[]; files: string[] } {
   const imageSet = new Set<string>();
   const fileSet = new Set<string>();
-  const allowedRoots = [generatedDir, vaultRoot].filter(
+  const agyBrainRoot = join(homedir(), ".gemini", "antigravity", "brain");
+  const allowedRoots = [generatedDir, vaultRoot, agyBrainRoot].filter(
     (root): root is string => Boolean(root && existsSync(root))
   ).map(root => realpathSync(root));
 
@@ -1333,6 +1366,46 @@ export function discoverGeneratedArtifacts(
 function isImagePath(filePath: string): boolean {
   const ext = extname(filePath).toLowerCase();
   return [".png", ".jpg", ".jpeg", ".webp", ".gif"].includes(ext);
+}
+
+function findRecentImagesInDirs(roots: string[], sinceMs: number): string[] {
+  const candidates: Array<{ path: string; mtimeMs: number }> = [];
+  for (const root of roots) {
+    if (!root || !existsSync(root)) continue;
+    try {
+      const level1 = readdirSync(root, { withFileTypes: true });
+      for (const entry of level1) {
+        const p1 = join(root, entry.name);
+        if (entry.isFile() && isImagePath(p1)) {
+          try {
+            const st = statSync(p1);
+            if (st.size > 0 && st.mtimeMs >= sinceMs) {
+              candidates.push({ path: p1, mtimeMs: st.mtimeMs });
+            }
+          } catch {}
+        } else if (entry.isDirectory() && !entry.name.startsWith(".")) {
+          try {
+            const stDir = statSync(p1);
+            if (stDir.mtimeMs < sinceMs - 60_000) continue;
+            const level2 = readdirSync(p1, { withFileTypes: true });
+            for (const sub of level2) {
+              if (!sub.isFile()) continue;
+              const p2 = join(p1, sub.name);
+              if (!isImagePath(p2)) continue;
+              try {
+                const st2 = statSync(p2);
+                if (st2.size > 0 && st2.mtimeMs >= sinceMs) {
+                  candidates.push({ path: p2, mtimeMs: st2.mtimeMs });
+                }
+              } catch {}
+            }
+          } catch {}
+        }
+      }
+    } catch {}
+  }
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return candidates.length > 0 ? [candidates[0]!.path] : [];
 }
 
 function isDeliverableDocPath(filePath: string): boolean {
