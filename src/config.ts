@@ -456,9 +456,10 @@ export function loadConfig(
     ).toLowerCase() === "true";
   const homeEnv = ignoreHomeEnv ? {} : parseDotEnvFile(join(homedir(), ".env"));
 
-  // In normal mode (!ignoreHomeEnv && !customEnv), project .env takes highest priority
-  // so editing .env on disk immediately overrides shell/global environment variables.
-  const preferProjectDotEnv = !ignoreHomeEnv && !customEnv;
+  // In normal mode (!ignoreHomeEnv && !customEnv) or when projectRootOverride is explicitly supplied,
+  // project .env takes highest priority so editing .env on disk immediately overrides shell/global environment variables.
+  const preferProjectDotEnv =
+    !customEnv && (Boolean(projectRootOverride) || !ignoreHomeEnv);
 
   const getWithSource = (
     key: string,

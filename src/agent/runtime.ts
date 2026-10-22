@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, extname, join, relative } from "node:path";
+import { basename, extname, join, relative, resolve } from "node:path";
 import { AppConfig, notifyExternalWebhookIfConfigured } from "../config.ts";
 import { ArticleRecord, ContextDatabase, ConversationTurnRecord, TriageLevel } from "../db.ts";
 import { ClawBotMessage, unpackClawBotMessage, UnpackedClawBotMessage } from "../clawbot/client.ts";
@@ -1369,15 +1369,37 @@ ${effectiveRequirement}`,
           .map((s) => s.trim())
           .filter((p) => p && existsSync(p));
         if (paths.length > 0) {
-          const allSiblings =
+          const targetExts =
+            requestedFormats.length > 0
+              ? requestedFormats
+              : (["md", "html", "pdf"] as Array<"md" | "html" | "pdf">);
+          const primaryMd = paths.find((p) => p.toLowerCase().endsWith(".md"));
+          let allSiblings =
             paths.length === 1
+              ? findSiblingMultiFormatFiles(paths[0], targetExts)
+              : requestedFormats.length > 0
               ? findSiblingMultiFormatFiles(
-                  paths[0],
-                  requestedFormats.length > 0
-                    ? requestedFormats
-                    : ["md", "html", "pdf"]
+                  primaryMd || paths[0],
+                  requestedFormats
                 )
               : paths;
+          const hasAnyRequested =
+            requestedFormats.length > 0 &&
+            requestedFormats.some((fmt) =>
+              allSiblings.some((p) => p.toLowerCase().endsWith(`.${fmt}`))
+            );
+          if (primaryMd && requestedFormats.length > 0 && !hasAnyRequested) {
+            const compiled = await ensureMultiFormatDeliverables({
+              markdownPath: primaryMd,
+              outputDir: resolve(primaryMd, ".."),
+              baseFileStem: basename(primaryMd, ".md"),
+              existingFiles: allSiblings,
+              requestedFormats,
+            });
+            if (compiled.length > 0) {
+              allSiblings = compiled;
+            }
+          }
           return {
             replyText: `📎 正在为你推送刚生成的文件（共 ${allSiblings.length} 个）：\n${allSiblings
               .map((p) => `- \`${basename(p)}\``)
@@ -1459,7 +1481,7 @@ ${effectiveRequirement}`,
     }
 
     // Check if sibling formats (.md, .html, .pdf) exist for this note when it's in 05_outputs/ or outputs/
-    const filesToSend =
+    let filesToSend =
       filePathToSend.includes("05_outputs") ||
       filePathToSend.includes("/outputs/") ||
       requestedFormats.length > 0
@@ -1468,6 +1490,28 @@ ${effectiveRequirement}`,
             requestedFormats.length > 0 ? requestedFormats : ["md", "html", "pdf"]
           )
         : [filePathToSend];
+
+    const hasAnyRequestedFormat =
+      requestedFormats.length > 0 &&
+      requestedFormats.some((fmt) =>
+        filesToSend.some((p) => p.toLowerCase().endsWith(`.${fmt}`))
+      );
+    if (
+      filePathToSend.toLowerCase().endsWith(".md") &&
+      requestedFormats.length > 0 &&
+      !hasAnyRequestedFormat
+    ) {
+      const compiled = await ensureMultiFormatDeliverables({
+        markdownPath: filePathToSend,
+        outputDir: resolve(filePathToSend, ".."),
+        baseFileStem: basename(filePathToSend, ".md"),
+        existingFiles: filesToSend,
+        requestedFormats,
+      });
+      if (compiled.length > 0) {
+        filesToSend = compiled;
+      }
+    }
 
     return {
       replyText: `📎 正在为你推送文件：${fileDescription}\n文件列表：${filesToSend

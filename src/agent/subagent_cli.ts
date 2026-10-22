@@ -648,11 +648,13 @@ async function executeAgyCli(req: SubagentRunRequest): Promise<SubagentRunResult
       .map((p) => `- ${p}`)
       .join("\n")}`;
   }
+  const expectedArtifacts: string[] = [];
   if (req.expectGeneratedImage) {
     const targetImgPath = join(
       generatedDir,
       `agy_img_${new Date().toISOString().slice(0, 10).replace(/-/g, "_")}_${randomUUID().slice(0, 8)}.png`
     );
+    expectedArtifacts.push(targetImgPath);
     fullPrompt += `\n\n【图片生成输出要求】\n请调用你的 image-generator 子智能体（或生图工具）生成图片，并将最终图片文件保存到（或复制到）此目录：${generatedDir}（建议路径：${targetImgPath}），并在回复末尾附上生成的图片完整绝对路径。`;
   }
 
@@ -681,7 +683,8 @@ async function executeAgyCli(req: SubagentRunRequest): Promise<SubagentRunResult
     generatedDir,
     cleanOut,
     startMs,
-    req.config.vaultRoot
+    req.config.vaultRoot,
+    expectedArtifacts
   );
 
   if (timedOut && images.length === 0 && files.length === 0) {
@@ -1267,7 +1270,8 @@ export function discoverGeneratedArtifacts(
   generatedDir: string,
   outputText: string,
   sinceMs: number,
-  vaultRoot?: string
+  vaultRoot?: string,
+  expectedPaths: string[] = []
 ): { images: string[]; files: string[] } {
   const imageSet = new Set<string>();
   const fileSet = new Set<string>();
@@ -1295,21 +1299,25 @@ export function discoverGeneratedArtifacts(
     } catch {}
   };
 
+  for (const expected of expectedPaths) {
+    registerCandidateFile(expected);
+  }
+
   // Only paths explicitly returned by this task are eligible, never every
   // recently modified file in shared output directories.
   const absMatches =
     outputText.match(
-      /\/(?:Users|home|tmp|var|opt|private|mnt|srv)\/[^\s"'`<>()[\]，。；！!]+\.[a-zA-Z0-9]{2,8}/g
+      /\/(?:Users|Volumes|home|tmp|var|opt|private|mnt|srv)\/[^\s"'`<>()[\]，。；！!]+\.[a-zA-Z0-9]{2,8}/g
     ) ?? [];
   for (const candidate of absMatches) {
     registerCandidateFile(candidate);
   }
 
-  // 3. Scan outputText for vault-relative paths (e.g. 05_outputs/research_notes/xxx.md)
+  // 3. Scan outputText for vault-relative paths (e.g. 05_outputs/research_notes/xxx.md or outputs/research_notes/xxx.md)
   if (vaultRoot && existsSync(vaultRoot)) {
     const relMatches =
       outputText.match(
-        /(?:00_home|01_inputs|02_conversations|03_ideas|04_topics|05_outputs|_system)\/[^\s"'`<>()[\]，。；！!]+\.[a-zA-Z0-9]{2,8}/g
+        /(?:00_home|01_inputs|02_conversations|03_ideas|04_topics|05_outputs|_system|outputs|wechat|web|inbox|papers|ideas)\/[^\s"'`<>()[\]，。；！!]+\.[a-zA-Z0-9]{2,8}/g
       ) ?? [];
     for (const rel of relMatches) {
       registerCandidateFile(join(vaultRoot, rel));

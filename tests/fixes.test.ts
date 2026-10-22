@@ -2,12 +2,13 @@ import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AppConfig } from "../src/config.ts";
+import { loadConfig, type AppConfig } from "../src/config.ts";
 import { ContextDatabase } from "../src/db.ts";
 import { WeChatContextPipeline } from "../src/pipeline.ts";
 import { downloadAndDecryptCdnMedia } from "../src/clawbot/media.ts";
 import { discoverGeneratedArtifacts, setSubagentTestRunner } from "../src/agent/subagent_cli.ts";
 import { compileMarkdownToHtml, ensureMultiFormatDeliverables } from "../src/agent/doc_exporter.ts";
+import { findSiblingMultiFormatFiles } from "../src/vault/context.ts";
 import { callAgentLlm } from "../src/agent/llm.ts";
 import { extractGeneralWebArticle, normalizeExternalWebUrl } from "../src/extractor/web.ts";
 import { createHttpHandler } from "../src/http.ts";
@@ -337,4 +338,87 @@ test("a failed grounded search never quietly becomes an ungrounded answer", asyn
   await expect(callAgentLlm({config:f.config,tier:"deep",systemPrompt:"s",userPrompt:"latest facts",enableWebSearch:true})).rejects.toThrow();
   expect(calls).toHaveLength(2);
   expect(calls.every(url=>url.includes(":generateContent"))).toBe(true);
+});
+
+test("projectRootOverride .env takes precedence over process.env even when IGNORE_HOME_DOTENV is set", () => {
+  const f = fixture();
+  writeFileSync(join(f.root, ".env"), "IGNORE_HOME_DOTENV=true\nLLM_FAST_MODEL=gemini-2.5-flash\n");
+  const prevFast = process.env.LLM_FAST_MODEL;
+  const prevIgnore = process.env.IGNORE_HOME_DOTENV;
+  process.env.LLM_FAST_MODEL = "gemini-3.8-flash";
+  process.env.IGNORE_HOME_DOTENV = "true";
+  try {
+    const cfg = loadConfig(undefined, f.root);
+    expect(cfg.llm.fastModel).toBe("gemini-2.5-flash");
+  } finally {
+    if (prevFast === undefined) delete process.env.LLM_FAST_MODEL;
+    else process.env.LLM_FAST_MODEL = prevFast;
+    if (prevIgnore === undefined) delete process.env.IGNORE_HOME_DOTENV;
+    else process.env.IGNORE_HOME_DOTENV = prevIgnore;
+  }
+});
+
+test("findSiblingMultiFormatFiles discovers versioned _export_<revision> files and send_file compiles requested HTML on demand", async () => {
+  const f = fixture();
+  const outputsDir = join(f.root, "outputs");
+  mkdirSync(outputsDir, { recursive: true });
+  const mdPath = join(outputsDir, "guide.md");
+  writeFileSync(mdPath, "# Guide\n\nContent for sibling test");
+  const deliverables = await ensureMultiFormatDeliverables({
+    markdownPath: mdPath,
+    outputDir: outputsDir,
+    baseFileStem: "guide",
+    requestedFormats: ["md", "html"],
+  });
+  expect(deliverables).toHaveLength(2);
+  const siblings = findSiblingMultiFormatFiles(mdPath, ["md", "html"]);
+  expect(siblings).toEqual(deliverables);
+
+  // Also test on-demand HTML compilation in handleSendFile when only .md exists
+  const notePath = join(outputsDir, "fresh_note.md");
+  writeFileSync(notePath, "# Fresh Note\n\nCompile me on demand");
+  const sendRes = await (f.pipeline.agent as any).handleSendFile({
+    senderId: "owner",
+    unpacked: { userText: "把刚才生成的 html 发给我" },
+    decision: {
+      intent: "send_file",
+      slots: { fileTarget: "recent_generated", requestedFormats: ["html"] },
+    },
+    recentTurns: [
+      {
+        id: 1,
+        sender_id: "owner",
+        user_text: "生成一份测试笔记",
+        intent: "research_and_write",
+        reply_text: "已生成",
+        model_used: "mock",
+        deposited_path: notePath,
+        created_at: new Date().toISOString(),
+      },
+    ],
+    recentArticles: [],
+  });
+  expect(sendRes.mediaDeliveries).toHaveLength(1);
+  expect(sendRes.mediaDeliveries[0].mediaPath).toMatch(/fresh_note_export_[a-f0-9]{16}\.html$/);
+});
+
+test("discoverGeneratedArtifacts discovers standalone outputs/ relative paths and expectedPaths", () => {
+  const f = fixture();
+  const generated = join(f.root, "generated");
+  const outputs = join(f.root, "outputs", "research_notes");
+  mkdirSync(generated, { recursive: true });
+  mkdirSync(outputs, { recursive: true });
+  const expectedImg = join(generated, "agy_img_2026_10_22_deadbeef.png");
+  const relDoc = join(outputs, "standalone_guide.md");
+  writeFileSync(expectedImg, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0]));
+  writeFileSync(relDoc, "# Standalone Guide");
+  const found = discoverGeneratedArtifacts(
+    generated,
+    "已生成文档 outputs/research_notes/standalone_guide.md",
+    Date.now() - 1000,
+    f.root,
+    [expectedImg]
+  );
+  expect(found.images).toEqual([expectedImg]);
+  expect(found.files).toEqual([relDoc]);
 });

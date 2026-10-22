@@ -664,11 +664,59 @@ export function findSiblingMultiFormatFiles(
   if (!primaryFilePath || !existsSync(primaryFilePath)) return [];
   const dir = resolve(primaryFilePath, "..");
   const stem = basename(primaryFilePath).replace(/\.[a-zA-Z0-9]+$/, "");
-  // Exclude internal "_sources" companion files if main guide exists
-  const cleanStem = stem.replace(/_sources$/, "");
+  // Exclude internal "_sources" companion files and "_export_<revision>" suffix if main guide exists
+  const cleanStem = stem
+    .replace(/_export_[a-f0-9]{16}$/i, "")
+    .replace(/_sources$/, "");
   const results: string[] = [];
 
+  let dirEntries: string[] | null = null;
+  const getDirEntries = (): string[] => {
+    if (dirEntries === null) {
+      try {
+        dirEntries = readdirSync(dir);
+      } catch {
+        dirEntries = [];
+      }
+    }
+    return dirEntries;
+  };
+
   for (const ext of requestedExts) {
+    if (ext !== "md") {
+      const exportPrefix = `${cleanStem}_export_`;
+      const exportSuffix = `.${ext}`;
+      const exportCandidates = getDirEntries()
+        .filter(
+          (name) =>
+            name.startsWith(exportPrefix) &&
+            name.endsWith(exportSuffix) &&
+            /^[a-f0-9]{16}$/i.test(
+              name.slice(exportPrefix.length, name.length - exportSuffix.length)
+            )
+        )
+        .map((name) => {
+          const fullPath = join(dir, name);
+          try {
+            const st = statSync(fullPath);
+            return st.isFile() && st.size > 0
+              ? { fullPath, mtimeMs: st.mtimeMs }
+              : null;
+          } catch {
+            return null;
+          }
+        })
+        .filter(
+          (item): item is { fullPath: string; mtimeMs: number } => item !== null
+        )
+        .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+      if (exportCandidates.length > 0) {
+        results.push(exportCandidates[0]!.fullPath);
+        continue;
+      }
+    }
+
     const candidate = join(dir, `${cleanStem}.${ext}`);
     if (existsSync(candidate) && statSync(candidate).isFile()) {
       results.push(candidate);
