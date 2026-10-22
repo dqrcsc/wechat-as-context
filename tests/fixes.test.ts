@@ -9,6 +9,7 @@ import { downloadAndDecryptCdnMedia } from "../src/clawbot/media.ts";
 import { discoverGeneratedArtifacts, setSubagentTestRunner } from "../src/agent/subagent_cli.ts";
 import { compileMarkdownToHtml, ensureMultiFormatDeliverables } from "../src/agent/doc_exporter.ts";
 import { findSiblingMultiFormatFiles } from "../src/vault/context.ts";
+import { formatLiveTaskStatusReport, TaskProgressReporter } from "../src/agent/progress.ts";
 import { callAgentLlm } from "../src/agent/llm.ts";
 import { extractGeneralWebArticle, normalizeExternalWebUrl } from "../src/extractor/web.ts";
 import { createHttpHandler } from "../src/http.ts";
@@ -421,4 +422,36 @@ test("discoverGeneratedArtifacts discovers standalone outputs/ relative paths an
   );
   expect(found.images).toEqual([expectedImg]);
   expect(found.files).toEqual([relDoc]);
+});
+
+test("TASK_HEARTBEAT_SECONDS configures custom heartbeat interval and supports 0 to disable periodic pushes", async () => {
+  const f = fixture();
+  writeFileSync(join(f.root, ".env"), "TASK_HEARTBEAT_SECONDS=60\n");
+  const cfg60 = loadConfig(undefined, f.root);
+  expect(cfg60.taskHeartbeatSeconds).toBe(60);
+
+  writeFileSync(join(f.root, ".env"), "TASK_HEARTBEAT_SECONDS=0\n");
+  const cfg0 = loadConfig(undefined, f.root);
+  expect(cfg0.taskHeartbeatSeconds).toBe(0);
+
+  f.db.enqueueAgentTask("hb-msg", "owner", JSON.stringify({
+    from_user_id: "owner",
+    item_list: [{ type: 1, text_item: { text: "测试进度心跳配置" } }],
+  }));
+  expect(formatLiveTaskStatusReport(f.db, "owner", 60)).toContain("每隔 60 秒");
+  expect(formatLiveTaskStatusReport(f.db, "owner", 0)).not.toContain("每隔");
+
+  const pushed: string[] = [];
+  const reporter = new TaskProgressReporter({
+    db: f.db,
+    messageKey: "hb-msg",
+    senderId: "owner",
+    heartbeatIntervalSeconds: 0,
+    sendProgressCallback: async (_to, text) => {
+      pushed.push(text);
+    },
+  });
+  await reporter.start("初始化", "已启动");
+  reporter.stop("已完成");
+  expect(pushed).toEqual(["已启动"]);
 });
