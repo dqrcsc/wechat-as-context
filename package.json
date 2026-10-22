@@ -1,0 +1,55 @@
+{
+  "name": "wechat-as-context",
+  "version": "0.2.0",
+  "description": "Bridge mobile WeChat Official Account articles & ideas into your Personal Knowledge Base & AI Agents (Codex, AntiGravity, Claude Code, OpenCode) via WeChat ClawBot iLink long-polling.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dqrcsc/wechat-as-context.git"
+  },
+  "homepage": "https://github.com/dqrcsc/wechat-as-context#readme",
+  "bugs": {
+    "url": "https://github.com/dqrcsc/wechat-as-context/issues"
+  },
+  "keywords": [
+    "wechat",
+    "clawbot",
+    "ilink",
+    "obsidian",
+    "personal-knowledge-base",
+    "second-brain",
+    "ai-agent",
+    "codex",
+    "antigravity",
+    "claude-code",
+    "opencode",
+    "markdown"
+  ],
+  "engines": {
+    "bun": ">=1.1.0"
+  },
+  "bin": {
+    "wx-ctx": "./src/cli.ts"
+  },
+  "scripts": {
+    "setup": "bun run src/cli.ts init",
+    "init": "bun run src/cli.ts init",
+    "config": "bun run src/cli.ts config",
+    "scan-cli": "bun run src/cli.ts scan-cli",
+    "login": "bun run src/cli.ts login",
+    "doctor": "bun run src/cli.ts doctor",
+    "push": "bun run src/cli.ts push",
+    "start": "bun run src/server.ts",
+    "dev": "bun --watch run src/server.ts",
+    "cli": "bun run src/cli.ts",
+    "typecheck": "bun x tsc -p tsconfig.json --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  }
+}

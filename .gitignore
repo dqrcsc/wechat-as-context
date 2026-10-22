@@ -1,0 +1,14 @@
+/node_modules/
+/data/
+/vault/
+.env
+.env.*
+!.env.example
+*.log
+*.db
+*.db-wal
+*.db-shm
+.DS_Store
+/coverage/
+/dist/
+*.tgz
