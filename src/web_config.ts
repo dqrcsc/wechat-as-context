@@ -70,6 +70,7 @@ export interface ConfigApiResponse {
     wechatArticlesDir: string;
     ideasSeedsDir: string;
     annotationWaitSeconds: number;
+    taskHeartbeatSeconds: number;
     vaultLayout: AppConfig["vaultLayout"];
     llm: {
       provider: string;
@@ -152,6 +153,7 @@ export function buildConfigApiPayload(
       wechatArticlesDir: freshConfig.wechatArticlesDir,
       ideasSeedsDir: freshConfig.ideasSeedsDir,
       annotationWaitSeconds: freshConfig.annotationWaitSeconds,
+      taskHeartbeatSeconds: freshConfig.taskHeartbeatSeconds ?? 25,
       vaultLayout: freshConfig.vaultLayout,
       llm: {
         provider: freshConfig.llm.provider || "custom",
@@ -2829,6 +2831,13 @@ export function renderConfigPageHtml(): string {
     }
 
     const ADVANCED_ENV_PRESETS = [
+      {
+        key: 'TASK_HEARTBEAT_SECONDS',
+        defaultVal: '25',
+        shortLabel: '💓 长任务进度同步秒数',
+        desc: '场景5/6 · 生图与深度研究等长任务向微信推送心跳进度的间隔秒数（默认 25 秒，填 0 关闭定时推送）',
+        placeholder: '默认 25（单位：秒，填 0 关闭自动进度推送）'
+      },
       {
         key: 'ANNOTATION_WAIT_SECONDS',
         defaultVal: '10',

@@ -130,7 +130,11 @@ export class WeChatAgentRuntime {
 
     // Fast-path for live task progress / status queries ("进度" / "状态" / "还在跑吗")
     if (isTaskStatusQuery(unpacked.userText) && unpacked.mediaItems.length === 0) {
-      const statusText = formatLiveTaskStatusReport(this.db, senderId);
+      const statusText = formatLiveTaskStatusReport(
+        this.db,
+        senderId,
+        this.config.taskHeartbeatSeconds ?? 25
+      );
       const msgHash = createHash("sha256").update(messageKey).digest("hex");
       this.db.queueReply(`message_${msgHash}`, senderId, statusText);
       return {
@@ -595,6 +599,7 @@ ${vaultCtx.matchedNotes.map((m) => `${m.wikiLink}: ${m.excerpt}`).join("\n\n") |
             senderId: ctx.senderId,
             taskTitle: "知识库深度推演",
             sendProgressCallback: ctx.sendProgressCallback,
+            heartbeatIntervalSeconds: this.config.taskHeartbeatSeconds ?? 25,
           })
         : null;
 
@@ -859,17 +864,21 @@ ${textSnippets.join("\n\n")}`,
       ctx.decision.slots.coreContent?.trim() ||
       ctx.unpacked.userText.trim();
 
+    const hbSec = this.config.taskHeartbeatSeconds ?? 25;
     const progress = new TaskProgressReporter({
       db: this.db,
       messageKey: ctx.messageKey,
       senderId: ctx.senderId,
       taskTitle: "视觉生图任务",
       sendProgressCallback: ctx.sendProgressCallback,
+      heartbeatIntervalSeconds: hbSec,
     });
 
+    const hbHint =
+      hbSec > 0 ? `，处理期间每 ${hbSec} 秒会同步一次进度` : "";
     await progress.start(
       "正在调用视觉生成引擎制作图片",
-      `🎨 已收到生图请求，正在调用视觉生成引擎制作图片，处理期间每 25 秒会同步一次进度，完成后立即发给你…`
+      `🎨 已收到生图请求，正在调用视觉生成引擎制作图片${hbHint}，完成后立即发给你…`
     );
 
     try {
@@ -989,12 +998,14 @@ ${
         ? ctx.recentArticle
         : null);
 
+    const hbSec = this.config.taskHeartbeatSeconds ?? 25;
     const progress = new TaskProgressReporter({
       db: this.db,
       messageKey: ctx.messageKey,
       senderId: ctx.senderId,
       taskTitle: isDocGen ? "深度研究与多格式文档生成" : "子智能体复杂任务",
       sendProgressCallback: ctx.sendProgressCallback,
+      heartbeatIntervalSeconds: hbSec,
     });
 
     try {
@@ -1034,14 +1045,18 @@ ${
         }
       }
 
-      // Send immediate progress notice to WeChat and start periodic 25s heartbeat timer
+      // Send immediate progress notice to WeChat and start periodic heartbeat timer
       const fmtLabel =
         requestedFormats.length > 0
           ? `并生成【${requestedFormats.map((f) => f.toUpperCase()).join(" / ")}】文件`
           : "";
+      const hbNotice =
+        hbSec > 0
+          ? `，处理期间每 ${hbSec} 秒会自动回传一次进度（也可随时发「进度」查看状态）`
+          : `（可随时发「进度」查看状态）`;
       await progress.start(
         "阶段 1/4：正在检索知识库上下文与外部资料",
-        `⏳ 已收到复合任务：正在检索外部资料与你的知识库上下文${fmtLabel}，处理期间每 25 秒会自动回传一次进度（也可随时发「进度」查看状态）…`
+        `⏳ 已收到复合任务：正在检索外部资料与你的知识库上下文${fmtLabel}${hbNotice}…`
       );
 
       const articleContext = targetArticle

@@ -8,6 +8,7 @@ export interface TaskProgressOptions {
   taskTitle?: string;
   sendProgressCallback?: (senderId: string, text: string) => Promise<void>;
   heartbeatIntervalMs?: number;
+  heartbeatIntervalSeconds?: number;
 }
 
 /**
@@ -26,7 +27,8 @@ export function isTaskStatusQuery(userText: string): boolean {
  */
 export function formatLiveTaskStatusReport(
   db: ContextDatabase,
-  senderId: string
+  senderId: string,
+  heartbeatSeconds = 25
 ): string {
   const activeTasks = db.getActiveAgentTasks(senderId);
   const nowMs = Date.now();
@@ -69,7 +71,13 @@ export function formatLiveTaskStatusReport(
       );
     }
 
-    lines.push(`\n💡 系统每隔 25 秒会自动向你推送一次心跳进度，完成后将第一时间回传结果与文件。`);
+    if (heartbeatSeconds > 0) {
+      lines.push(
+        `\n💡 系统每隔 ${heartbeatSeconds} 秒会自动向你推送一次心跳进度，完成后将第一时间回传结果与文件。`
+      );
+    } else {
+      lines.push(`\n💡 任务正在后台持续执行中，完成后将第一时间回传结果与文件。`);
+    }
     return lines.join("\n");
   }
 
@@ -142,9 +150,20 @@ export class TaskProgressReporter {
     this.sendProgressCallback = options.sendProgressCallback;
 
     const envMs = Number(process.env.TASK_HEARTBEAT_MS || "");
+    const envSecRaw = process.env.TASK_HEARTBEAT_SECONDS;
+    const envSec =
+      envSecRaw !== undefined && envSecRaw !== "" ? Number(envSecRaw) : NaN;
+    const configuredMs =
+      options.heartbeatIntervalMs !== undefined
+        ? options.heartbeatIntervalMs
+        : options.heartbeatIntervalSeconds !== undefined
+        ? options.heartbeatIntervalSeconds * 1000
+        : Number.isFinite(envSec) && envSec >= 0
+        ? envSec * 1000
+        : 25_000;
+
     this.heartbeatIntervalMs =
-      options.heartbeatIntervalMs ??
-      (Number.isFinite(envMs) && envMs >= 100 ? envMs : 25_000);
+      Number.isFinite(envMs) && envMs >= 100 ? envMs : configuredMs;
   }
 
   public async start(
@@ -161,7 +180,7 @@ export class TaskProgressReporter {
       );
     }
 
-    if (!this.timer) {
+    if (!this.timer && this.heartbeatIntervalMs > 0) {
       this.timer = setInterval(() => {
         if (this.stopped) return;
         this.emitPeriodicHeartbeat().catch(() => {});

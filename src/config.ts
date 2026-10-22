@@ -254,6 +254,7 @@ export interface AppConfig {
   };
   port: number;
   annotationWaitSeconds: number;
+  taskHeartbeatSeconds?: number;
   allowJinaFallback?: boolean;
   notifyWebhookUrl?: string;
   notifyWebhookSecret?: string;
@@ -854,6 +855,12 @@ export function loadConfig(
       Number(get("ANNOTATION_WAIT_SECONDS", "10")) >= 0
         ? Number(get("ANNOTATION_WAIT_SECONDS", "10"))
         : 10,
+    taskHeartbeatSeconds:
+      get("TASK_HEARTBEAT_SECONDS", "") !== "" &&
+      Number.isFinite(Number(get("TASK_HEARTBEAT_SECONDS", "25"))) &&
+      Number(get("TASK_HEARTBEAT_SECONDS", "25")) >= 0
+        ? Number(get("TASK_HEARTBEAT_SECONDS", "25"))
+        : 25,
     notifyWebhookUrl: get("NOTIFY_WEBHOOK_URL", "").trim(),
     notifyWebhookSecret: get("NOTIFY_WEBHOOK_SECRET", "").trim(),
     notifyWebhookKeyword: get("NOTIFY_WEBHOOK_KEYWORD", "").trim(),
