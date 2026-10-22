@@ -36,16 +36,23 @@ import { createHttpHandler } from "../src/http.ts";
 
 const originalFetch = globalThis.fetch;
 const databases: ContextDatabase[] = [];
+const CLI_ENV_KEYS = ["AGY_BIN", "CODEX_BIN", "OPENCODE_BIN", "CLAUDE_BIN", "GEMINI_BIN"] as const;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   setSubagentTestRunner(null);
+  for (const key of CLI_ENV_KEYS) {
+    delete process.env[key];
+  }
   for (const db of databases.splice(0)) {
     db.db.close();
   }
 });
 
 function createAgentFixture(withLlmKey = true) {
+  for (const key of CLI_ENV_KEYS) {
+    process.env[key] = process.execPath;
+  }
   const root = mkdtempSync(join(tmpdir(), "wx-agent-upgrade-"));
   mkdirSync(join(root, "00_home"), { recursive: true });
   mkdirSync(join(root, "01_inputs", "inbox"), { recursive: true });
