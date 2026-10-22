@@ -1,11 +1,13 @@
 # WeChat as Context (`wechat-as-context`)
 
 [![Runtime: Bun >= 1.1](https://img.shields.io/badge/Runtime-Bun_%E2%89%A51.1-f472b6?logo=bun&logoColor=white)](https://bun.sh)
+[![Pure BYOK & BYOCLI](https://img.shields.io/badge/Pure_BYOK_%26_BYOCLI-Zero_Model_Lock--in-4f46e5)](./src/config.ts)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Protocol: WeChat ClawBot iLink](https://img.shields.io/badge/WeChat-ClawBot_iLink-07c160?logo=wechat&logoColor=white)](./docs/ilink_protocol_and_extension_guide.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-> **把手机微信里的「高频阅读、语音批注与随时闪念」，变成个人知识库与桌面 AI 智能体（Codex / AntiGravity / Claude Code / OpenCode）可随时调用的活上下文（Living Context）。**
+> **把手机微信里的「高频阅读、语音批注与随时闪念」，变成个人知识库与桌面 AI 智能体（Codex / AntiGravity / Claude Code / OpenCode）可随时调用的活上下文（Living Context）。**  
+> **坚持「零内置模型锁定」的纯粹开放 BYOK（Bring Your Own Key）与 BYOCLI（Bring Your Own CLI）设计**——只要你手头拥有任意大模型平台的 API Key 或本机已安装的 AI Agent CLI，即可一键打通手机微信与本地第二大脑。
 
 `wechat-as-context` 不是又一个孤立的「稍后读」收藏夹。它通过微信官方 **ClawBot iLink 长轮询协议**，将你个人微信置顶的 **`微信ClawBot [AI]`** 变成连接手机端与本地电脑的**双向智能体上下文网关**：
 
@@ -14,9 +16,22 @@
 
 ---
 
+**v0.2.0 升级与使用边界声明**：
+- **BYOK 连通性验证**：配置密钥或选择模型预设不代表该模型的长文本、多模态视觉或实时联网能力已在你的账户下开通；首次配置后请在 Web 配置工作台（`bun run config`）点击 **「⚡ 测试模型连通性」** 做一次真实请求验证。
+- **双协议能力差异**：实时联网搜索（Google Search Grounding）原生支持 Google Gemini 协议（`/v1beta/models/*:generateContent`）或具备内置联网能力的本地 CLI（如 `agy` / `codex` / `opencode` / `claude`）；普通纯文本 OpenAI 兼容端点默认基于本地知识库与抓取正文回答。
+- **多模态图片与 PDF 解析**：微信发送图片/截图解析要求所配置的模型支持 Vision 输入（如 `gemini-2.5-flash`、`gpt-4o`、`qwen-vl-max`、`glm-4v-plus`）或启用支持读图的本机 CLI；纯文本模型（如 `deepseek-chat`）仅处理文本与路径归档。
+- **本机直连与数据隐私边界**：所有 API Key、微信 `bot_token` 与 SQLite 状态库均 100% 存储在你的本机（`.env` 与 `data/`），本项目**不提供任何第三方中转服务器**。你转发的链接正文、语音转写文本、图片或关联的本地笔记片段会随请求直接发往你所配置的模型 API Endpoint 或本机 CLI 处理。
+
+---
+
 ## 📑 目录
 
 - [核心特性](#-核心特性)
+- [纯粹开放 BYOK / BYOCLI 理念与多模型协议说明](#-纯粹开放-byok--byocli-理念与多模型协议说明)
+  - [核心设计原则：无内置绑定，100% 释放自有 API 与 CLI 潜力](#1-核心设计原则无内置绑定100-释放自有-api-与-cli-潜力)
+  - [双协议自适应通信引擎（Gemini 原生协议 + OpenAI 兼容协议）](#2-双协议自适应通信引擎gemini-原生协议--openai-兼容协议)
+  - [主流大模型服务商 BYOK 协议与能力速查表](#3-主流大模型服务商-byok-协议与能力速查表)
+  - [本机 AI Agent CLI (BYOCLI) 路由与能力速查表](#4-本机-ai-agent-cli-byocli-路由与能力速查表)
 - [系统架构与工作流](#-系统架构与工作流)
 - [三种知识库存储模式](#-三种知识库存储模式)
 - [5 分钟快速开始](#-5-分钟快速开始)
@@ -51,6 +66,77 @@
   - **出站**：支持将知识库笔记或即时生成的报告一键渲染导出为 **Markdown (`.md`) + 现代排版网页 (`.html`) + 印刷级矢量 PDF (`.pdf`)**，加密上传后直接发回你的手机微信聊天框。
 - **⏳ 长耗时任务实时心跳播报与并发进度查询**
   当本机 Agent 执行耗时较长的深度调研或长文生成时，微信端自动维护「对方正在输入...」状态（`sendtyping`），每隔固定周期主动推送阶段性进展心跳，且支持随时发送 *“还在跑吗”*、*“进度”* 立即查看已运行耗时与当前阶段，绝不阻塞新消息。
+
+---
+
+## 🔑 纯粹开放 BYOK / BYOCLI 理念与多模型协议说明
+
+### 1. 核心设计原则：无内置绑定，100% 释放自有 API 与 CLI 潜力
+
+在实际科研、开发与知识管理中，每位用户手头的模型订阅各不相同：
+- 有的用户在 **DeepSeek**、**阿里云百炼 (DashScope)**、**硅基流动 (SiliconFlow)**、**Moonshot (Kimi)** 或 **智谱 GLM** 拥有高性价比的国产大模型 API Key；
+- 有的用户在 **Google AI Studio (Gemini)**、**OpenAI**、**OpenRouter**、**Anthropic** 或 **OpenCode Go / Zen** 拥有多模态与海外旗舰模型额度；
+- 有的开发者已经在桌面端安装并登录了 **AntiGravity (`agy`)**、**Codex (`codex`)**、**Claude Code (`claude`)**、**OpenCode (`opencode`)** 等本地 AI Agent CLI；
+- 还有的团队在本地或内网部署了 **OneAPI / NewAPI / LiteLLM / Ollama / vLLM** 私有聚合网关。
+
+因此，本项目在 [`src/config.ts`](./src/config.ts) 与 [`src/agent/llm.ts`](./src/agent/llm.ts) 中确立了四条核心 **BYOK (Bring Your Own Key) & BYOCLI (Bring Your Own CLI)** 准则：
+
+1. **零供应商锁定（Zero Vendor Lock-in）**：内置 11 组主流服务商连接模板与 6 大本地 CLI 探针，仅预填官方通信协议与默认 Base URL，用户可随时自由切换、修改 Base URL 或手动输入任意私有/微调模型 ID。
+2. **本机已有密钥自动探测复用**：若你的系统环境变量或 `~/.env` 中已配置过 `GEMINI_API_KEY`、`DEEPSEEK_API_KEY`、`OPENCODE_API_KEY`、`OPENAI_API_KEY`、`OPENROUTER_API_KEY` 等，启动时会自动检测并挂载，免去重复粘贴。
+3. **跨服务商 Fast / Pro 异构模型自由混搭（`<providerId>::<modelId>` 协议）**：支持在 `LLM_PROVIDERS_CONFIG` 中同时保存多家服务商的独立 API Key 快照，并通过 `<providerId>::<modelId>` 语法将不同厂商组合进同一工作流——例如：
+   - **轻量路由与日常初筛 (`LLM_FAST_MODEL`)**：配置 `deepseek::deepseek-chat` 或 `gemini::gemini-2.5-flash`，实现毫秒级低成本意图识别与文章初筛；
+   - **深度推理与跨笔记综合 (`LLM_PRO_MODEL`)**：配置 `gemini::gemini-2.5-pro`、`deepseek::deepseek-reasoner` 或 `openrouter::anthropic/claude-3.7-sonnet`，专门处理高复杂度知识库推演。
+4. **本机直连零中转（Zero-Middleware）**：所有 API Key 均仅保存在本机 `.env` 中，请求由本机 Bun 运行时直接发往你配置的 API Endpoint，绝不经过任何第三方中转服务器。
+
+---
+
+### 2. 双协议自适应通信引擎（Gemini 原生协议 + OpenAI 兼容协议）
+
+底层模型调用引擎（[`src/agent/llm.ts`](./src/agent/llm.ts)）同时实现了 **OpenAI 兼容协议** 与 **Google Gemini 原生协议**，并根据任务需求自动切换与降级：
+
+- **协议 A：OpenAI 兼容协议 (`POST {baseUrl}/chat/completions`)**
+  - **适用范围**：全部 11 家内置服务商预设（含 Gemini 的 `/v1beta/openai` 兼容层、DeepSeek、OpenCode Go、OpenAI、OpenRouter、百炼、硅基流动、Kimi、智谱、Anthropic 兼容层及自定义 OneAPI / Ollama 网关）。
+  - **结构化 JSON 路由 (`jsonMode`)**：在意图识别（[`src/agent/router.ts`](./src/agent/router.ts)）阶段自动注入 `response_format: { type: "json_object" }`，并内置 `parseJsonSafe` 自动剥离部分模型包裹的 ```` ```json ... ``` ```` 代码块。
+  - **多模态图像理解 (`images`)**：当用户在微信发送图片或截图时，自动将解密后的本地图片编码为标准 OpenAI Vision `image_url`（`data:image/jpeg;base64,...`）多模态消息负载。
+- **协议 B：Google Gemini 原生 Grounding 协议 (`POST /v1beta/models/{model}:generateContent`)**
+  - **适用范围**：当检测到当前端点为 Google Gemini（`providerId === "gemini"` 或 `generativelanguage.googleapis.com`）且任务需要实时外部信息（`enableSearch: true`）时自动激活。
+  - **原生联网搜索 (`google_search`)**：自动剥离 `/openai` 后缀切换至 Gemini 原生 `generateContent` 接口，挂载 `tools: [{ google_search: {} }]`，并从响应的 `groundingMetadata` 中提取真实搜索词（`webSearchQueries`）与参考网页标题及链接（`groundingChunks`），附加在微信回复末尾；若原生联网接口受限报错，会自动无缝回退至标准对话接口。
+
+---
+
+### 3. 主流大模型服务商 BYOK 协议与能力速查表
+
+下表整理了内置 11 大服务商模板（详见 [`LLM_PROVIDER_PRESETS`](./src/config.ts)）的接口协议、默认 Base URL、自动识别的环境变量名、推荐模型示例及支持能力范围：
+
+| 服务商 ID (`LLM_PROVIDER`) | 接口通信协议 | 默认 API Base URL | 专属环境变量名（自动探测） | Fast / Pro 模型填写示例 | 文章初筛 / 知识库问答 / 意图路由 | 微信图片/截图多模态解析 | 原生实时联网搜索 (Grounding) |
+| :--- | :--- | :--- | :--- | :--- | :---: | :---: | :---: |
+| **`gemini`** (Google Gemini) | OpenAI 兼容 + Gemini 原生双协议 | `https://generativelanguage.googleapis.com/v1beta/openai` | `GEMINI_API_KEY` / `GOOGLE_API_KEY` | `gemini-2.5-flash` / `gemini-2.5-pro` | ✅ 支持 | ✅ 原生多模态 | ✅ 原生 `google_search` |
+| **`deepseek`** (深度求索) | OpenAI 兼容协议 | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` | `deepseek-chat` / `deepseek-reasoner` | ✅ 支持 | ⚠️ 纯文本模型不支持看图 | 需配合本机 CLI |
+| **`opencode`** (OpenCode Go / Zen) | OpenAI 兼容协议 | `https://opencode.ai/zen/v1` | `OPENCODE_API_KEY` / `OPENCODE_GO_API_KEY` | `glm-5.1` / `claude-sonnet-4-5` / `kimi-k2.5` | ✅ 支持 | 视所选模型而定 | 视所选模型/CLI而定 |
+| **`openai`** (OpenAI 官方) | OpenAI 兼容协议 | `https://api.openai.com/v1` | `OPENAI_API_KEY` | `gpt-4o-mini` / `gpt-4o` / `gpt-4.1` | ✅ 支持 | ✅ 视觉模型支持 | 需配合本机 CLI |
+| **`openrouter`** (OpenRouter) | OpenAI 兼容协议 | `https://openrouter.ai/api/v1` | `OPENROUTER_API_KEY` | `google/gemini-2.5-flash` / `anthropic/claude-3.7-sonnet` | ✅ 支持 | ✅ 选视觉模型支持 | 选 `:online` 模型或配合 CLI |
+| **`dashscope`** (阿里云百炼) | OpenAI 兼容协议 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `DASHSCOPE_API_KEY` | `qwen-plus` / `qwen-max` / `qwq-plus` | ✅ 支持 | ✅ 选 `qwen-vl-*` 支持 | 需配合本机 CLI |
+| **`siliconflow`** (硅基流动) | OpenAI 兼容协议 | `https://api.siliconflow.cn/v1` | `SILICONFLOW_API_KEY` | `deepseek-ai/DeepSeek-V3` / `deepseek-ai/DeepSeek-R1` | ✅ 支持 | ✅ 选 `Qwen2.5-VL` 支持 | 需配合本机 CLI |
+| **`moonshot`** (Kimi 开放平台) | OpenAI 兼容协议 | `https://api.moonshot.cn/v1` | `MOONSHOT_API_KEY` | `kimi-k2-0711-preview` / `kimi-thinking-preview` | ✅ 支持 | ✅ 选 Vision 模型支持 | 需配合本机 CLI |
+| **`zhipu`** (智谱 BigModel) | OpenAI 兼容协议 | `https://open.bigmodel.cn/api/paas/v4` | `ZHIPU_API_KEY` | `glm-4-flash` / `glm-4-plus` | ✅ 支持 | ✅ 选 `glm-4v-*` 支持 | 需配合本机 CLI |
+| **`anthropic`** (Claude 兼容层) | OpenAI 兼容协议 | `https://api.anthropic.com/v1` | `ANTHROPIC_API_KEY` | `claude-3-5-haiku-latest` / `claude-3-7-sonnet-latest` | ✅ 支持 | ✅ 原生支持 Vision | 需配合本机 CLI |
+| **`custom`** (OneAPI / Ollama 等) | OpenAI 兼容协议 | 自定义（如 `http://localhost:11434/v1`） | `LLM_API_KEY` | 填写网关或本地部署的任意模型名 | ✅ 支持 | 视具体模型而定 | 视具体网关而定 |
+
+---
+
+### 4. 本机 AI Agent CLI (BYOCLI) 路由与能力速查表
+
+除了直接调用 HTTP LLM API，本项目还独创了 **Tier 1 本机 AI Agent CLI 路由链**（[`src/agent/subagent_cli.ts`](./src/agent/subagent_cli.ts)）。只要你本机安装了以下任一 CLI 工具，即可在 `CLI_ROUTING_CHAIN` 中按优先级组合调用，一旦首选 CLI 超时或离线，自动平滑顺延至链条中的下一个 CLI：
+
+| CLI 标识 (`id`) | 工具名称 | 默认探测命令 | 路径覆盖环境变量 | 核心能力与适用场景 |
+| :--- | :--- | :--- | :--- | :--- |
+| **`agy`** | Google AntiGravity CLI | `agy` | `AGY_BIN` | 支持子智能体生图 (`image-generator`)、跨文件深度推理、实时联网检索与多模态读图 |
+| **`codex`** | OpenAI Codex CLI | `codex` (`exec --skip-git-repo-check`) | `CODEX_BIN` | 支持本地知识库批量巡检、跨目录笔记重构、脚本执行与自动化归档 |
+| **`opencode`** | OpenCode CLI | `opencode` (`run --format json`) | `OPENCODE_BIN` | 支持结构化 JSON 事件流输出、长程知识库分析与多工具协同 |
+| **`claude`** | Anthropic Claude Code CLI | `claude` (`-p --permission-mode bypassPermissions`) | `CLAUDE_BIN` | 擅长深度文章批判拆解、长文写作与复杂结构化文档合成 |
+| **`gemini`** | Google Gemini CLI | `gemini` (`-p`) | `GEMINI_BIN` | 轻量快速的本地命令行问答与搜索增强 |
+| **`workbuddy`** | WorkBuddy / CodeBuddy CLI | `workbuddy` / `codebuddy` / `cbc` | `WORKBUDDY_BIN` | 兼容桌面端 WorkBuddy.app 内置 CLI 通道与本地工作区分析 |
+| **自定义 CLI** | 任意命令行 Agent (`CUSTOM_CLI_AGENTS`) | 用户自定义可执行文件路径 | 在 Web 配置台添加 | 支持通过 `{{prompt}}`、`{{model}}`、`{{workdir}}` 模板占位符接入任意自研 CLI |
 
 ---
 
