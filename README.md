@@ -16,7 +16,7 @@
 
 ---
 
-**v0.2.0 升级与使用边界声明**：
+**v0.2.1 升级与使用边界声明**：
 - **本轮可靠性修复与升级**：见 [修复说明与验收](./docs/reliability-fixes.md)。升级前先停止旧 worker，避免没有 Agent 队列锁的旧版与新版同时运行。
 - **BYOK 连通性验证**：配置密钥或选择模型预设不代表该模型的长文本、多模态视觉或实时联网能力已在你的账户下开通；首次配置后请在 Web 配置工作台（`bun run config`）点击 **「⚡ 测试模型连通性」** 做一次真实请求验证。
 - **双协议能力差异**：实时联网搜索（Google Search Grounding）原生支持 Google Gemini 协议（`/v1beta/models/*:generateContent`）或具备内置联网能力的本地 CLI（如 `agy` / `codex` / `opencode` / `claude`）；普通纯文本 OpenAI 兼容端点默认基于本地知识库与抓取正文回答，不代表实际执行了联网检索。
