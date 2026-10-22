@@ -22,6 +22,7 @@ import { documentLevel } from "./storage.ts";
 import { WeChatAgentRuntime } from "./agent/runtime.ts";
 import { formatLiveTaskStatusReport, isTaskStatusQuery } from "./agent/progress.ts";
 import { DeliverableFormat, ensureMultiFormatDeliverables } from "./agent/doc_exporter.ts";
+import { detectExplicitCliBackend } from "./agent/router.ts";
 
 export interface PushToWeChatOptions {
   text?: string;
@@ -67,7 +68,6 @@ export class WeChatContextPipeline {
 
   constructor(public config: AppConfig, public db: ContextDatabase) {
     this.clawbot = new WeChatClawBotClient(db);
-    this.db.recoverStuckAgentTasks();
     this.agent = new WeChatAgentRuntime(
       config,
       db,
@@ -158,7 +158,8 @@ export class WeChatContextPipeline {
                       record.url,
                       record.title,
                       record.author,
-                      record.digest
+                      record.digest,
+                      { allowJinaFallback: this.config.allowJinaFallback }
                     );
 
             this.db.updateArticle(id, {
@@ -428,6 +429,7 @@ export class WeChatContextPipeline {
     if (unpacked.refContext) return true;
     if (unpacked.urls.some((u) => !isWeChatArticleUrl(u))) return true;
     const t = unpacked.userText.trim();
+    if (detectExplicitCliBackend(t)) return true;
     if (
       /^(?:\/help|help|帮助|功能|菜单|问|查询|检索|搜索|查一下|搜一下|找一下|ask|\?|待办|备忘|速记|提醒我|todo|inbox)/i.test(
         t
@@ -445,62 +447,70 @@ export class WeChatContextPipeline {
     this.refreshConfigFromDiskIfChanged();
     let processedCount = 0;
     try {
-      const tasks = this.db.getPendingAgentTasks(20);
-      for (const task of tasks) {
-        const wasRecovered = task.stage.includes("检测到中断");
-        this.db.updateAgentTaskStatus(
-          task.id,
-          "processing",
-          "",
-          wasRecovered ? "已从中断状态恢复，正在重新执行" : "已开始处理任务"
-        );
-        if (wasRecovered && this.clawbot.isConfigured()) {
-          await this.clawbot
-            .sendTextMessage(
-              task.sender_id,
-              `🔄 检测到上次长任务 (#${task.id}) 因后台重启曾短暂中断，现已自动恢复并继续为你执行…`,
-              `recover_${task.id}_${Date.now()}`
-            )
-            .catch(() => {});
-        }
-        try {
-          const rawMessage = JSON.parse(task.raw_payload) as ClawBotMessage;
-          await this.clawbot.withTypingIndicator(task.sender_id, async () => {
-            await this.agent.processClawBotMessage({
-              messageKey: task.message_key,
-              senderId: task.sender_id,
-              rawMessage,
-            });
-          });
-          this.db.updateAgentTaskStatus(task.id, "done", "", "任务已完成并回传微信");
-          processedCount++;
-          if (this.clawbot.isConfigured()) {
-            await this.flushReplies().catch(() => {});
-          }
-        } catch (err: any) {
-          const errMsg = err?.message || String(err);
+      return await this.db.withLock("agent_queue", async () => {
+        // Only the exclusive worker may recover interrupted tasks. Constructors and
+        // read commands must never reset work owned by another live process.
+        this.db.recoverStuckAgentTasks();
+        const tasks = this.db.getPendingAgentTasks(20);
+        for (const task of tasks) {
+          const wasRecovered = task.stage.includes("检测到中断");
           this.db.updateAgentTaskStatus(
             task.id,
-            "failed",
-            errMsg,
-            `执行异常终止: ${errMsg.slice(0, 80)}`
+            "processing",
+            "",
+            wasRecovered ? "已从中断状态恢复，正在重新执行" : "已开始处理任务"
           );
-          const msgHash = createHash("sha256").update(task.message_key).digest("hex");
-          this.db.queueReply(
-            `message_${msgHash}`,
-            task.sender_id,
-            `⚠️ 长任务 (#${task.id}) 执行异常终止：\n${errMsg.slice(0, 240)}\n\n💡 你可以直接回复「按我之前的需求重新生成」进行重试。`
-          );
-          if (this.clawbot.isConfigured()) {
-            await this.flushReplies().catch(() => {});
+          if (wasRecovered && this.clawbot.isConfigured()) {
+            await this.clawbot
+              .sendTextMessage(
+                task.sender_id,
+                `🔄 检测到上次长任务 (#${task.id}) 因后台重启曾短暂中断，现已自动恢复并继续为你执行…`,
+                `recover_${task.id}_${Date.now()}`
+              )
+              .catch(() => {});
           }
-          console.error(`[AgentQueue] Task #${task.id} (${task.message_key}) failed:`, errMsg);
+          try {
+            const rawMessage = JSON.parse(task.raw_payload) as ClawBotMessage;
+            await this.clawbot.withTypingIndicator(task.sender_id, async () => {
+              await this.agent.processClawBotMessage({
+                messageKey: task.message_key,
+                senderId: task.sender_id,
+                rawMessage,
+              });
+            });
+            this.db.updateAgentTaskStatus(task.id, "done", "", "任务执行完成，回执已入队");
+            processedCount++;
+            if (this.clawbot.isConfigured()) {
+              await this.flushReplies().catch(() => {});
+            }
+          } catch (err: any) {
+            const errMsg = err?.message || String(err);
+            this.db.updateAgentTaskStatus(
+              task.id,
+              "failed",
+              errMsg,
+              `执行异常终止: ${errMsg.slice(0, 80)}`
+            );
+            const msgHash = createHash("sha256").update(task.message_key).digest("hex");
+            this.db.queueReply(
+              `message_${msgHash}`,
+              task.sender_id,
+              `⚠️ 长任务 (#${task.id}) 执行异常终止：\n${errMsg.slice(0, 240)}\n\n💡 你可以直接回复「按我之前的需求重新生成」进行重试。`
+            );
+            if (this.clawbot.isConfigured()) {
+              await this.flushReplies().catch(() => {});
+            }
+            console.error(`[AgentQueue] Task #${task.id} (${task.message_key}) failed:`, errMsg);
+          }
         }
-      }
+        return processedCount;
+      });
+    } catch (err: any) {
+      if (err?.message === "Operation busy: agent_queue") return 0;
+      throw err;
     } finally {
       this.isDrainingAgents = false;
     }
-    return processedCount;
   }
 
   public async flushReplies(): Promise<void> {

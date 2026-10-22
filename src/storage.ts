@@ -3,7 +3,7 @@ import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
 // Publish a complete file atomically, without replacing even a concurrent writer's document.
-export function writeNewFile(path: string, content: string): boolean {
+export function writeNewFile(path: string, content: string | Uint8Array): boolean {
   mkdirSync(dirname(path), { recursive: true });
   const temporary = `${path}.${randomUUID()}.tmp`;
   const fd = openSync(temporary, "wx", 0o600);

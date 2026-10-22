@@ -46,6 +46,8 @@ bun run {{PROJECT_ROOT}}/src/cli.ts ingest "<https://mp.weixin.qq.com/s/...>" --
 
 后台运行入口为 `src/server.ts`（可通过 `bash scripts/install_daemon.sh` 安装常驻守护服务）。守护进程与 CLI 共用数据库；遇到 `Operation busy: sync` 表示后台正在同步，不要启动更多实例争抢。
 
+Agent 队列另由 `agent_queue` 跨进程锁串行恢复和消费；`list/show/doctor` 不重置进行中的任务。升级前先停止旧 worker，再启动新版，不能与尚未使用该锁的旧版混跑。安装器复制并渲染本 Skill，项目更新后已安装副本不会自动更新。
+
 ## 主动推送信息与文件到手机微信（Push）
 
 当用户在 Codex 或 Antigravity 中明确要求“把这个结论/信息发到我微信上”“把这篇笔记/报告/图片推送到微信”“生成 MD/HTML/PDF 发我微信”时，使用 `push`（别名 `send`），**该功能完全独立于知识库**：
@@ -79,7 +81,10 @@ bun run {{PROJECT_ROOT}}/src/cli.ts push --article <id> [--with-file] [--formats
 - 消息批次与下一游标在同一 SQLite 事务中保存，随后处理持久收件箱。处理失败的消息保留并在后续同步重试，不能承诺服务端永久保留消息或任何情况下绝不丢失。
 - 微信回执使用独立持久发送队列，最多自动尝试 3 次，重试复用同一客户端 ID。网络中断可能使远端送达结果不确定；不要宣称端到端严格只发送一次。`doctor --json` 的 `deliveryErrors`、`inboxErrors`、`lastPoll` 可查看失败记录；凭证 `configured` 不等于已联网验证。
 - 抓取/分析失败的文章保留 `failed` 和错误，可在排除原因后对原 URL 再次 `ingest`；不要删除文章文件来“重试”。已完成或已有笔记的文章不会由此重写。
-- 本地 HTTP 仅监听 `127.0.0.1`，校验 Host/Origin 和公众号 URL，不对外开放。不要自行改成全网监听。
+- 入站附件路径包含原名与内容 SHA-256：同名不同内容分别保存，相同内容重放复用。不要自行按原始文件名猜测已存路径。
+- Markdown 导出的 HTML/PDF 路径含内容版本摘要；正文或嵌入的本地图片变化会生成新版本，旧导出保留。PDF 生成失败不能用旧 PDF 冒充当前结果，核对返回的 `missingFormats`。
+- Agent 任务 `done` 表示执行完成、回执入队，不代表微信已送达。恢复中断任务可能重试已发生的外部动作，不能宣称严格只执行一次。
+- 本地 HTTP 仅监听 `127.0.0.1`，校验 Host/Origin 和 URL。外部抓取拒绝已覆盖的私网 IP 字面量及重定向目标，但没有 DNS 地址绑定，不能视为完整的 SSRF 隔离。不要自行改成全网监听。
 
 ## 文章深读与观点沉淀（自适应有无知识库）
 
@@ -98,8 +103,14 @@ bun run {{PROJECT_ROOT}}/src/cli.ts triage <id> <keep_raw|reference|process_late
 
 `triage` 会显式修改原文与伴读笔记的 **frontmatter** 和数据库状态，保留正文。`deep` 与 `triage` 是不同维度，不必将每篇深读文章都改成 `reference`。执行后用 `show --json` 与文件内容核对结果；写入失败应报告，不宣称完成。
 
+手机端 `deepen` 的模型回答不会自动重写 `_note.md` 或把 `process_level` 升级为 `deep`；桌面 Agent 应在实际更新笔记后才标记完成。
+
 ## 能力与验证边界
 
-ClawBot 接口由本地代码实现；语音仅在接口已提供转写文本时可读。抓取先尝试 HTTP，再尝试本机已有 Chrome 类浏览器；验证码、删除文章、网络异常可能导致失败。模型配置按 `LLM_API_KEY`、`OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`GEMINI_API_KEY` 顺序选择；失败时使用启发式摘要，不将其称为模型深度分析。回执长度没有严格的 300 字保证。
+ClawBot 接口由本地代码实现；语音仅在接口已提供转写文本时可读。公众号抓取先尝试 HTTP，再尝试本机已有 Chrome 类浏览器；验证码、删除文章、网络异常可能导致失败。外部网页的 Jina Reader 兜底默认关闭；开启 `ALLOW_JINA_FALLBACK=true` 会把包含查询参数的完整 URL 发给第三方，实际来源记录为 `jina_reader`。
+
+图片与受支持的小型文本附件可提供给 API 模型；PDF 等附件目前没有内置正文解析器。先尝试能读取本地附件的 CLI；CLI 不可用或失败时，保留文件和“已归档，未解析”说明，不用只有路径的提示词生成内容提炼。混合附件中只要包含 API 无法读取的文件，也不能声称 API 已分析全部内容。
+
+模型配置按 `LLM_API_KEY`、`OPENAI_API_KEY`、`DEEPSEEK_API_KEY`、`GEMINI_API_KEY` 顺序选择。文章初筛失败可使用启发式摘要，其他任务不保证相同降级行为；联网搜索失败可重试 Fast 搜索，仍失败就报告错误，不冒充搜索成功。Gemini 搜索请求保留图片输入。回执长度没有严格的 300 字保证。
 
 回归验证：`bun test {{PROJECT_ROOT}}/tests`。测试使用临时目录/数据库与模拟微信、模型响应，不读取真实知识库、不发送真实微信。监听边界测试需要允许本机随机端口监听。

@@ -2,13 +2,13 @@ import { randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
-  readdirSync,
+  realpathSync,
   readFileSync,
   statSync,
   unlinkSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { delimiter, extname, isAbsolute, join } from "node:path";
+import { delimiter, extname, isAbsolute, join, relative, sep } from "node:path";
 import { AppConfig, CustomCliAgentConfig, expandHomePath } from "../config.ts";
 import {
   callAgentLlm,
@@ -382,6 +382,8 @@ export interface TieredExecutionParams {
   complexity: "fast" | "deep";
   forceCliFirst?: boolean;
   skipCliTier?: boolean;
+  // A local file path is not evidence available to an API model.
+  apiFallbackBlockedReason?: string;
   cliTimeoutMs?: number;
   preferredBackend?: SubagentBackend;
   preferredAgyModel?: string;
@@ -521,6 +523,7 @@ export async function executeTieredAgentTask(
 
   // 1. Lightweight fast tasks go directly to fast model
   if (!shouldTryCliFirst && params.complexity === "fast") {
+    if (params.apiFallbackBlockedReason) throw new Error(params.apiFallbackBlockedReason);
     const fastRes = await callAgentLlm({
       config: params.config,
       tier: "fast",
@@ -577,6 +580,7 @@ export async function executeTieredAgentTask(
       };
     } catch (cliErr: any) {
       tierPath.push(`cli:${backend}(failed:${cliErr?.message || cliErr})`);
+      if (params.apiFallbackBlockedReason) throw new Error(params.apiFallbackBlockedReason);
       const proModelName = getProModel(params.config);
       console.warn(
         `[TieredRouter] Tier 1 Local CLI (${backend}) unavailable (${cliErr?.message || cliErr}); degrading to Tier 2 Pro model (${proModelName})`
@@ -591,6 +595,7 @@ export async function executeTieredAgentTask(
       );
     }
   } else {
+    if (params.apiFallbackBlockedReason) throw new Error(params.apiFallbackBlockedReason);
     const proModelName = getProModel(params.config);
     await params.onStageChange?.(
       `正在调用深度模型 [${proModelName}] 撰写与推演内容`,
@@ -1266,10 +1271,18 @@ export function discoverGeneratedArtifacts(
 ): { images: string[]; files: string[] } {
   const imageSet = new Set<string>();
   const fileSet = new Set<string>();
+  const allowedRoots = [generatedDir, vaultRoot].filter(
+    (root): root is string => Boolean(root && existsSync(root))
+  ).map(root => realpathSync(root));
 
   const registerCandidateFile = (candidatePath: string) => {
     if (!existsSync(candidatePath)) return;
     try {
+      const actualPath = realpathSync(candidatePath);
+      if (!allowedRoots.some(root => {
+        const rel = relative(root, actualPath);
+        return rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+      })) return;
       const st = statSync(candidatePath);
       if (!st.isFile() || st.size === 0) return;
       if (st.mtimeMs >= sinceMs - 2500) {
@@ -1282,28 +1295,8 @@ export function discoverGeneratedArtifacts(
     } catch {}
   };
 
-  // 1. Scan generatedDir and key vault output dirs for files created/modified during this run
-  const dirsToScan = [generatedDir];
-  if (vaultRoot && existsSync(vaultRoot)) {
-    dirsToScan.push(
-      join(vaultRoot, "05_outputs", "research_notes"),
-      join(vaultRoot, "05_outputs", "public_posts"),
-      join(vaultRoot, "05_outputs", "drafts"),
-      join(vaultRoot, "05_outputs", "plans")
-    );
-  }
-
-  for (const dir of dirsToScan) {
-    if (!existsSync(dir)) continue;
-    try {
-      for (const entry of readdirSync(dir)) {
-        if (entry.endsWith("_sources.md")) continue;
-        registerCandidateFile(join(dir, entry));
-      }
-    } catch {}
-  }
-
-  // 2. Scan outputText for absolute file paths (/Users/..., /home/..., /tmp/...)
+  // Only paths explicitly returned by this task are eligible, never every
+  // recently modified file in shared output directories.
   const absMatches =
     outputText.match(
       /\/(?:Users|home|tmp|var|opt|private|mnt|srv)\/[^\s"'`<>()[\]，。；！!]+\.[a-zA-Z0-9]{2,8}/g

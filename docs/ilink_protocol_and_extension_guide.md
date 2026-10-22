@@ -1,15 +1,15 @@
 # WeChat as Context — 微信 iLink 协议全景、CLI 数据流与功能扩展指南
 
-本文档完整沉淀了 `wechat_as_context` 的三项核心技术资产：
-1. **腾讯微信 `iLink Bot`（`微信ClawBot [AI]`）底层全量协议规范**（共 **9 个 CGI 接口 + 2 个 C2C CDN 加解密端点 = 11 个接口**，以及 8 种消息类型与引用协议）；
+本文档记录了 `wechat_as_context` 的三项核心技术资产：
+1. **腾讯微信 `iLink Bot`（`微信ClawBot [AI]`）协议阅读笔记**（共 **9 个 CGI 接口 + 2 个 C2C CDN 加解密端点 = 11 个接口**，以及消息类型与引用协议）；
 2. **全局 Skill（`wechat-as-context`）与本地 CLI（`src/cli.ts`）的命令详解与事务级数据流**；
 3. **现有能力清单与未来新意图（Intent）/ 多模态功能的扩展开发指南**。
 
 ---
 
-## 第一部分：微信 `iLink Bot` 桥接协议完整拆解（全量 11 个端点）
+## 第一部分：微信 `iLink Bot` 桥接协议阅读记录（11 个端点）
 
-通过对腾讯官方桥接器（`@tencent-weixin/openclaw-weixin` v2.4.10）全部源码模块的完整逆向梳理，微信客户端内置的 **「微信ClawBot [AI]」** 背后除了我们当前已经接入的 **4 个核心收发接口** 外，还有 **5 个扩展控制接口** 和 **2 个 C2C 媒体 CDN 加解密接口**。
+以下为基于 `@tencent-weixin/openclaw-weixin` v2.4.10 的协议阅读记录，不是微信当前接口可用性的联网验收。表中分为 4 个基础收发接口、5 个扩展 CGI 和 2 个 CDN 端点；本项目也已使用部分扩展接口（如 typing 和 upload），具体以 `src/clawbot/client.ts` 为准。
 
 ### 1.1 通信网关与公共协议头（Headers & BaseInfo）
 
@@ -37,11 +37,11 @@
   }
   ```
 - **64 位整数（`uint64`）精度防丢失规则**：
-  服务端返回的 JSON 中，`message_id`、`msg_id`、`svr_id` 为 64 位整数原始字面量（超过 JavaScript `Number.MAX_SAFE_INTEGER`），**必须在 `JSON.parse` 之前将其包裹为字符串**（见 `src/clawbot/client.ts` 第 259 行）。
+  服务端返回的 JSON 中，`message_id`、`msg_id`、`svr_id` 为 64 位整数原始字面量（超过 JavaScript `Number.MAX_SAFE_INTEGER`），**必须在 `JSON.parse` 之前将其包裹为字符串**（见 `src/clawbot/client.ts` 的大整数 JSON 处理）。
 
 ---
 
-### 1.2 全量接口清单：4 个已用核心接口 + 7 个未来可用扩展接口
+### 1.2 接口记录：4 个基础接口 + 5 个扩展 CGI + 2 个 CDN 端点
 
 #### A. 当前已接入的 4 个核心接口（`src/clawbot/client.ts`）
 
@@ -54,7 +54,7 @@
 
 ---
 
-#### B. 源码中发现、未来随时可启用的 5 个扩展 CGI 接口
+#### B. 5 个扩展 CGI 接口（含项目已接入能力）
 
 | 序号 | 接口路径 | 方法 | 核心入参 | 核心出参 | 未来扩展价值与应用场景 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -79,9 +79,9 @@
 
 ### 1.3 消息结构体（`WeixinMessage`）中的隐藏宝藏能力
 
-在 `getupdates` 和 `sendmessage` 的 `item_list` 中，协议原生支持 **8 种 `MessageItemType`** 以及 **局部引用（`PartialText`）**：
+在 `getupdates` 和 `sendmessage` 的 `item_list` 中，这里列出的协议消息类型包含 以及 **局部引用（`PartialText`）**：
 
-1. **全量 `MessageItemType` 枚举**：
+1. **`MessageItemType` 枚举摘录**：
    - `1` (`TEXT`)：纯文本 `{ text_item: { text: "..." } }`
    - `2` (`IMAGE`)：图片 `{ image_item: { media: {...}, mid_size: 12345 } }`
    - `3` (`VOICE`)：语音 `{ voice_item: { media: {...}, playtime: 5000, text: "微信服务端自动转写的文字" } }`
@@ -114,23 +114,25 @@
 
 ### 2.1 核心数据库表结构（`data/wechat_context.db`，WAL 模式）
 
-为了保证离线恢复、崩溃安全与文件幂等，SQLite 数据库包含以下 5 张核心表（定义于 `src/db.ts`）：
+为了保证离线恢复、崩溃安全与文件幂等，SQLite 数据库的主要表包括（定义于 `src/db.ts`）：
 1. **`kv_state`**：键值状态表，持久化保存：
    - `clawbot_credentials`（扫码获得的 `botToken`、`botId`、`userId`、`baseUrl`）
    - `clawbot_updates_buf`（`getupdates` 增量同步游标）
    - `clawbot_ctx_<userId>`（每个微信用户的最新 `context_token`，用于回发消息）
    - `clawbot_last_poll`（最近一次长轮询的时间戳与错误状态）
-2. **`inbound_messages`**：入站消息持久化收件箱（`sequence`, `message_key`, `payload`, `status`, `error`）。在推进 `clawbot_updates_buf` 游标的**同一个 SQLite 事务**中写入，确保哪怕进程断电重启，已拉取的消息也绝不会因游标前移而丢失。
+2. **`inbound_messages`**：入站消息持久化收件箱（`sequence`, `message_key`, `payload`, `status`, `error`）。在推进 `clawbot_updates_buf` 游标的**同一个 SQLite 事务**中写入，避免游标已提交但消息未在同一事务保存的窗口；这不保证上游永久保留消息或任意故障下零丢失。
 3. **`articles`**：公众号文章主表，维护文章生命周期状态机：
    - `status`: `pending_extract` $\rightarrow$ `extracting` $\rightarrow$ `analyzing` $\rightarrow$ `light_done` / `deep_done`（或 `failed`）
    - `process_level`: `raw` | `light` | `deep`
    - `triage`: `keep_raw` | `reference` | `process_later` | `process_now`
 4. **`reply_outbox`**：出站微信回执持久队列（`id`, `recipient`, `text`, `status`, `attempts`, `error`）。最多重试 3 次，每次重试复用同一个幂等 `client_id`。
-5. **`operation_locks`**：基于进程 PID 存活探测（`process.kill(pid, 0)`）的跨进程互斥锁表（如 `sync`、`outbox`、`article_<id>`），防止后台守护进程与手动 CLI 并发冲突。
+5. **`operation_locks`**：基于进程 PID 存活探测（`process.kill(pid, 0)`）的跨进程互斥锁表（如 `sync`、`outbox`、`article_<id>`、`agent_queue`），防止后台守护进程与手动 CLI 并发冲突。
+6. **`agent_tasks`**：持久 Agent 队列，记录 pending/processing/done/failed、执行阶段及错误。
+7. **`conversation_turns`**：对话上下文、执行模型、关联文章和产物路径。
 
 ---
 
-### 2.2 八大 CLI 命令逐一拆解（命令、参数、数据流与微信交互）
+### 2.2 文章流程常用 CLI 命令（命令、参数、数据流与微信交互）
 
 所有命令统一通过以下入口调用：
 ```bash
@@ -141,27 +143,27 @@ bun run src/cli.ts <command> [options]
 | :--- | :--- | :--- | :--- |
 | **`login`** | `bun run src/cli.ts login` | **是（交互式扫码）** | 1. 读取 `kv_state` 中旧 token（如有）放入 `local_token_list`；<br>2. POST `/ilink/bot/get_bot_qrcode?bot_type=3` 获取二维码内容；<br>3. 在终端渲染 ASCII 二维码并打印备用 URL；<br>4. 循环 GET `/ilink/bot/get_qrcode_status`（处理扫码提示、数字配对码 `need_verifycode`、IDC 机房跳转 `scaned_but_redirect`）；<br>5. 用户在手机点击确认后，将返回的 `bot_token`、`botId`、`userId`、`baseUrl` 写入 `kv_state.clawbot_credentials`。 |
 | **`doctor`** | `bun run src/cli.ts doctor [--json]` | **否（纯本地只读诊断）** | 1. 检查 `VAULT_ROOT` 目录是否存在；<br>2. 检查 LLM API Key 与模型配置；<br>3. 读取 `kv_state` 中的 `clawbot_credentials` 与 `clawbot_last_poll`；<br>4. 聚合统计 `reply_outbox` 发送状态、`deliveryErrors` 与 `inbound_messages` 错误日志并输出。 |
-| **`sync`** | `bun run src/cli.ts sync [--json]` | **是（拉取消息 + 发送回执）** | 1. 获取跨进程锁 `withLock("sync")`；<br>2. 先处理 `inbound_messages` 中上次未完成的 `pending` 记录；<br>3. POST `/ilink/bot/getupdates`（携带 `clawbot_updates_buf`），在**单个 SQLite 事务**内将新消息写入 `inbound_messages`、更新 `context_token` 并推进 `clawbot_updates_buf`；<br>4. 调用 `processPendingMessages()` 进行意图路由（识别「想法：...」、公众号 URL、「深读」或补充批注），将确认回执写入 `reply_outbox`；<br>5. 调用 `drainReadyQueue()`，对已过等待窗口的文章执行：**网页抓取 + 图片防盗链下载 + 知识库检索 + LLM 初筛 + 原子化落盘 `.md` 与 `_note.md`**，并将 300 字初筛卡片写入 `reply_outbox`；<br>6. 调用 `flushReplies()`，POST `/ilink/bot/sendmessage` 把所有待发回执推送到用户手机微信。 |
+| **`sync`** | `bun run src/cli.ts sync [--json]` | **是（拉取消息 + 发送回执）** | 1. 获取跨进程锁 `withLock("sync")`；<br>2. 先处理 `inbound_messages` 中上次未完成的 `pending` 记录；<br>3. POST `/ilink/bot/getupdates`（携带 `clawbot_updates_buf`），在**单个 SQLite 事务**内将新消息写入 `inbound_messages`、更新 `context_token` 并推进 `clawbot_updates_buf`；<br>4. 调用 `processPendingMessages()` 进行意图路由（识别「想法：...」、公众号 URL、「深读」或补充批注），将确认回执写入 `reply_outbox`；<br>5. 调用 `drainReadyQueue()`，对已过等待窗口的文章执行：**网页抓取 + 图片防盗链下载 + 知识库检索 + LLM 初筛 + 原子化落盘 `.md` 与 `_note.md`**，并将初筛卡片写入 `reply_outbox`；<br>6. 调用 `flushReplies()`，POST `/ilink/bot/sendmessage` 把所有待发回执推送到用户手机微信。 |
 | **`list`** | `bun run src/cli.ts list [--status <s>] [--triage <t>] [--limit <n>] [--json]` | **否（纯本地只读）** | 从 SQLite `articles` 表按条件（如 `--triage process_now`）倒序查询文章列表，返回 ID、标题、作者、`process_level`、`triage`、用户批注、关联知识库节点及本地 Markdown 路径。**严守无副作用原则，不触发网络同步。** |
 | **`show`** | `bun run src/cli.ts show <id> [--json]` | **否（纯本地只读）** | 1. 查询 `articles` 表中指定 `<id>` 的完整元数据；<br>2. 读取磁盘上 `note_md_path` 对应的伴读笔记 Markdown 全文并一并返回，供 Agent 或用户检视。 |
-| **`ingest`** | `bun run src/cli.ts ingest "<url>" [--note "批注"] [--title "标题"] [--json]` | **否（仅访问 mp.weixin.qq.com 抓文章，不发微信消息）** | 1. 校验并归一化 `https://mp.weixin.qq.com/s/...` 链接；<br>2. 在 `articles` 表入队（`channel: "cli"`, `waitSeconds: 0`）；<br>3. 立即调用 `processArticleById(id, { sendWeChatReply: false })`：完成公众号正文提取、防盗链图片下载、知识库节点检索、LLM 初筛笔记生成与落盘，并在终端打印结果。 |
-| **`triage`** | `bun run src/cli.ts triage <id> <keep_raw\|reference\|process_later\|process_now> [--level raw\|light\|deep]` | **否（本地数据库 + Markdown frontmatter 更新）** | 1. 校验原文 `source_md_path` 与伴读卡 `note_md_path` 均存在；<br>2. 仅精准更新这两个文件的 YAML Frontmatter 中的 `triage:` 和 `process_level:` 字段，**100% 保持文件正文（包括人工或深读编辑内容）不变**；<br>3. 同步更新 SQLite `articles` 表的 `triage`、`process_level` 与 `status`。 |
-| **`idea`** | `bun run src/cli.ts idea <id> "你的想法内容" [--slug <slug>]` | **否（本地写入知识库 `03_ideas/seeds/`）** | 1. 读取文章 `#<id>` 的路径、URL 与关联知识库节点 `related_vault_nodes`；<br>2. 调用 `createIdeaSeedInVault` 在 `$VAULT_ROOT/03_ideas/seeds/` 下原子化创建一篇带标准 Frontmatter（`type: idea`, `status: seed`）的个人想法笔记，并自动挂载来源文章与关联节点双链。 |
+| **`ingest`** | `bun run src/cli.ts ingest "<url>" [--note "批注"] [--title "标题"] [--json]` | **不发送微信；会联网抓取与调用模型** | 1. 校验并归一化公众号或支持的外部网页链接；<br>2. 在 `articles` 表入队（`channel: "cli"`, `waitSeconds: 0`）；<br>3. 立即调用 `processArticleById(id, { sendWeChatReply: false })`：完成公众号正文提取、防盗链图片下载、知识库节点检索、LLM 初筛笔记生成与落盘，并在终端打印结果。 |
+| **`triage`** | `bun run src/cli.ts triage <id> <keep_raw\|reference\|process_later\|process_now> [--level raw\|light\|deep]` | **否（本地数据库 + Markdown frontmatter 更新）** | 1. 校验原文 `source_md_path` 与伴读卡 `note_md_path` 均存在；<br>2. 仅精准更新这两个文件的 YAML Frontmatter 中的 `triage:` 和 `process_level:` 字段，**保留文件正文（包括人工或深读编辑内容）**；<br>3. 同步更新 SQLite `articles` 表的 `triage`、`process_level` 与 `status`。 |
+| **`idea`** | `bun run src/cli.ts idea [<id>] "你的想法内容" [--slug <slug>]` | **否（本地写入配置的 `ideasSeedsDir`）** | 1. 读取文章 `#<id>` 的路径、URL 与关联知识库节点 `related_vault_nodes`；<br>2. 调用 `createIdeaSeedInVault` 在配置的 `ideasSeedsDir` 下原子化创建一篇带标准 Frontmatter（`type: idea`, `status: seed`）的个人想法笔记，并自动挂载来源文章与关联节点双链。 |
 
 ---
 
 ## 第三部分：现有能力矩阵与未来扩展开发指南
 
-### 3.1 当前已经为你跑通的 6 大现成能力
+### 3.1 主要能力与使用边界
 
 1. **手机微信发公众号链接 $\rightarrow$ 自动抓取 + 图片防盗链本地化 + 知识库初筛回执**：
    - 支持纯链接，也支持「链接 + 一句话关注点」一起发。
 2. **10 秒滑动窗口追加批注（文字或语音）**：
    - 发完链接后紧跟发一条文字或**微信语音**（微信云端自动转成文字），会自动合并进该文章的 `user_notes`。
 3. **手机端一句话捕捉闪念（`想法：...` / `灵感：...` / `观点：...` / `我有一个想法：...`）**：
-   - 直接在 `微信ClawBot [AI]` 发送以这些词开头的文字或语音，立即在 `03_ideas/seeds/` 生成种子笔记，并自动关联你最近刚看的那篇公众号文章。
+   - 直接在 `微信ClawBot [AI]` 发送以这些词开头的文字或语音，在配置的 `ideasSeedsDir` 生成种子笔记，并自动关联你最近刚看的那篇公众号文章。
 4. **手机端一键标记优先深读（发送 `深读` / `精读` / `优先`）**：
-   - 将最近一篇文章的 `triage` 设为 `process_now`。
+   - 路由取决于配置与上下文：规则路径可把最近文章标为 `process_now`；Agent 的 `deepen` 路径生成回答，不自动更新 `_note.md` 或把 `process_level` 设为 `deep`。
 5. **电脑端跨 Agent（Codex / AntiGravity / OpenCode）无缝接力第二阶段深读**：
    - 对 Agent 说“深度阅读刚刚我转发的公众号文章”，Agent 自动定位文章、读取本地原文与高清配图、穿透查阅你的 `03_ideas/` 与 `04_topics/` 笔记、将 `_note.md` 升级为 `deep`。
 6. **严格的知识库安全保护（Authoritative Storage）**：
@@ -176,7 +178,7 @@ bun run src/cli.ts <command> [options]
   - `fastModel`（默认 `gemini-2.5-flash`）：负责全量入站消息的语义意图识别、参数提取、复杂度评估（`complexity: "fast" | "deep"`）及快速任务执行；
   - `proModel`（默认 `gemini-2.5-pro`）：当评估为高复杂度任务（`complexity = "deep"`，如跨笔记深度综合、文章逻辑批判拆解、复杂推理规划）时自动接管执行，并具备自动降级回 `fastModel` 的容错保护。
 - **意图识别器（[`src/agent/router.ts`](../src/agent/router.ts)）与可插拔执行引擎（[`src/agent/runtime.ts`](../src/agent/runtime.ts)）**：
-  支持 8 大核心意图（`capture_idea`, `capture_inbox`, `ingest_link`, `article_followup`, `vault_query`, `multimodal_ingest`, `send_file`, `general_assistant`），并可通过 `pipeline.agent.registerIntentHandler(intent, fn)` 动态扩展新意图。
+  默认注册 11 类意图（`capture_idea`, `capture_inbox`, `ingest_link`, `article_followup`, `vault_query`, `web_search`, `multimodal_ingest`, `generate_image`, `delegate_subagent`, `send_file`, `general_assistant`），并可通过 `pipeline.agent.registerIntentHandler(intent, fn)` 动态扩展新意图。
 
 #### 已实装落地的 6 大扩展场景：
 1. **场景 1：手机微信直接向个人知识库提问与检索（`vault_query`）**
@@ -184,10 +186,23 @@ bun run src/cli.ts <command> [options]
 2. **场景 2：处理期间手机微信顶部实时显示「对方正在输入...」（`withTypingIndicator`）**
    - 在 [`src/clawbot/client.ts`](../src/clawbot/client.ts) 中实现了 `getTypingTicket()`（`/ilink/bot/getconfig`）与 `sendTyping()`（`/ilink/bot/sendtyping`），通过 `withTypingIndicator` 包裹所有异步 Agent 推理与文章抓取流程（每 5 秒自动续期心跳，完成后发送 `status=2` 结束）。
 3. **场景 3：支持转发「非微信公众号」的任意外部网页链接（`src/extractor/web.ts`）**
-   - 新增 [`extractGeneralWebArticle`](../src/extractor/web.ts) 与 [`saveRawWebArticleToVault`](../src/extractor/web.ts)，支持 ArXiv、技术博客、Substack、X/Twitter（含 Jina Reader 兜底）等外部链接抓取、图片本地化防盗链落盘至 `01_inputs/articles/web/`。
+   - 新增 [`extractGeneralWebArticle`](../src/extractor/web.ts) 与 [`saveRawWebArticleToVault`](../src/extractor/web.ts)，尝试抓取技术博客等外部网页并本地化图片。Jina Reader 兜底默认关闭，需显式开启 `ALLOW_JINA_FALLBACK=true`；开启后完整 URL（含查询参数）会发往第三方，来源标记为 `jina_reader`。需要登录、验证码或动态页面不保证成功。落盘路径取决于存储模式。
 4. **场景 4：微信发截图/照片/文件自动 `AES-128-ECB` 解密入库与多模态提取（`multimodal_ingest`）**
-   - 在 [`src/clawbot/media.ts`](../src/clawbot/media.ts) 中实现 `downloadAndDecryptCdnMedia`，自动兼容微信双格式 AES 密钥，将图片/PDF 解密归档至 `01_inputs/inbox/assets/` 或 `01_inputs/papers/`，并调用多模态视觉模型提取图文要点。
+   - 在 [`src/clawbot/media.ts`](../src/clawbot/media.ts) 中实现 `downloadAndDecryptCdnMedia`，自动兼容微信双格式 AES 密钥，将图片/PDF 解密归档至配置的 inbox/papers 目录，文件名带内容 SHA-256。图片和支持的小型文本可传入 API；PDF 等没有内置正文解析的附件先尝试 CLI，CLI 失败或禁用时只归档并明确“未解析”，不把路径当作正文调用 API。
 5. **场景 5：利用微信「引用消息（`ref_msg` & `partial_text`）」精准定位旧文章追问或下达指令（`article_followup`）**
    - 在 [`unpackClawBotMessage`](../src/clawbot/client.ts) 中结构化解析 `ref_msg` 与局部涂抹引用 `partial_text`，支持长按任意历史卡片点「引用」进行全文问答、局部句子深挖、追加批注或修改分诊状态。
 6. **场景 6：将伴读笔记 `_note.md` 或知识库任意文件加密回传手机微信（`send_file`）**
    - 在 [`src/clawbot/client.ts`](../src/clawbot/client.ts) 中实现 `sendMediaFile`（调用 `/ilink/bot/getuploadurl` + `c2c/upload` `AES-128-ECB` 加密上传 + `sendmessage` 发送 `type=4` 文件项），在微信中说 *“把伴读笔记发文件给我”* 或 *“把 `00_home/now.md` 发给我”* 即可收到原生文件附件。
+
+
+### 3.3 可靠性修复后的执行契约
+
+- `agent_queue` 锁覆盖任务恢复、领取和执行。只读 `list/show/doctor` 不恢复任务；存活 worker 持锁期间其他 worker 不消费队列。旧进程退出后，新 worker 可以恢复未完成任务。该锁没有租约超时；升级须先停止旧版 worker。
+- 任务执行 `done` 与回执送达是两种状态，送达应检查 `reply_outbox` / `doctor`。崩溃恢复可能重试已经发生的外部动作，不提供端到端 exactly-once。
+- 无 API Key 的明确 CLI 指令仍进入 Agent 路由。引用文章批注写入已解析的目标，不写到另一篇最新文章。
+- CLI 产物只收集回答中显式给出、位于允许目录且满足修改时间条件的文件；不扫描共享目录中所有新文件。真实路径检查拒绝越界符号链接，这还不是每任务产物清单隔离。
+- Markdown 派生 HTML/PDF 采用内容版本文件名，保留旧导出；导出失败不得以旧 PDF 替代。Markdown 图片正常渲染，文档目录内的本地图片可嵌入导出。
+- 外部 HTTP 请求校验常见私网 IP 字面量及每跳重定向；未实现 DNS 解析地址绑定，浏览器回退也不是网络隔离沙箱。
+- HTTP 入参使用 `note`、`files`、`formats`。旧的 `annotation`、`docPath`、`exportFormats` 返回 400；`/api/sync`、`/api/articles`、`/api/ideas` 未实现，使用 CLI 对应命令。
+
+升级、测试范围和剩余限制见 [修复说明与验收](./reliability-fixes.md)。

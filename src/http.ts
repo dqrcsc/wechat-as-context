@@ -82,6 +82,7 @@ export function createHttpHandler(db: ContextDatabase, pipeline: WeChatContextPi
       try {
         if (!req.headers.get("content-type")?.startsWith("application/json")) return new Response("Expected application/json", { status: 415 });
         body = await req.json() as typeof body;
+        if (body && "annotation" in body) throw new Error("Use note instead of annotation");
         if (!body || typeof body.url !== "string" || (body.note !== undefined && typeof body.note !== "string") || (body.title !== undefined && typeof body.title !== "string")) throw new Error("Invalid article payload");
         body.url = normalizeWeChatUrl(body.url);
       } catch (error: any) { return Response.json({ ok: false, error: error.message }, { status: 400 }); }
@@ -107,6 +108,9 @@ export function createHttpHandler(db: ContextDatabase, pipeline: WeChatContextPi
           recipient?: string;
           queueOnly?: boolean;
         };
+        if (body && ("docPath" in body || "exportFormats" in body)) {
+          throw new Error("Use files and formats instead of docPath and exportFormats");
+        }
         const formats = Array.isArray(body?.formats)
           ? detectRequestedFormats("", body.formats)
           : [];

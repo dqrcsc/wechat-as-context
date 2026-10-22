@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { writeNewFile } from "../storage.ts";
+import { assertPublicUrl, fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
 import {
   ExtractedWeChatArticle,
   htmlToCleanMarkdownWithImages,
@@ -29,22 +30,7 @@ export function isWeChatArticleUrl(rawUrl: string): boolean {
 
 export function normalizeExternalWebUrl(rawUrl: string): string {
   const normalized = rawUrl.trim().replace(/&amp;/g, "&").replace(/[),.;，。；！!]+$/, "");
-  const url = new URL(normalized);
-  if (url.protocol !== "https:" && url.protocol !== "http:") {
-    throw new Error("Expected an HTTP/HTTPS URL");
-  }
-  const host = url.hostname.toLowerCase();
-  if (
-    host === "localhost" ||
-    host === "127.0.0.1" ||
-    host === "0.0.0.0" ||
-    host.startsWith("192.168.") ||
-    host.startsWith("10.") ||
-    host.endsWith(".local") ||
-    host.endsWith(".internal")
-  ) {
-    throw new Error("Private or loopback URLs are not allowed");
-  }
+  const url = assertPublicUrl(normalized);
   url.hash = "";
   return url.toString();
 }
@@ -56,8 +42,10 @@ export async function extractGeneralWebArticle(
   url: string,
   fallbackTitle = "",
   fallbackAuthor = "",
-  fallbackDigest = ""
+  fallbackDigest = "",
+  options: { allowJinaFallback?: boolean } = {}
 ): Promise<ExtractedWeChatArticle> {
+  url = normalizeExternalWebUrl(url);
   if (isWeChatArticleUrl(url)) {
     const { extractWeChatArticle } = await import("./wechat.ts");
     return extractWeChatArticle(url, fallbackTitle, fallbackAuthor, fallbackDigest);
@@ -65,7 +53,7 @@ export async function extractGeneralWebArticle(
 
   // Mode 1: Direct HTML fetch & semantic container extraction
   try {
-    const resp = await fetch(url, {
+    const resp = await fetchPublicResource(url, {
       headers: {
         "User-Agent": BROWSER_USER_AGENT,
         Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -88,12 +76,16 @@ export async function extractGeneralWebArticle(
       }
     }
   } catch (err) {
+    if (err instanceof UnsafeUrlError) throw err;
     console.warn(`[WebExtractor] Direct HTTP fetch warning for ${url}:`, err);
   }
 
   // Mode 2: Jina Reader API fallback for JS-heavy pages (X/Twitter, SPAs)
+  if (!options.allowJinaFallback) {
+    throw new Error(`Failed to extract web page content from ${url}; third-party Jina fallback is disabled`);
+  }
   try {
-    const jinaResp = await fetch(`https://r.jina.ai/${url}`, {
+    const jinaResp = await fetchPublicResource(`https://r.jina.ai/${url}`, {
       headers: {
         Accept: "text/plain",
         "X-Return-Format": "markdown",
@@ -118,7 +110,7 @@ export async function extractGeneralWebArticle(
           digest: fallbackDigest || markdownBody.slice(0, 180).replace(/\r?\n/g, " "),
           markdownBody,
           imageUrls: [],
-          extractorUsed: "native_http",
+          extractorUsed: "jina_reader",
         };
       }
     }

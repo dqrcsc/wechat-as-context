@@ -1,5 +1,7 @@
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { basename, dirname, extname, join } from "node:path";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
+import { createHash } from "node:crypto";
+import { writeNewFile } from "../storage.ts";
 
 export type DeliverableFormat = "md" | "html" | "pdf";
 
@@ -107,8 +109,14 @@ function escapeHtml(raw: string): string {
 
 function renderInlineMarkdown(line: string): string {
   let out = escapeHtml(line);
+  const images: string[] = [];
   // Inline code: `code`
   out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+  // Images precede links so ![alt](url) cannot turn into !<a>.
+  out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (_match, alt, url) => {
+    const index = images.push(`<img src="${url}" alt="${alt}" style="max-width:100%;height:auto" />`) - 1;
+    return `\u0000IMAGE${index}\u0000`;
+  });
   // Markdown links: [label](url)
   out = out.replace(
     /\[([^\]]+)\]\((https?:\/\/[^\s)]+|[^)\s]+)\)/g,
@@ -121,7 +129,7 @@ function renderInlineMarkdown(line: string): string {
   out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   // Italic: *text*
   out = out.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
-  return out;
+  return out.replace(/\u0000IMAGE(\d+)\u0000/g, (_match, index) => images[Number(index)]);
 }
 
 /**
@@ -698,9 +706,32 @@ export async function ensureMultiFormatDeliverables(params: {
     ? basename(mdPath, extname(mdPath))
     : baseFileStem;
 
-  // Check again if sibling .html or .pdf already exist in targetDir
+  // A derived file is reusable only for this exact source (including embedded
+  // local image bytes). Keep old/manual exports intact under their own names.
+  let derivedStem = targetStem;
+  let htmlString = "";
+  if (mdContent) {
+    const embeddedMarkdown = mdContent.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (original, alt, url) => {
+      if (/^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(url)) return original;
+      const imagePath = join(targetDir, url);
+      const mime = ({ ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".gif":"image/gif", ".webp":"image/webp" } as Record<string,string>)[extname(imagePath).toLowerCase()];
+      if (!mime || !existsSync(imagePath)) return original;
+      const imageRelative = relative(realpathSync(targetDir), realpathSync(imagePath));
+      if (imageRelative === ".." || imageRelative.startsWith(`..${sep}`) || isAbsolute(imageRelative)) {
+        return `${alt}（图片路径超出文档目录，未嵌入）`;
+      }
+      return `![${alt}](data:${mime};base64,${readFileSync(imagePath).toString("base64")})`;
+    });
+    const revision = createHash("sha256").update("html-v2\0" + (title || targetStem) + "\0" + embeddedMarkdown).digest("hex").slice(0, 16);
+    derivedStem = `${targetStem}_export_${revision}`;
+    htmlString = compileMarkdownToHtml(embeddedMarkdown, title || targetStem);
+    byExt.delete("html");
+    byExt.delete("pdf");
+  }
+
+  // Match the source revision instead of accepting stale same-stem siblings.
   for (const fmt of ["html", "pdf"] as DeliverableFormat[]) {
-    const candidate = join(targetDir, `${targetStem}.${fmt}`);
+    const candidate = join(targetDir, `${derivedStem}.${fmt}`);
     if (!byExt.has(fmt) && existsSync(candidate) && statSync(candidate).size > 0) {
       byExt.set(fmt, candidate);
     }
@@ -712,9 +743,8 @@ export async function ensureMultiFormatDeliverables(params: {
     (formats.includes("pdf") && !byExt.has("pdf") && !byExt.has("html"));
 
   if (needsHtml && mdContent) {
-    const htmlPath = join(targetDir, `${targetStem}.html`);
-    const htmlString = compileMarkdownToHtml(mdContent, title || targetStem);
-    writeFileSync(htmlPath, htmlString, "utf-8");
+    const htmlPath = join(targetDir, `${derivedStem}.html`);
+    writeNewFile(htmlPath, htmlString);
     byExt.set("html", htmlPath);
   }
 
@@ -722,7 +752,7 @@ export async function ensureMultiFormatDeliverables(params: {
   if (formats.includes("pdf") && !byExt.has("pdf")) {
     const htmlPath = byExt.get("html");
     if (htmlPath && existsSync(htmlPath)) {
-      const pdfPath = join(targetDir, `${targetStem}.pdf`);
+      const pdfPath = join(targetDir, `${derivedStem}.pdf`);
       const ok = await renderHtmlToPdf(htmlPath, pdfPath);
       if (ok) {
         byExt.set("pdf", pdfPath);
@@ -739,8 +769,9 @@ export async function ensureMultiFormatDeliverables(params: {
     }
   }
 
-  // Also include any other generated files if result is empty
-  if (result.length === 0) {
+  // Without a Markdown source, pass through supplied files. Once source exists,
+  // missing exports must stay missing rather than resurrecting stale versions.
+  if (result.length === 0 && !mdContent) {
     for (const f of existingFiles) {
       if (existsSync(f) && !result.includes(f)) {
         result.push(f);

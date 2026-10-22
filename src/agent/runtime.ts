@@ -450,19 +450,6 @@ export class WeChatAgentRuntime {
       };
     }
 
-    if (subAction === "annotate" && !this.config.llm.apiKey) {
-      this.db.attachUserNoteToRecentArticle(
-        ctx.senderId,
-        ctx.unpacked.userText,
-        60
-      );
-      return {
-        replyText: `已保存文章 #${target.id} 的批注；已有笔记不会自动重写，请在电脑端结合批注继续深读。`,
-        modelUsed: "local_rule",
-        relatedArticleId: target.id,
-      };
-    }
-
     if (subAction === "annotate") {
       const updatedNotes = target.user_notes
         ? `${target.user_notes}\n${ctx.unpacked.userText}`
@@ -470,7 +457,7 @@ export class WeChatAgentRuntime {
       this.db.updateArticle(target.id, { user_notes: updatedNotes });
       return {
         replyText: `📝 已记录文章 #${target.id}《${target.title || "待抓取"}》的批注：${ctx.unpacked.userText}\n（你可以随时针对该文章继续提问，或发送「深读」标记为优先处理）`,
-        modelUsed: getFastModel(this.config),
+        modelUsed: "local_rule",
         relatedArticleId: target.id,
       };
     }
@@ -723,6 +710,7 @@ ${vaultCtx.nowSummary}`,
     const downloadedPaths: string[] = [];
     const imageInputs: MultimodalImageInput[] = [];
     const textSnippets: string[] = [];
+    const unreadableApiFiles: string[] = [];
 
     for (const item of ctx.unpacked.mediaItems) {
       if (item.kind !== "image" && item.kind !== "file") continue;
@@ -754,6 +742,8 @@ ${vaultCtx.nowSummary}`,
             .toString("utf-8")
             .slice(0, 8000)}`
         );
+      } else {
+        unreadableApiFiles.push(basename(downloaded.filePath));
       }
     }
 
@@ -762,6 +752,7 @@ ${vaultCtx.nowSummary}`,
     }
 
     let extractedAnalysis = "";
+    let analysisWarning = "";
     let modelUsed = "local_decrypt";
 
     const userInstruction =
@@ -779,6 +770,9 @@ ${vaultCtx.nowSummary}`,
         config: this.config,
         complexity: ctx.decision.complexity,
         forceCliFirst: true,
+        apiFallbackBlockedReason: unreadableApiFiles.length > 0
+          ? `当前 API 不支持读取这些附件正文：${unreadableApiFiles.join("、")}。本地 CLI 未完成解析；请使用可读取该文件的 CLI，或提供文本/图片后重试。`
+          : undefined,
         preferredBackend,
         preferredAgyModel: selectAgyModel(
           ctx.unpacked.userText,
@@ -801,9 +795,8 @@ ${textSnippets.join("\n\n")}`,
       extractedAnalysis = tieredRes.text;
       modelUsed = tieredRes.modelUsed;
     } catch (err: any) {
-      if (this.config.llm.apiKey) {
-        extractedAnalysis = `（多模态解析跳过：${err?.message || err}）`;
-      }
+      analysisWarning = `已归档，未解析：${err?.message || err}`;
+      modelUsed = "local_archive";
     }
 
     const firstAssetRel = relative(inboxDir, downloadedPaths[0]);
@@ -816,6 +809,7 @@ ${textSnippets.join("\n\n")}`,
         thoughtText: [
           ctx.unpacked.userText,
           extractedAnalysis,
+          analysisWarning,
           `\n关联媒体文件：\`${relative(this.config.vaultRoot, downloadedPaths[0])}\``,
         ]
           .filter(Boolean)
@@ -831,6 +825,7 @@ ${textSnippets.join("\n\n")}`,
           `微信多媒体采集 (${basename(downloadedPaths[0])})`,
         bodyText:
           extractedAnalysis ||
+          [analysisWarning, ctx.unpacked.userText].filter(Boolean).join("\n\n") ||
           ctx.unpacked.userText ||
           `已解密保存附件：${basename(downloadedPaths[0])}`,
         slug: "wechat_media_capture",
@@ -844,6 +839,7 @@ ${textSnippets.join("\n\n")}`,
       replyText: [
         `🖼️ 已解密并归档媒体文件：\`${relSaved}\``,
         extractedAnalysis ? `\n📋 内容提炼（${modelUsed}）：\n${extractedAnalysis}` : "",
+        analysisWarning ? `\n⚠️ ${analysisWarning}` : "",
       ]
         .filter(Boolean)
         .join("\n"),

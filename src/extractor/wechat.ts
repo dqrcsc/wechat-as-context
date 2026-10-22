@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { writeNewFile } from "../storage.ts";
+import { fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
 
 export interface ExtractedWeChatArticle {
   url: string;
@@ -12,7 +13,7 @@ export interface ExtractedWeChatArticle {
   digest: string;
   markdownBody: string;
   imageUrls: string[];
-  extractorUsed: "native_http" | "native_chrome_cdp";
+  extractorUsed: "native_http" | "native_chrome_cdp" | "jina_reader";
 }
 
 const WECHAT_USER_AGENT =
@@ -41,6 +42,7 @@ export async function extractWeChatArticle(
       return direct;
     }
   } catch (err) {
+    if (err instanceof UnsafeUrlError) throw err;
     console.warn(`[Extractor] Native HTTP fetch warning for ${url}:`, err);
   }
 
@@ -70,7 +72,7 @@ async function tryNativeHttpFetch(
   fallbackAuthor: string,
   fallbackDigest: string
 ): Promise<ExtractedWeChatArticle | null> {
-  const resp = await fetch(url, {
+  const resp = await fetchPublicResource(url, {
     headers: {
       "User-Agent": WECHAT_USER_AGENT,
       Referer: "https://mp.weixin.qq.com/",
@@ -379,7 +381,7 @@ export async function localizeWeChatImages(params: {
       batch.map(async (remoteUrl, batchIdx) => {
         const idx = i + batchIdx + 1;
         try {
-          const resp = await fetch(remoteUrl, {
+          const resp = await fetchPublicResource(remoteUrl, {
             signal: AbortSignal.timeout(30_000),
             headers: {
               "User-Agent": WECHAT_USER_AGENT,

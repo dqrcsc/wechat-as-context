@@ -1308,7 +1308,10 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
     expect(pushRes.sentCount).toBe(4);
     expect(pushRes.failedCount).toBe(0);
     expect(pushRes.missingFormats).toEqual([]);
-    expect(existsSync(join(f.root, "05_outputs", "codex_push_report.html"))).toBe(true);
+    const exportedHtml = pushRes.compiledFiles.find(p => p.endsWith(".html"));
+    expect(exportedHtml).toBeDefined();
+    expect(existsSync(exportedHtml!)).toBe(true);
+    expect(readFileSync(exportedHtml!, "utf8")).toContain("主动推送测试报告");
 
     // Verify WeChat sendmessage payloads: 1 TEXT (type=1), 2 FILE (type=4), 1 IMAGE (type=2)
     expect(sentMessages.length).toBe(4);
@@ -1317,14 +1320,14 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
     expect(sentMessages[1].msg.item_list[0].type).toBe(4);
     expect(sentMessages[1].msg.item_list[0].file_item.file_name).toBe("codex_push_report.md");
     expect(sentMessages[2].msg.item_list[0].type).toBe(4);
-    expect(sentMessages[2].msg.item_list[0].file_item.file_name).toBe("codex_push_report.html");
+    expect(sentMessages[2].msg.item_list[0].file_item.file_name).toMatch(/^codex_push_report_export_[a-f0-9]{16}\.html$/);
     expect(sentMessages[3].msg.item_list[0].type).toBe(2);
 
     // 3. Verify conversation_turns recorded the push so follow-up on WeChat has context
     const turns = f.db.getRecentConversationTurns("user@im.wechat", 5);
     expect(turns.length).toBe(1);
     expect(turns[0].intent).toBe("cli_push");
-    expect(turns[0].deposited_path).toContain("codex_push_report.html");
+    expect(turns[0].deposited_path).toContain(exportedHtml!);
 
     // 4. Verify CLI `push --queue-only --json` works in isolated fixture without network calls
     const cliProc = Bun.spawnSync(

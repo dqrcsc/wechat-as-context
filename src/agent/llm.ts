@@ -167,6 +167,7 @@ async function executeGeminiGroundedSearchCall(params: {
   tierUsed: ModelTier;
   systemPrompt: string;
   userPrompt: string;
+  images?: MultimodalImageInput[];
   temperature?: number;
   timeoutMs?: number;
 }): Promise<LlmCallResult> {
@@ -189,7 +190,12 @@ async function executeGeminiGroundedSearchCall(params: {
       contents: [
         {
           role: "user",
-          parts: [{ text: params.userPrompt }],
+          parts: [
+            { text: params.userPrompt },
+            ...(params.images || []).map(img => ({
+              inlineData: { mimeType: img.mimeType, data: img.base64Data },
+            })),
+          ],
         },
       ],
       tools: [{ google_search: {} }],

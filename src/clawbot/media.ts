@@ -1,6 +1,8 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
+import { writeNewFile } from "../storage.ts";
+import { fetchPublicResource } from "../public_url.ts";
 
 export const CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c";
 
@@ -91,7 +93,7 @@ export async function downloadAndDecryptCdnMedia(params: {
   ext: string;
 }> {
   const url = buildCdnDownloadUrl(params.media, params.cdnBaseUrl);
-  const resp = await fetch(url, {
+  const resp = await fetchPublicResource(url, {
     method: "GET",
     signal: AbortSignal.timeout(45_000),
   });
@@ -112,14 +114,14 @@ export async function downloadAndDecryptCdnMedia(params: {
     params.suggestedFileName
   );
   mkdirSync(params.saveDir, { recursive: true });
-  const hash = createHash("sha256").update(plainBuf).digest("hex").slice(0, 12);
-  const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, "_");
+  const hash = createHash("sha256").update(plainBuf).digest("hex");
   const cleanName = params.suggestedFileName
     ? sanitizeFileName(params.suggestedFileName, ext)
-    : `wx_media_${dateStr}_${hash}.${ext}`;
-  const filePath = join(params.saveDir, cleanName);
-  if (!existsSync(filePath)) {
-    writeFileSync(filePath, plainBuf);
+    : "wx_media";
+  const stem = basename(cleanName, extname(cleanName)).slice(0, 80) || "wx_media";
+  const filePath = join(params.saveDir, `${stem}_${hash}.${ext}`);
+  if (!writeNewFile(filePath, plainBuf) && !readFileSync(filePath).equals(plainBuf)) {
+    throw new Error(`Archived media content mismatch: ${filePath}`);
   }
   return { filePath, buffer: plainBuf, mimeType, ext };
 }

@@ -254,6 +254,7 @@ export interface AppConfig {
   };
   port: number;
   annotationWaitSeconds: number;
+  allowJinaFallback?: boolean;
   notifyWebhookUrl?: string;
   notifyWebhookSecret?: string;
   notifyWebhookKeyword?: string;
@@ -847,6 +848,7 @@ export function loadConfig(
       domainKeywords,
     },
     port: Number(get("PORT", "8787")) || 8787,
+    allowJinaFallback: get("ALLOW_JINA_FALLBACK", "false").toLowerCase() === "true",
     annotationWaitSeconds:
       Number(get("ANNOTATION_WAIT_SECONDS", "10")) >= 0
         ? Number(get("ANNOTATION_WAIT_SECONDS", "10"))
