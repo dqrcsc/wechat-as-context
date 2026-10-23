@@ -181,6 +181,9 @@ export class ContextDatabase {
       this.db.exec("ALTER TABLE reply_outbox ADD COLUMN media_sha256 TEXT NOT NULL DEFAULT ''");
     } catch {}
     try {
+      this.db.exec("ALTER TABLE reply_outbox ADD COLUMN next_retry_at INTEGER NOT NULL DEFAULT 0");
+    } catch {}
+    try {
       this.db.exec("ALTER TABLE agent_tasks ADD COLUMN stage TEXT NOT NULL DEFAULT ''");
     } catch {}
     try {
@@ -264,6 +267,81 @@ export class ContextDatabase {
       } catch {}
     }
     return pruned;
+  }
+
+  /**
+   * Prune aged terminal state rows (`agent_tasks`, `inbound_messages`, `reply_outbox`)
+   * so SQLite tables stay bounded over long-term daemon operation.
+   */
+  public pruneHistoricalRecords(options?: {
+    maxAgeMs?: number;
+    nowMs?: number;
+    keepRecentInbound?: number;
+    keepRecentOutbox?: number;
+  }): {
+    agentTasksPruned: number;
+    inboundPruned: number;
+    outboxPruned: number;
+  } {
+    const nowMs = options?.nowMs ?? Date.now();
+    const maxAgeMs = options?.maxAgeMs ?? 30 * 24 * 60 * 60 * 1000;
+    const keepRecentInbound = options?.keepRecentInbound ?? 1000;
+    const keepRecentOutbox = options?.keepRecentOutbox ?? 500;
+    const cutoffIso = new Date(nowMs - maxAgeMs).toISOString();
+
+    const taskRes = this.db
+      .query(
+        `DELETE FROM agent_tasks
+         WHERE status IN ('done', 'completed', 'failed')
+           AND updated_at != ''
+           AND updated_at <= ?`
+      )
+      .run(cutoffIso);
+
+    const inboundRes = this.db
+      .query(
+        `DELETE FROM inbound_messages
+         WHERE status = 'done'
+           AND sequence NOT IN (
+             SELECT sequence FROM inbound_messages ORDER BY sequence DESC LIMIT ?
+           )`
+      )
+      .run(keepRecentInbound);
+
+    const outboxRes = this.db
+      .query(
+        `DELETE FROM reply_outbox
+         WHERE status IN ('sent', 'failed')
+           AND rowid NOT IN (
+             SELECT rowid FROM reply_outbox ORDER BY rowid DESC LIMIT ?
+           )`
+      )
+      .run(keepRecentOutbox);
+
+    return {
+      agentTasksPruned: Number(taskRes.changes || 0),
+      inboundPruned: Number(inboundRes.changes || 0),
+      outboxPruned: Number(outboxRes.changes || 0),
+    };
+  }
+
+  public hasRunningAgentTask(): boolean {
+    const row = this.db
+      .query(
+        "SELECT 1 FROM agent_tasks WHERE status IN ('processing', 'running') LIMIT 1"
+      )
+      .get();
+    return Boolean(row);
+  }
+
+  public countActiveAgentTasksAhead(taskId: number): number {
+    const row = this.db
+      .query(
+        `SELECT COUNT(*) as cnt FROM agent_tasks
+         WHERE id < ? AND status IN ('pending', 'processing', 'running')`
+      )
+      .get(taskId) as { cnt: number } | null;
+    return Number(row?.cnt ?? 0);
   }
 
   public recordConversationTurn(params: {

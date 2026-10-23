@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   AppConfig,
@@ -291,8 +291,30 @@ export async function handleSaveConfigRequest(
     }
   }
 
-  const newConfig = loadConfig(undefined, projectRoot);
-  ensureStarterVaultInitialized(newConfig);
+  let newConfig = loadConfig(undefined, projectRoot);
+  if (newConfig.vaultMode === "structured_vault") {
+    ensureStarterVaultInitialized(newConfig);
+    newConfig = loadConfig(undefined, projectRoot);
+  } else if (newConfig.vaultMode === "generic_folder") {
+    for (const dir of [
+      newConfig.vaultRoot,
+      newConfig.wechatArticlesDir,
+      newConfig.ideasSeedsDir,
+    ]) {
+      if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
+    }
+  } else {
+    for (const dir of [
+      newConfig.vaultRoot,
+      newConfig.wechatArticlesDir,
+      newConfig.webArticlesDir,
+      newConfig.inboxDir,
+      newConfig.papersDir,
+      newConfig.ideasSeedsDir,
+    ]) {
+      if (dir && !existsSync(dir)) mkdirSync(dir, { recursive: true });
+    }
+  }
   pipeline.updateConfig(newConfig);
 
   if (isFormSubmit) {

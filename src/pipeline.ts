@@ -424,8 +424,34 @@ export class WeChatContextPipeline {
                 m.from_user_id,
                 statusText
               );
+            } else if (
+              this.db.hasRunningAgentTask() &&
+              this.canBypassBusyAgentQueue(unpacked, text)
+            ) {
+              this.handleIncomingMessage({
+                msgid: pending.message_key,
+                senderId: m.from_user_id,
+                channel: "clawbot",
+                msgType: "text",
+                textContent: text,
+              });
             } else if (this.shouldUseAsyncAgentRuntime(m, unpacked)) {
-              this.db.enqueueAgentTask(pending.message_key, m.from_user_id, pending.payload);
+              const wasBusy = this.db.hasRunningAgentTask();
+              const taskRec = this.db.enqueueAgentTask(
+                pending.message_key,
+                m.from_user_id,
+                pending.payload
+              );
+              if (wasBusy && taskRec.id > 0) {
+                const aheadCount = this.db.countActiveAgentTasksAhead(taskRec.id);
+                if (aheadCount > 0) {
+                  this.db.queueReply(
+                    `queue_ack_${createHash("sha256").update(pending.message_key).digest("hex")}`,
+                    m.from_user_id,
+                    `⏳ 已收到新消息，当前前方有 ${aheadCount} 个任务正在执行，完成后将立即为你处理（可发送「进度」查看实时状态）。`
+                  );
+                }
+              }
             } else {
               this.handleIncomingMessage({
                 msgid: pending.message_key,
@@ -445,6 +471,25 @@ export class WeChatContextPipeline {
       }
     }
     return count;
+  }
+
+  private canBypassBusyAgentQueue(
+    unpacked: ReturnType<typeof unpackClawBotMessage>,
+    rawText: string
+  ): boolean {
+    if (unpacked.mediaItems.length > 0 || unpacked.refContext) return false;
+    const t = (unpacked.userText || rawText || "").trim();
+    if (!t || detectExplicitCliBackend(t)) return false;
+    if (/^(?:想法|灵感|观点|我有一个想法|idea)\s*[:：]\s*([\s\S]+)$/i.test(t)) {
+      return true;
+    }
+    if (/^(?:深读|精读|优先|process_now)$/i.test(t)) {
+      return true;
+    }
+    if (unpacked.urls.length === 1 && isWeChatArticleUrl(unpacked.urls[0])) {
+      return true;
+    }
+    return false;
   }
 
   private shouldUseAsyncAgentRuntime(
@@ -547,10 +592,19 @@ export class WeChatContextPipeline {
     }
   }
 
-  public async flushReplies(): Promise<void> {
+  public async flushReplies(options?: {
+    enforceRetryBackoff?: boolean;
+    nowMs?: number;
+  }): Promise<void> {
+    const nowMs = options?.nowMs ?? Date.now();
+    const enforceBackoff = Boolean(options?.enforceRetryBackoff);
     await this.db.withLock("outbox", async () => {
       this.db.db.query("UPDATE reply_outbox SET status = 'failed', error = CASE WHEN error = '' THEN 'Delivery outcome unknown after interrupted attempt' ELSE error END WHERE status = 'pending' AND attempts >= 3").run();
-      const rows = this.db.db.query("SELECT * FROM reply_outbox WHERE status = 'pending' AND attempts < 3 ORDER BY rowid").all() as Array<{
+      const rows = this.db.db
+        .query(
+          "SELECT * FROM reply_outbox WHERE status = 'pending' AND attempts < 3 AND (? = 0 OR next_retry_at <= ?) ORDER BY rowid"
+        )
+        .all(enforceBackoff ? 1 : 0, nowMs) as Array<{
         id: string;
         recipient: string;
         text: string;
@@ -560,7 +614,8 @@ export class WeChatContextPipeline {
         media_sha256?: string;
       }>;
       for (const row of rows) {
-        this.db.db.query("UPDATE reply_outbox SET attempts = attempts + 1 WHERE id = ?").run(row.id);
+        const nextAttempts = row.attempts + 1;
+        this.db.db.query("UPDATE reply_outbox SET attempts = ? WHERE id = ?").run(nextAttempts, row.id);
         try {
           if (
             (row.media_type === "file" || row.media_type === "image") &&
@@ -573,13 +628,21 @@ export class WeChatContextPipeline {
           } else {
             await this.clawbot.sendTextMessage(row.recipient, row.text, row.id);
           }
-          this.db.db.query("UPDATE reply_outbox SET status = 'sent', error = '' WHERE id = ?").run(row.id);
+          this.db.db.query("UPDATE reply_outbox SET status = 'sent', error = '', next_retry_at = 0 WHERE id = ?").run(row.id);
         } catch (e: any) {
-          this.db.db.query("UPDATE reply_outbox SET status = ?, error = ? WHERE id = ?").run(row.attempts + 1 >= 3 ? "failed" : "pending", e.message, row.id);
+          const backoffMs =
+            nextAttempts === 1 ? 5_000 : nextAttempts === 2 ? 15_000 : 45_000;
+          const nextRetryAt = nextAttempts >= 3 ? 0 : nowMs + backoffMs;
+          this.db.db
+            .query(
+              "UPDATE reply_outbox SET status = ?, error = ?, next_retry_at = ? WHERE id = ?"
+            )
+            .run(nextAttempts >= 3 ? "failed" : "pending", e.message, nextRetryAt, row.id);
           console.error(`[Outbox] ${row.id}: ${e.message}`);
         }
       }
       this.db.pruneSentOutboxMedia();
+      this.db.pruneHistoricalRecords({ nowMs });
     });
   }
 

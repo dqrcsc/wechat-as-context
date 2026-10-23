@@ -24,13 +24,13 @@ console.log(
   `   Agent Models:     Fast=${config.llm.fastModel || config.llm.model} | Pro=${config.llm.proModel || "gemini-2.5-pro"}`
 );
 
-// Background queue drainer (checks annotation wait windows & pending agent tasks every 5 seconds)
+// Background queue drainer (checks annotation wait windows, pending agent tasks & outbox retries every 5 seconds)
 setInterval(async () => {
   try {
-    const agentCount = await pipeline.drainAgentQueue();
-    const processed = await pipeline.drainReadyQueue();
-    if (agentCount > 0 || processed.length > 0) {
-      await pipeline.flushReplies();
+    await pipeline.drainAgentQueue();
+    await pipeline.drainReadyQueue();
+    if (pipeline.clawbot.isConfigured()) {
+      await pipeline.flushReplies({ enforceRetryBackoff: true });
     }
   } catch (err) {
     console.error("[Timer] drainReadyQueue error:", err);

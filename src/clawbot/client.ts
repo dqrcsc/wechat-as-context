@@ -389,6 +389,7 @@ export class WeChatClawBotClient {
 
   /**
    * Send a text reply directly back to the user in the pinned 微信ClawBot [AI] chat window.
+   * Automatically splits oversized messages (> 2500 chars) at natural paragraph/line boundaries.
    */
   public async sendTextMessage(toUserId: string, text: string, clientId = `wxctx-${randomUUID()}`): Promise<void> {
     const creds = this.getCredentials();
@@ -399,34 +400,39 @@ export class WeChatClawBotClient {
       ? creds.baseUrl
       : `${creds.baseUrl}/`;
     const url = new URL("ilink/bot/sendmessage", base);
+    const chunks = splitWeChatTextChunks(text, 2500);
 
-    const payload = {
-      msg: {
-        from_user_id: "",
-        to_user_id: toUserId,
-        client_id: clientId,
-        message_type: 2, // BOT
-        message_state: 2, // FINISH
-        item_list: [
-          {
-            type: 1, // TEXT
-            text_item: { text },
-          },
-        ],
-        ...(contextToken ? { context_token: contextToken } : {}),
-      },
-      base_info: buildBaseInfo(),
-    };
+    for (let i = 0; i < chunks.length; i++) {
+      const chunkText = chunks[i];
+      const chunkClientId = i === 0 ? clientId : `${clientId}_part_${i + 1}`;
+      const payload = {
+        msg: {
+          from_user_id: "",
+          to_user_id: toUserId,
+          client_id: chunkClientId,
+          message_type: 2, // BOT
+          message_state: 2, // FINISH
+          item_list: [
+            {
+              type: 1, // TEXT
+              text_item: { text: chunkText },
+            },
+          ],
+          ...(contextToken ? { context_token: contextToken } : {}),
+        },
+        base_info: buildBaseInfo(),
+      };
 
-    const resp = await fetch(url.toString(), {
-      method: "POST",
-      headers: buildHeaders(creds.botToken),
-      body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(30_000),
-    });
+      const resp = await fetch(url.toString(), {
+        method: "POST",
+        headers: buildHeaders(creds.botToken),
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(30_000),
+      });
 
-    if (!resp.ok) throw new Error(`sendmessage HTTP ${resp.status}`);
-    assertApiSuccess(await resp.json(), "sendmessage");
+      if (!resp.ok) throw new Error(`sendmessage HTTP ${resp.status}`);
+      assertApiSuccess(await resp.json(), "sendmessage");
+    }
   }
 
   /**
@@ -831,4 +837,38 @@ function assertApiSuccess(data: any, operation: string): void {
       throw new Error(`${operation}: ${field}=${data[field]} ${String(data.errmsg || "request rejected").slice(0, 200)}`);
     }
   }
+}
+
+/**
+ * Split oversized WeChat replies into safe chunks (<= maxChars) at paragraph/line boundaries.
+ */
+export function splitWeChatTextChunks(text: string, maxChars = 2500): string[] {
+  if (!text || text.length <= maxChars) return [text];
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > maxChars) {
+    const window = remaining.slice(0, maxChars);
+    let splitIdx = window.lastIndexOf("\n\n");
+    if (splitIdx < Math.floor(maxChars * 0.4)) {
+      splitIdx = window.lastIndexOf("\n");
+    }
+    if (splitIdx < Math.floor(maxChars * 0.4)) {
+      splitIdx = Math.max(
+        window.lastIndexOf("。"),
+        window.lastIndexOf("！"),
+        window.lastIndexOf("？"),
+        window.lastIndexOf(". ")
+      );
+      if (splitIdx > 0) splitIdx += 1;
+    }
+    if (splitIdx <= 0) {
+      splitIdx = maxChars;
+    }
+    chunks.push(remaining.slice(0, splitIdx).trimEnd());
+    remaining = remaining.slice(splitIdx).replace(/^\r?\n+/, "");
+  }
+  if (remaining.length > 0) {
+    chunks.push(remaining);
+  }
+  return chunks;
 }

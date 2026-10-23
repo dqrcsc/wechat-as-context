@@ -1230,7 +1230,7 @@ async function executeCustomCli(
   };
 }
 
-async function spawnCliWithTimeout(
+export async function spawnCliWithTimeout(
   bin: string,
   args: string[],
   cwd: string,
@@ -1256,11 +1256,36 @@ async function spawnCliWithTimeout(
   }
 
   let timedOut = false;
+  let killEscalationTimer: ReturnType<typeof setTimeout> | null = null;
+  let forceAbortStreams: (() => void) | null = null;
+  const streamAbortPromise = new Promise<{ done: true; value: undefined }>(
+    (resolve) => {
+      forceAbortStreams = () => resolve({ done: true, value: undefined });
+    }
+  );
+
+  const killProcessTree = (signal: "TERM" | "KILL") => {
+    try {
+      if (!process.env.WXCTX_TEST_ROOT && proc.pid && process.platform !== "win32") {
+        Bun.spawnSync(["pkill", `-${signal}`, "-P", String(proc.pid)], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+      }
+    } catch {}
+    try {
+      proc.kill(signal === "KILL" ? 9 : 15);
+    } catch {}
+  };
+
   const timer = setTimeout(() => {
     timedOut = true;
-    try {
-      proc.kill();
-    } catch {}
+    killProcessTree("TERM");
+    const graceMs = Math.min(2000, Math.max(150, Math.floor(timeoutMs / 2)));
+    killEscalationTimer = setTimeout(() => {
+      killProcessTree("KILL");
+      forceAbortStreams?.();
+    }, graceMs);
   }, timeoutMs);
 
   let totalBytes = 0;
@@ -1275,7 +1300,10 @@ async function spawnCliWithTimeout(
     const chunks: string[] = [];
     try {
       while (true) {
-        const { done, value } = await reader.read();
+        const { done, value } = await Promise.race([
+          reader.read(),
+          streamAbortPromise,
+        ]);
         if (done) break;
         if (value) {
           totalBytes += value.byteLength;
@@ -1298,16 +1326,24 @@ async function spawnCliWithTimeout(
         }
       }
       chunks.push(decoder.decode());
-    } catch {}
+    } catch {} finally {
+      try {
+        reader.releaseLock();
+      } catch {}
+    }
     return chunks.join("");
   };
 
   const [stdoutText, stderrText, exitCode] = await Promise.all([
     consumeStream(proc.stdout as ReadableStream<Uint8Array>),
     consumeStream(proc.stderr as ReadableStream<Uint8Array>),
-    proc.exited,
+    Promise.race([
+      proc.exited,
+      streamAbortPromise.then(() => -1),
+    ]),
   ]);
   clearTimeout(timer);
+  if (killEscalationTimer) clearTimeout(killEscalationTimer);
 
   return {
     cleanOut: stdoutText.trim(),

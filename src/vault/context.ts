@@ -42,6 +42,73 @@ const IGNORED_VAULT_DIRS = new Set([
   "dist",
 ]);
 
+interface CachedVaultMarkdown {
+  mtimeMs: number;
+  size: number;
+  rawContent: string;
+  lowerContent: string;
+  strippedBody: string;
+}
+
+const MAX_VAULT_CACHE_ENTRIES = 4000;
+const vaultMarkdownCache = new Map<string, CachedVaultMarkdown>();
+let vaultCacheHits = 0;
+let vaultCacheMisses = 0;
+
+export function getVaultCacheStats(): {
+  size: number;
+  hits: number;
+  misses: number;
+} {
+  return {
+    size: vaultMarkdownCache.size,
+    hits: vaultCacheHits,
+    misses: vaultCacheMisses,
+  };
+}
+
+export function clearVaultMarkdownCache(): void {
+  vaultMarkdownCache.clear();
+  vaultCacheHits = 0;
+  vaultCacheMisses = 0;
+}
+
+function getCachedVaultMarkdown(filePath: string): CachedVaultMarkdown | null {
+  try {
+    const st = statSync(filePath);
+    if (!st.isFile()) return null;
+    const existing = vaultMarkdownCache.get(filePath);
+    if (
+      existing &&
+      existing.mtimeMs === st.mtimeMs &&
+      existing.size === st.size
+    ) {
+      vaultCacheHits++;
+      return existing;
+    }
+    vaultCacheMisses++;
+    const rawContent = readFileSync(filePath, "utf-8");
+    const strippedBody = rawContent
+      .replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n+/, "")
+      .trim();
+    const entry: CachedVaultMarkdown = {
+      mtimeMs: st.mtimeMs,
+      size: st.size,
+      rawContent,
+      lowerContent: rawContent.toLowerCase(),
+      strippedBody,
+    };
+    if (vaultMarkdownCache.size >= MAX_VAULT_CACHE_ENTRIES) {
+      const oldestKey = vaultMarkdownCache.keys().next().value;
+      if (oldestKey) vaultMarkdownCache.delete(oldestKey);
+    }
+    vaultMarkdownCache.set(filePath, entry);
+    return entry;
+  } catch {
+    return null;
+  }
+}
+
 function resolveFirstExistingFile(vaultRoot: string, candidates: string[]): string {
   for (const c of candidates) {
     if (!c) continue;
@@ -93,16 +160,12 @@ export function gatherVaultContext(
 }
 
 function safeReadExcerpt(filePath: string, maxChars: number): string {
-  if (!existsSync(filePath)) return "";
-  try {
-    const raw = readFileSync(filePath, "utf-8");
-    const stripped = raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n+/, "").trim();
-    return stripped.length > maxChars
-      ? stripped.slice(0, maxChars) + "\n...(truncated)"
-      : stripped;
-  } catch {
-    return "";
-  }
+  const cached = getCachedVaultMarkdown(filePath);
+  if (!cached) return "";
+  const stripped = cached.strippedBody;
+  return stripped.length > maxChars
+    ? stripped.slice(0, maxChars) + "\n...(truncated)"
+    : stripped;
 }
 
 function extractDynamicFocusTerms(
@@ -317,7 +380,9 @@ export function searchVaultNotes(
       ) {
         continue;
       }
-      const content = readFileSync(filePath, "utf-8").toLowerCase();
+      const cached = getCachedVaultMarkdown(filePath);
+      if (!cached) continue;
+      const content = cached.lowerContent;
       const fileNameLower = basename(filePath, ".md").toLowerCase();
       let score = 0;
 
@@ -374,7 +439,8 @@ function collectMarkdownFiles(dir: string, out: string[]): void {
     if (
       entry.startsWith(".") ||
       entry === "instruction.md" ||
-      IGNORED_VAULT_DIRS.has(entry)
+      IGNORED_VAULT_DIRS.has(entry) ||
+      /_export_[a-f0-9]{16}\.md$/i.test(entry)
     ) {
       continue;
     }
@@ -611,7 +677,9 @@ export function findVaultFilesByQuery(
   for (const filePath of mdFiles) {
     try {
       const relFromRoot = relative(vaultRoot, filePath).replace(/\\/g, "/");
-      const content = readFileSync(filePath, "utf-8").toLowerCase();
+      const cached = getCachedVaultMarkdown(filePath);
+      if (!cached) continue;
+      const content = cached.lowerContent;
       const fileNameLower = basename(filePath, ".md").toLowerCase();
       let score = 0;
       for (const kw of keywords) {
@@ -633,12 +701,9 @@ export function findVaultFilesByQuery(
           score += 5;
         }
         // Boost files created/modified within the last 6 hours
-        try {
-          const mtimeMs = statSync(filePath).mtimeMs;
-          if (nowMs - mtimeMs <= 6 * 3600 * 1000) {
-            score += 12;
-          }
-        } catch {}
+        if (nowMs - cached.mtimeMs <= 6 * 3600 * 1000) {
+          score += 12;
+        }
         scored.push({ filePath, count: score });
       }
     } catch {}

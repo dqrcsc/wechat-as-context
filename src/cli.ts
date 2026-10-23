@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { homedir, platform } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
-import { expandHomePath, loadConfig } from "./config.ts";
+import { auditSkillsDirectoryHealth, expandHomePath, loadConfig } from "./config.ts";
 import { ContextDatabase, TriageLevel } from "./db.ts";
 import { WeChatContextPipeline, normalizeWeChatUrl } from "./pipeline.ts";
 import { isWeChatArticleUrl, normalizeExternalWebUrl } from "./extractor/web.ts";
@@ -384,6 +384,7 @@ async function main() {
       const llmReady = Boolean(config.llm.apiKey);
       const vaultExists = existsSync(config.vaultRoot);
       const vaultMode = config.vaultMode || (vaultExists ? "generic_folder" : "standalone");
+      const skillsHealth = auditSkillsDirectoryHealth();
 
       const report = {
         ok: Boolean(clawbotCreds),
@@ -399,6 +400,7 @@ async function main() {
         webArticlesDir: config.webArticlesDir,
         ideasSeedsDir: config.ideasSeedsDir,
         dbPath: config.dbPath,
+        skillsHealth,
         checks: {
           vault: vaultExists
             ? `ok (mode: ${vaultMode})`
@@ -409,6 +411,11 @@ async function main() {
           clawbot: clawbotCreds
             ? `configured; connection not verified (botId: ${clawbotCreds.botId}, baseUrl: ${clawbotCreds.baseUrl}, savedAt: ${clawbotCreds.savedAt})`
             : "not connected (run `bun run src/cli.ts login` to scan QR and bind 微信ClawBot [AI])",
+          skills: !skillsHealth.exists
+            ? "not initialized"
+            : skillsHealth.invalidSkillFiles.length === 0
+              ? `ok (${skillsHealth.totalSkills} skills valid)`
+              : `warning (${skillsHealth.invalidSkillFiles.length} invalid SKILL.md frontmatter files)`,
         },
       };
 

@@ -1,19 +1,27 @@
 import "./support/isolation.ts";
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, type AppConfig } from "../src/config.ts";
+import { auditSkillsDirectoryHealth, loadConfig, type AppConfig } from "../src/config.ts";
 import { ContextDatabase } from "../src/db.ts";
 import { WeChatContextPipeline } from "../src/pipeline.ts";
+import { splitWeChatTextChunks } from "../src/clawbot/client.ts";
 import { downloadAndDecryptCdnMedia } from "../src/clawbot/media.ts";
-import { discoverGeneratedArtifacts, setSubagentTestRunner } from "../src/agent/subagent_cli.ts";
+import { discoverGeneratedArtifacts, setSubagentTestRunner, spawnCliWithTimeout } from "../src/agent/subagent_cli.ts";
 import { compileMarkdownToHtml, ensureMultiFormatDeliverables } from "../src/agent/doc_exporter.ts";
-import { findSiblingMultiFormatFiles } from "../src/vault/context.ts";
+import {
+  clearVaultMarkdownCache,
+  findSiblingMultiFormatFiles,
+  findVaultFilesByQuery,
+  getVaultCacheStats,
+  searchVaultNotes,
+} from "../src/vault/context.ts";
 import { formatLiveTaskStatusReport, TaskProgressReporter } from "../src/agent/progress.ts";
 import { callAgentLlm } from "../src/agent/llm.ts";
 import { extractGeneralWebArticle, normalizeExternalWebUrl } from "../src/extractor/web.ts";
 import { createHttpHandler } from "../src/http.ts";
+import { handleSaveConfigRequest } from "../src/web_config.ts";
 
 const originalFetch = globalThis.fetch;
 const databases: ContextDatabase[] = [];
@@ -525,4 +533,316 @@ test("explicit Codex image generation and multi-turn retry preserve requested CL
   // Once all rows referencing the snapshot are sent, pruneSentOutboxMedia(0) cleans it up
   f.db.db.query("UPDATE reply_outbox SET status = 'sent'").run();
   expect(f.db.pruneSentOutboxMedia(0)).toBe(1);
+});
+
+test("handleSaveConfigRequest respects standalone and generic_folder modes without polluting with numbered directories", async () => {
+  const f = fixture();
+  // 1. Standalone mode (VAULT_ROOT=none)
+  const standaloneArchive = join(f.root, "data", "archive");
+  const saveStandaloneRes = await handleSaveConfigRequest(
+    new Request("http://127.0.0.1:8787/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        updates: {
+          IGNORE_HOME_DOTENV: "true",
+          VAULT_ROOT: "none",
+          TASK_HEARTBEAT_SECONDS: "30",
+        },
+        deletedKeys: [],
+      }),
+    }),
+    f.db,
+    f.pipeline
+  );
+  expect(saveStandaloneRes.status).toBe(200);
+  expect(f.pipeline.config.vaultMode).toBe("standalone");
+  expect(existsSync(join(standaloneArchive, "00_home"))).toBe(false);
+  expect(existsSync(join(standaloneArchive, "04_topics"))).toBe(false);
+
+  // 2. Generic folder mode (existing non-numbered Obsidian vault)
+  const genericVault = join(f.root, "my_obsidian_notes");
+  mkdirSync(genericVault, { recursive: true });
+  writeFileSync(join(genericVault, "daily.md"), "# Daily Note\n");
+  const saveGenericRes = await handleSaveConfigRequest(
+    new Request("http://127.0.0.1:8787/api/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        updates: {
+          IGNORE_HOME_DOTENV: "true",
+          VAULT_ROOT: genericVault,
+          TASK_HEARTBEAT_SECONDS: "45",
+        },
+        deletedKeys: [],
+      }),
+    }),
+    f.db,
+    f.pipeline
+  );
+  expect(saveGenericRes.status).toBe(200);
+  expect(f.pipeline.config.vaultMode).toBe("generic_folder");
+  expect(existsSync(join(genericVault, "00_home"))).toBe(false);
+  expect(existsSync(join(genericVault, "04_topics"))).toBe(false);
+  expect(existsSync(join(genericVault, "05_outputs"))).toBe(false);
+});
+
+test("outbox flushReplies enforces exponential backoff when requested and recovers after backoff window", async () => {
+  const f = fixture();
+  f.pipeline.clawbot.saveCredentials({
+    botToken: "tok",
+    baseUrl: "https://ilink.example.test",
+    botId: "bot1",
+    userId: "owner",
+    savedAt: new Date().toISOString(),
+  });
+  f.db.queueReply("backoff-1", "owner", "Hello after wake");
+
+  let callCount = 0;
+  let shouldFail = true;
+  globalThis.fetch = (async () => {
+    callCount++;
+    if (shouldFail) {
+      return new Response("network down", { status: 502 });
+    }
+    return Response.json({ ret: 0 });
+  }) as unknown as typeof fetch;
+
+  // Attempt 1 fails at t = 1000ms -> sets next_retry_at = 6000ms (+5000ms)
+  await f.pipeline.flushReplies({ enforceRetryBackoff: true, nowMs: 1000 });
+  expect(callCount).toBe(1);
+  let row = f.db.db.query("SELECT status, attempts, next_retry_at FROM reply_outbox WHERE id = 'backoff-1'").get() as any;
+  expect(row.status).toBe("pending");
+  expect(row.attempts).toBe(1);
+  expect(row.next_retry_at).toBe(6000);
+
+  // Calling before 6000ms with enforceRetryBackoff=true does NOT burn an attempt
+  await f.pipeline.flushReplies({ enforceRetryBackoff: true, nowMs: 3500 });
+  expect(callCount).toBe(1);
+
+  // Calling at t = 6000ms triggers Attempt 2; still failing -> sets next_retry_at = 21000ms (+15000ms)
+  await f.pipeline.flushReplies({ enforceRetryBackoff: true, nowMs: 6000 });
+  expect(callCount).toBe(2);
+  row = f.db.db.query("SELECT status, attempts, next_retry_at FROM reply_outbox WHERE id = 'backoff-1'").get() as any;
+  expect(row.status).toBe("pending");
+  expect(row.attempts).toBe(2);
+  expect(row.next_retry_at).toBe(21000);
+
+  // Network recovers before t = 21000ms; calling at t = 21000ms succeeds on Attempt 3
+  shouldFail = false;
+  await f.pipeline.flushReplies({ enforceRetryBackoff: true, nowMs: 21000 });
+  expect(callCount).toBe(3);
+  row = f.db.db.query("SELECT status, attempts, next_retry_at FROM reply_outbox WHERE id = 'backoff-1'").get() as any;
+  expect(row.status).toBe("sent");
+  expect(row.attempts).toBe(3);
+  expect(row.next_retry_at).toBe(0);
+});
+
+test("busy agent queue allows fast-lane ideas/articles to bypass blocking and sends queue-position ack for queued tasks", () => {
+  const f = fixture("synthetic-llm-key");
+  // Simulate a heavy task currently running in agent_tasks
+  const runningTask = f.db.enqueueAgentTask("heavy-1", "owner", "{}");
+  f.db.updateAgentTaskStatus(runningTask.id, "processing", "", "正在执行深度调研");
+
+  // 1. User sends "想法：在长任务运行期间顺手记录一个灵感" -> bypasses agent_tasks and saves immediately
+  f.db.db
+    .query("INSERT INTO inbound_messages(message_key, payload) VALUES (?, ?)")
+    .run(
+      "fast-idea-1",
+      JSON.stringify({
+        message_id: "fast-idea-1",
+        from_user_id: "owner",
+        message_type: 1,
+        item_list: [{ type: 1, text_item: { text: "想法：在长任务运行期间顺手记录一个灵感" } }],
+      })
+    );
+
+  // 2. User sends another heavy task ("帮我再画一张风景图") -> enqueued in agent_tasks AND gets immediate queue-position ack
+  f.db.db
+    .query("INSERT INTO inbound_messages(message_key, payload) VALUES (?, ?)")
+    .run(
+      "heavy-2",
+      JSON.stringify({
+        message_id: "heavy-2",
+        from_user_id: "owner",
+        message_type: 1,
+        item_list: [{ type: 1, text_item: { text: "帮我再画一张风景图" } }],
+      })
+    );
+
+  expect(f.pipeline.processPendingMessages()).toBe(2);
+
+  // Fast-lane idea was NOT blocked in agent_tasks; only heavy-2 is pending in agent_tasks
+  const pendingTasks = f.db.getPendingAgentTasks();
+  expect(pendingTasks).toHaveLength(1);
+  expect(pendingTasks[0].message_key).toBe("heavy-2");
+
+  // Outbox has both the immediate idea confirmation and the queue-position ack for heavy-2
+  const outboxRows = f.db.db.query("SELECT id, text FROM reply_outbox ORDER BY rowid ASC").all() as Array<{
+    id: string;
+    text: string;
+  }>;
+  expect(outboxRows.some((r) => r.text.includes("💡 想法已保存"))).toBe(true);
+  expect(
+    outboxRows.some(
+      (r) => r.id.startsWith("queue_ack_") && r.text.includes("前方有 1 个任务正在执行")
+    )
+  ).toBe(true);
+});
+
+test("spawnCliWithTimeout escalates from SIGTERM to SIGKILL and unblocks streams when a process ignores SIGTERM", async () => {
+  const signals: number[] = [];
+  // Create a stream that never closes on its own (simulating an orphaned child holding stdout open)
+  const hangingStream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode("partial output before hang\n"));
+    },
+  });
+  const neverExit = new Promise<number>(() => {});
+  const spawnSpy = spyOn(Bun, "spawn").mockImplementation((() => ({
+    pid: 99999,
+    stdout: hangingStream,
+    stderr: new Response("some warning\n").body,
+    exited: neverExit,
+    kill(sig?: number) {
+      signals.push(sig ?? 15);
+    },
+  })) as any);
+
+  try {
+    const res = await spawnCliWithTimeout("mock-cli", ["--run"], process.cwd(), 100);
+    expect(res.timedOut).toBe(true);
+    expect(res.cleanOut).toContain("partial output before hang");
+    expect(signals).toEqual([15, 9]);
+  } finally {
+    spawnSpy.mockRestore();
+  }
+});
+
+test("splitWeChatTextChunks and sendTextMessage split oversized text replies at natural boundaries", async () => {
+  const f = fixture();
+  f.pipeline.clawbot.saveCredentials({
+    botToken: "tok",
+    baseUrl: "https://ilink.example.test",
+    botId: "bot1",
+    userId: "owner",
+    savedAt: new Date().toISOString(),
+  });
+
+  const para1 = "第一段内容：".padEnd(1400, "甲");
+  const para2 = "第二段内容：".padEnd(1400, "乙");
+  const para3 = "第三段内容：".padEnd(600, "丙");
+  const longText = `${para1}\n\n${para2}\n\n${para3}`;
+
+  const chunks = splitWeChatTextChunks(longText, 2500);
+  expect(chunks).toHaveLength(2);
+  expect(chunks[0]).toBe(para1);
+  expect(chunks[1]).toBe(`${para2}\n\n${para3}`);
+
+  const sentPayloads: Array<{ clientId: string; text: string }> = [];
+  globalThis.fetch = (async (_url: any, init?: any) => {
+    const body = JSON.parse(init.body);
+    sentPayloads.push({
+      clientId: body.msg.client_id,
+      text: body.msg.item_list[0].text_item.text,
+    });
+    return Response.json({ ret: 0 });
+  }) as unknown as typeof fetch;
+
+  await f.pipeline.clawbot.sendTextMessage("owner", longText, "msg-long");
+  expect(sentPayloads).toEqual([
+    { clientId: "msg-long", text: para1 },
+    { clientId: "msg-long_part_2", text: `${para2}\n\n${para3}` },
+  ]);
+});
+
+test("vault markdown cache reuses unchanged files, invalidates on edit, and skips _export_<revision>.md files", () => {
+  const f = fixture();
+  clearVaultMarkdownCache();
+  const topicsDir = join(f.root, "04_topics");
+  mkdirSync(topicsDir, { recursive: true });
+
+  const primaryNote = join(topicsDir, "ontology_design.md");
+  const derivedExport = join(topicsDir, "ontology_design_export_0123456789abcdef.md");
+  writeFileSync(primaryNote, "---\ntitle: Ontology\n---\n# Ontology Architecture\nCore knowledge graph patterns.");
+  writeFileSync(derivedExport, "# Ontology Architecture\nCore knowledge graph patterns.");
+
+  const firstHits = searchVaultNotes(f.root, ["ontology"]);
+  expect(firstHits).toHaveLength(1);
+  expect(firstHits[0].absolutePath).toBe(primaryNote);
+  const statsAfterFirst = getVaultCacheStats();
+  expect(statsAfterFirst.misses).toBe(1);
+
+  // Second query hits in-memory cache without re-reading disk
+  const secondHits = findVaultFilesByQuery(f.root, "ontology");
+  expect(secondHits).toHaveLength(1);
+  expect(secondHits[0].absolutePath).toBe(primaryNote);
+  const statsAfterSecond = getVaultCacheStats();
+  expect(statsAfterSecond.hits).toBeGreaterThan(statsAfterFirst.hits);
+  expect(statsAfterSecond.misses).toBe(1);
+
+  // Editing the file changes size/mtimeMs and invalidates cache entry
+  writeFileSync(
+    primaryNote,
+    "---\ntitle: Ontology\n---\n# Ontology Architecture\nUpdated with world model synthesis."
+  );
+  const thirdHits = searchVaultNotes(f.root, ["world model"]);
+  expect(thirdHits).toHaveLength(1);
+  expect(thirdHits[0].excerpt).toContain("Updated with world model synthesis.");
+  expect(getVaultCacheStats().misses).toBe(2);
+});
+
+test("pruneHistoricalRecords cleans aged terminal tasks and bounds completed inbound/outbox rows", () => {
+  const f = fixture();
+  const nowMs = Date.parse("2026-10-23T12:00:00.000Z");
+  const oldIso = new Date(nowMs - 40 * 24 * 60 * 60 * 1000).toISOString();
+  const recentIso = new Date(nowMs - 2 * 24 * 60 * 60 * 1000).toISOString();
+
+  const oldTask = f.db.enqueueAgentTask("old-task", "owner", "{}");
+  f.db.updateAgentTaskStatus(oldTask.id, "done");
+  f.db.db.query("UPDATE agent_tasks SET updated_at = ? WHERE id = ?").run(oldIso, oldTask.id);
+
+  const recentTask = f.db.enqueueAgentTask("recent-task", "owner", "{}");
+  f.db.updateAgentTaskStatus(recentTask.id, "done");
+  f.db.db.query("UPDATE agent_tasks SET updated_at = ? WHERE id = ?").run(recentIso, recentTask.id);
+
+  for (let i = 1; i <= 5; i++) {
+    f.db.db.query("INSERT INTO inbound_messages(message_key, payload, status) VALUES (?, '{}', 'done')").run(`in-${i}`);
+    f.db.db.query("INSERT INTO reply_outbox(id, recipient, text, status) VALUES (?, 'owner', 'ok', 'sent')").run(`out-${i}`);
+  }
+
+  const pruned = f.db.pruneHistoricalRecords({
+    nowMs,
+    maxAgeMs: 30 * 24 * 60 * 60 * 1000,
+    keepRecentInbound: 3,
+    keepRecentOutbox: 2,
+  });
+  expect(pruned).toEqual({
+    agentTasksPruned: 1,
+    inboundPruned: 2,
+    outboxPruned: 3,
+  });
+  expect(f.db.db.query("SELECT message_key FROM agent_tasks").all()).toEqual([
+    { message_key: "recent-task" },
+  ]);
+});
+
+test("auditSkillsDirectoryHealth detects missing YAML frontmatter and nested node_modules", () => {
+  const f = fixture();
+  const skillsRoot = join(f.root, "skills");
+  const goodSkill = join(skillsRoot, "good-skill");
+  const badSkill = join(skillsRoot, "bad-skill");
+  const heavySkill = join(skillsRoot, "heavy-skill", "scripts", "node_modules");
+  mkdirSync(goodSkill, { recursive: true });
+  mkdirSync(badSkill, { recursive: true });
+  mkdirSync(heavySkill, { recursive: true });
+
+  writeFileSync(join(goodSkill, "SKILL.md"), "---\nname: good-skill\ndescription: valid\n---\n# Good\n");
+  writeFileSync(join(badSkill, "SKILL.md"), "# Missing Frontmatter\n");
+
+  const health = auditSkillsDirectoryHealth(skillsRoot);
+  expect(health.exists).toBe(true);
+  expect(health.totalSkills).toBe(2);
+  expect(health.invalidSkillFiles).toEqual([join(badSkill, "SKILL.md")]);
+  expect(health.heavyNodeModulesDirs).toEqual([heavySkill]);
 });

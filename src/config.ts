@@ -1,5 +1,5 @@
 import { createHmac } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 
@@ -953,4 +953,95 @@ export async function notifyExternalWebhookIfConfigured(
   } catch {
     return false;
   }
+}
+
+export interface SkillsDirectoryHealth {
+  exists: boolean;
+  skillsDir: string;
+  totalSkills: number;
+  invalidSkillFiles: string[];
+  heavyNodeModulesDirs: string[];
+}
+
+/**
+ * Audit a Codex/Agent skills directory (e.g. ~/.codex/skills) for broken SKILL.md
+ * YAML frontmatter or nested node_modules directories that can trip CLI directory scanners.
+ */
+export function auditSkillsDirectoryHealth(
+  skillsDir?: string
+): SkillsDirectoryHealth {
+  if (
+    !skillsDir &&
+    !process.env.WXCTX_SKILLS_DIR &&
+    (process.env.IGNORE_HOME_DOTENV || "").toLowerCase() === "true"
+  ) {
+    return {
+      exists: false,
+      skillsDir: "",
+      totalSkills: 0,
+      invalidSkillFiles: [],
+      heavyNodeModulesDirs: [],
+    };
+  }
+  const resolvedRoot = expandHomePath(
+    skillsDir || process.env.WXCTX_SKILLS_DIR || join(homedir(), ".codex", "skills")
+  );
+  if (!existsSync(resolvedRoot)) {
+    return {
+      exists: false,
+      skillsDir: resolvedRoot,
+      totalSkills: 0,
+      invalidSkillFiles: [],
+      heavyNodeModulesDirs: [],
+    };
+  }
+
+  let totalSkills = 0;
+  const invalidSkillFiles: string[] = [];
+  const heavyNodeModulesDirs: string[] = [];
+
+  const scanDir = (dir: string, depth: number) => {
+    if (depth > 3) return;
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.startsWith(".")) continue;
+      const full = join(dir, entry);
+      if (entry === "node_modules") {
+        heavyNodeModulesDirs.push(full);
+        continue;
+      }
+      if (entry === "SKILL.md") {
+        totalSkills++;
+        try {
+          const head = readFileSync(full, "utf-8").slice(0, 4000);
+          if (!/^---\r?\n[\s\S]+?\r?\n---(?:\r?\n|$)/.test(head)) {
+            invalidSkillFiles.push(full);
+          }
+        } catch {
+          invalidSkillFiles.push(full);
+        }
+        continue;
+      }
+      try {
+        const subEntries = readdirSync(full);
+        if (Array.isArray(subEntries)) {
+          scanDir(full, depth + 1);
+        }
+      } catch {}
+    }
+  };
+
+  scanDir(resolvedRoot, 0);
+  return {
+    exists: true,
+    skillsDir: resolvedRoot,
+    totalSkills,
+    invalidSkillFiles,
+    heavyNodeModulesDirs,
+  };
 }
