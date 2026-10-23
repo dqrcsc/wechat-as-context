@@ -16,7 +16,8 @@
 
 ---
 
-**v0.2.3 升级与使用边界声明**：
+**v0.2.4 升级与使用边界声明**：
+- **测试隔离修复**：测试改用 `bun run test`，在不含 `.env` 和业务数据的临时源码副本中执行，父子进程统一阻断越界数据库与未模拟网络请求。直接 `bun test` 会提前拒绝运行。原因与验收见 [测试隔离说明](./docs/test-isolation.md)。生产配置优先级不变。
 - **本轮十项回归修复**：见 [文件快照、执行结果与配置可靠性验收](./docs/v023-reliability-fixes.md)。此前修复见 [v0.2.2 图片与文件版本说明](./docs/followup-reliability-fixes.md) 和 [v0.2.1 队列锁说明](./docs/reliability-fixes.md)；从未使用 Agent 队列锁的旧版升级时，须先停止旧 worker。
 - **待发媒体升级**：新版新增 `reply_outbox.media_sha256`，入队保存文件快照并在发送前校验。旧版待发媒体没有快照摘要，需重新入队；原文件保留。不要让旧版与新版共用数据库发送媒体。快照保存在数据库同目录的 `outbox_media/`，本版不自动清理。
 - **BYOK 连通性验证**：配置密钥或选择模型预设不代表该模型的长文本、多模态视觉或实时联网能力已在你的账户下开通；首次配置后请在 Web 配置工作台（`bun run config`）点击 **「⚡ 测试模型连通性」** 做一次真实请求验证。
@@ -433,8 +434,14 @@ NOTIFY_ON_EVENTS=article,idea,plan
 项目配备完整的单元测试与端到端可靠性测试套件（覆盖 AES-128-ECB 双格式加解密、iLink 消息解包、四级模型降级链路、Web 配置工作台 API、多格式文档渲染导出、并发锁与崩溃恢复及本轮修复回归测试）：
 
 ```bash
-# 运行全部单元与可靠性测试
-bun test
+# 在隔离副本中运行全部单元与可靠性测试
+bun run test
+
+# 定向测试（路径相对于仓库）
+bun run test tests/isolation.test.ts
+
+# 用合成部署配置与外部哨兵库验收测试边界
+bun run test:isolation
 
 # 运行 TypeScript 严格类型检查
 bun run typecheck
@@ -442,6 +449,10 @@ bun run typecheck
 # 开发模式启动（代码变更自动热重载）
 bun run dev
 ```
+
+测试入口只复制源码、测试、模板和必要元数据，不复制 `.env`、`data/` 或 `.git/`；依赖复用已有 `node_modules`，测试无须生产凭据。独立 HOME、临时目录及白名单环境会传给测试子进程，未模拟的 `fetch` 和外部命令直接报错。SQLite 构造、符号链接与 `ATTACH` 等次级文件入口均有测试守卫。输出会打印临时工作目录，当前不自动删除，便于检查失败证据。
+
+`--queue-only` 仅表示当前调用不立即发送，不是测试隔离开关：只要写入真实 outbox，后台服务仍可能发送。不要绕过测试入口从部署目录执行测试探针。守卫用于防止当前测试链路误用真实资源，不是执行任意不可信代码的操作系统沙箱。
 
 更多关于微信 iLink 协议细节与架构扩展的说明，请参考：
 - 📄 [微信 ClawBot iLink 协议机制与扩展指南 (`docs/ilink_protocol_and_extension_guide.md`)](./docs/ilink_protocol_and_extension_guide.md)

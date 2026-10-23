@@ -1,3 +1,4 @@
+import "../support/isolation.ts";
 import {mock} from 'bun:test';
 import * as os from 'node:os';
 import {mkdtempSync,mkdirSync,writeFileSync,readFileSync} from 'node:fs';

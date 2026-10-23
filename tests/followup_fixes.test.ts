@@ -1,3 +1,4 @@
+import "./support/isolation.ts";
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

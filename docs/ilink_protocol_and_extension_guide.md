@@ -226,3 +226,9 @@ bun run src/cli.ts <command> [options]
 - 所有 CLI 后端以非零退出或超时判失败；多 Markdown 格式请求逐份处理。已有 Markdown 与显式正文冲突时拒绝处理；PDF 使用临时路径，进程成功且通过头尾检查后原子发布，缓存执行相同检查，损坏的旧 PDF 重命名保留。
 - 配置 Key 发现与加载共用来源顺序及 `IGNORE_HOME_DOTENV` 规则；配置刷新失败也会释放 drain 状态，恢复后同实例可以继续消费。
 - `push` 对显式历史文件的保留约定不变。详细兼容说明与验收见 [十项修复说明](./v023-reliability-fixes.md)。
+
+### 3.6 v0.2.4 测试运行边界
+
+`bun run test` 在临时源码副本中运行，生产配置加载顺序及服务行为不变。父子进程均加载测试守卫：SQLite 路径只能在隔离根目录内，符号链接越界与 `ATTACH` 等 SQL 文件入口被拒绝；未模拟的 `fetch` 和外部命令被阻止。`bun run test:isolation` 用合成部署目录、HOME 和外部哨兵数据库验证边界，不需要真实微信凭据。
+
+`push --queue-only` 只控制当前调用的立即发送，不控制消费同一数据库的后台服务。测试必须使用隔离入口；不能将真实 outbox 作为“离线”测试库。详细验收及边界见 [测试隔离说明](./test-isolation.md)。

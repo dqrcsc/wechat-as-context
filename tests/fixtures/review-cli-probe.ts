@@ -1,3 +1,4 @@
+import "../support/isolation.ts";
 import {mock,spyOn} from 'bun:test';
 import * as os from 'node:os';
 import {mkdtempSync,mkdirSync,writeFileSync} from 'node:fs';

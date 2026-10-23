@@ -25,5 +25,8 @@ jobs:
       - name: TypeScript typecheck
         run: bun run typecheck
 
+      - name: Verify test isolation against synthetic deployment
+        run: bun run test:isolation
+
       - name: Run test suite
-        run: bun test
+        run: bun run test

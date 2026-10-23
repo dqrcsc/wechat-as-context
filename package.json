@@ -44,7 +44,8 @@
     "dev": "bun --watch run src/server.ts",
     "cli": "bun run src/cli.ts",
     "typecheck": "bun x tsc -p tsconfig.json --noEmit",
-    "test": "bun test"
+    "test": "bun --no-env-file tests/run.ts",
+    "test:isolation": "bun --no-env-file tests/verify-isolation.ts"
   },
   "dependencies": {
     "qrcode-terminal": "^0.12.0"

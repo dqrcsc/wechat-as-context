@@ -1,3 +1,4 @@
+import "../support/isolation.ts";
 import { mock } from "bun:test";
 import * as fs from "node:fs";
 import { resolve, join } from "node:path";

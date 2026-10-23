@@ -1,3 +1,4 @@
+import "./support/isolation.ts";
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import {
@@ -1365,6 +1366,9 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
     expect(cliJson.ok).toBe(true);
     expect(cliJson.queuedCount).toBe(1);
     expect(cliJson.pendingCount).toBe(1);
+    // A successful CLI response is insufficient: prove it wrote this fixture's queue.
+    expect(f.db.db.query("SELECT status, attempts FROM reply_outbox WHERE text = ?")
+      .all("来自 CLI 的离线入队测试消息")).toEqual([{ status: "pending", attempts: 0 }]);
 
     // 5. Verify local HTTP POST /api/push endpoint
     const handler = createHttpHandler(f.db, f.pipeline);

@@ -1,3 +1,4 @@
+import "../support/isolation.ts";
 import { mock, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import { tmpdir } from "node:os";
