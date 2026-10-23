@@ -864,10 +864,33 @@ ${textSnippets.join("\n\n")}`,
   private async handleGenerateImage(
     ctx: IntentExecutionContext
   ): Promise<IntentExecutionResult> {
-    const imagePrompt =
+    const priorImageTurn = [...ctx.recentTurns]
+      .reverse()
+      .find((t) => t.intent === "generate_image");
+    const isRetryOrCorrection =
+      ctx.decision.slots.isTaskRetryOrCorrection === true ||
+      /(?:不是这个|你看看我之前的需求|按我之前的需求|刚才没生成|重新帮我生成|重新生成)/i.test(
+        ctx.unpacked.userText
+      );
+    const basePrompt =
       ctx.decision.slots.imagePrompt?.trim() ||
       ctx.decision.slots.coreContent?.trim() ||
       ctx.unpacked.userText.trim();
+    const imagePrompt =
+      isRetryOrCorrection &&
+      priorImageTurn &&
+      !basePrompt.includes(priorImageTurn.user_text.slice(0, 20))
+        ? `${priorImageTurn.user_text}\n\n【用户最新补充/重试说明】：${ctx.unpacked.userText.trim()}`
+        : basePrompt;
+
+    const explicitCli =
+      detectExplicitCliBackend(ctx.unpacked.userText) ||
+      detectExplicitCliBackend(imagePrompt);
+    const preferredBackend: SubagentBackend =
+      explicitCli ||
+      ctx.decision.slots.subagentTarget ||
+      ctx.decision.subagentTarget ||
+      "agy";
 
     const hbSec = this.config.taskHeartbeatSeconds ?? 25;
     const progress = new TaskProgressReporter({
@@ -882,8 +905,8 @@ ${textSnippets.join("\n\n")}`,
     const hbHint =
       hbSec > 0 ? `，处理期间每 ${hbSec} 秒会同步一次进度` : "";
     await progress.start(
-      "正在调用视觉生成引擎制作图片",
-      `🎨 已收到生图请求，正在调用视觉生成引擎制作图片${hbHint}，完成后立即发给你…`
+      `正在调用视觉生成引擎 [${preferredBackend}] 制作图片`,
+      `🎨 已收到生图请求，正在调用视觉生成引擎 [${preferredBackend}] 制作图片${hbHint}，完成后立即发给你…`
     );
 
     try {
@@ -891,8 +914,8 @@ ${textSnippets.join("\n\n")}`,
         config: this.config,
         complexity: "deep",
         forceCliFirst: true,
-        preferredBackend: "agy",
-        preferredAgyModel: selectAgyModel(ctx.unpacked.userText, "deep"),
+        preferredBackend,
+        preferredAgyModel: selectAgyModel(imagePrompt, "deep"),
         workingDir: this.config.vaultRoot,
         expectGeneratedImage: true,
         onStageChange: (stage, opts) => progress.updateStage(stage, opts),
@@ -905,7 +928,7 @@ ${
   ctx.unpacked.refContext?.quotedText
     ? `【用户引用的上下文】\n${ctx.unpacked.refContext.quotedText}\n`
     : ""
-}请调用 image-generator 生成高质量图片，并在回复中简要说明图片的设计构图亮点（100字以内）。`,
+}请调用你的内置生图能力（AGY 请调用 image-generator 子智能体，Codex 请直接调用内置 image_gen 工具）生成高质量图片，并在回复中简要说明图片的设计构图亮点（100字以内）。`,
         systemPrompt: `你是用户的视觉架构师。当本地生图 CLI 不可用时，请为用户生成清晰的可视化字符架构图 / Mermaid 结构图与高精度生图 Prompt 规范。`,
         userPrompt: `【用户生图需求】\n${imagePrompt}`,
         temperature: 0.3,
@@ -923,21 +946,22 @@ ${
         };
       }
 
-      const cliFailStep = tieredRes.tierPath.find((s) =>
-        s.startsWith("cli:agy(failed:")
+      const cliFailStep = tieredRes.tierPath.find(
+        (s) => s.startsWith("cli:") && s.includes("(failed:")
       );
       const cliFailNote = cliFailStep
-        ? `\n> ⚠️ 本地 AGY 生图未完成（\`${cliFailStep.slice(0, 180)}\`），已自动降级由云端模型提供分镜与 Prompt：\n`
+        ? `\n> ⚠️ 本地 CLI 生图未完成（\`${cliFailStep.slice(0, 180)}\`），已自动降级由云端模型提供分镜与 Prompt：\n`
         : "";
 
       return {
         replyText: `🎨 视觉生成响应（${tieredRes.modelUsed}）：${cliFailNote}\n${tieredRes.text}`,
         modelUsed: tieredRes.modelUsed,
+        outcome: "partial",
       };
     } catch (err: any) {
       return {
         replyText: `⚠️ 调用生图链路失败：${err?.message || err}`,
-        modelUsed: "agy_error",
+        modelUsed: `${preferredBackend}_error`,
         outcome: "failed", error: err?.message || String(err),
       };
     } finally {
@@ -951,20 +975,11 @@ ${
   private async handleDelegateSubagent(
     ctx: IntentExecutionContext
   ): Promise<IntentExecutionResult> {
-    const explicitCli = detectExplicitCliBackend(ctx.unpacked.userText);
-    const backend: SubagentBackend =
-      explicitCli ||
-      ctx.decision.slots.subagentTarget ||
-      getPreferredCliBackend(
-        this.config,
-        /agy|antigravity|opus|sonnet/i.test(ctx.unpacked.userText) ? "agy" : "codex"
-      );
-
     // Reconstruct full task requirement if user is correcting or retrying a prior turn
     const priorComplexTurn = findPriorComplexTaskTurn(ctx.recentTurns);
     const isRetryOrCorrection =
       ctx.decision.slots.isTaskRetryOrCorrection === true ||
-      /(?:不是这个.*(?:帮我生成|指南|需求)|你看看我之前的需求|按我之前的需求|刚才没生成|重新帮我生成)/i.test(
+      /(?:不是这个.*(?:帮我生成|指南|需求)|你看看我之前的需求|按我之前的需求|刚才没生成|重新帮我生成|重新生成)/i.test(
         ctx.unpacked.userText
       );
 
@@ -974,6 +989,17 @@ ${
       !ctx.unpacked.userText.includes(priorComplexTurn.user_text.slice(0, 30))
         ? `${priorComplexTurn.user_text}\n\n【用户最新补充/纠偏要求】：${ctx.unpacked.userText}`
         : ctx.decision.slots.coreContent?.trim() || ctx.unpacked.userText.trim();
+
+    const explicitCli =
+      detectExplicitCliBackend(ctx.unpacked.userText) ||
+      detectExplicitCliBackend(effectiveRequirement);
+    const backend: SubagentBackend =
+      explicitCli ||
+      ctx.decision.slots.subagentTarget ||
+      getPreferredCliBackend(
+        this.config,
+        /agy|antigravity|opus|sonnet/i.test(effectiveRequirement) ? "agy" : "codex"
+      );
 
     const requestedFormats = detectRequestedFormats(
       effectiveRequirement,

@@ -13,6 +13,7 @@ const mode = process.argv[2];
 const generated = join(root, "generated"); mkdirSync(generated);
 const binary = join(root, "fake-agy"); writeFileSync(binary, "mock");
 process.env.AGY_BIN = binary;
+process.env.CODEX_BIN = binary;
 const calls: string[][] = [];
 const stream = (text: string) => new Response(text).body;
 spyOn(Bun, "spawn").mockImplementation(((args: string[]) => {
@@ -22,20 +23,26 @@ spyOn(Bun, "spawn").mockImplementation(((args: string[]) => {
       stderr: stream(calls.length === 1 ? "invalid model selection" : ""),
       exited: Promise.resolve(calls.length === 1 ? 1 : 0), kill() {} };
   }
-  const expected = args[2].match(/建议路径：([^）]+)/)?.[1];
-  const target = mode === "expected" ? expected! : join(generated, "other-task.png");
+  if (mode === "agy_to_codex_fallback" && calls.length === 1) {
+    return { stdout: stream(""), stderr: stream("agy timeout"), exited: Promise.resolve(1), kill() {} };
+  }
+  const fullArgStr = args.join("\n");
+  const expected = fullArgStr.match(/建议路径：([^）\n]+)/)?.[1];
+  const target = (mode === "expected" || mode === "codex_expected" || mode === "agy_to_codex_fallback") ? expected! : join(generated, "other-task.png");
   writeFileSync(target, "IMAGE_FIXTURE");
   const now = new Date(Date.now() + 50); utimesSync(target, now, now);
   return { stdout: stream(mode === "failed" ? "" : "done"),
     stderr: stream(mode === "failed" ? "backend failed" : ""),
     exited: Promise.resolve(mode === "failed" ? 1 : 0), kill() {} };
 }) as any);
+const chain = mode === "agy_to_codex_fallback" ? ["agy", "codex"] : mode === "codex_expected" ? ["codex"] : ["agy"];
+const primaryBackend = mode === "codex_expected" ? "codex" : "agy";
 const config: any = { projectRoot: root, dataDir: root, vaultRoot: root,
-  llm: { allowCodexFallback: true, cliRoutingChain: ["agy"] } };
+  llm: { allowCodexFallback: true, cliRoutingChain: chain } };
 try {
-  const result = await runCliSubagent({ config, backend: "agy", prompt: "fixture",
+  const result = await runCliSubagent({ config, backend: primaryBackend, prompt: "fixture",
     preferredModel: "unsupported-model-fixture", expectGeneratedImage: mode !== "retry", timeoutMs: 100 });
-  console.log(JSON.stringify({ ok: true, result, retriedWithoutModel: calls.length === 2 && !calls[1].includes("--model") }));
+  console.log(JSON.stringify({ ok: true, result, callsCount: calls.length, retriedWithoutModel: calls.length === 2 && !calls[1].includes("--model") }));
 } catch (error: any) {
   console.log(JSON.stringify({ ok: false, error: error.message }));
 }

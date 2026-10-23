@@ -52,8 +52,8 @@ export const BUILTIN_CLI_DESCRIPTORS: BuiltinCliDescriptor[] = [
     envOverrideKey: "CODEX_BIN",
     binaryNames: ["codex"],
     extraSearchDirs: [join(homedir(), ".local", "bin")],
-    description: "支持本地仓库与知识库多文件深度治理、图片输入 (-i) 与非交互 exec 执行",
-    capabilities: ["vision", "vault_edit", "code_edit", "deep_research"],
+    description: "支持内置 image_gen 生图、本地仓库与知识库多文件深度治理、图片输入 (-i) 与非交互 exec 执行",
+    capabilities: ["vision", "image_gen", "vault_edit", "code_edit", "deep_research"],
   },
   {
     id: "opencode",
@@ -463,7 +463,7 @@ export async function runCliSubagent(
 
   let primaryError: any = null;
   const candidatosToTry = req.expectGeneratedImage
-    ? [req.backend]
+    ? orderedBackends.filter((b) => b === req.backend || b === "agy" || b === "codex")
     : orderedBackends;
 
   for (let i = 0; i < candidatosToTry.length; i++) {
@@ -668,7 +668,16 @@ async function executeAgyCli(req: SubagentRunRequest): Promise<SubagentRunResult
     if (includeModel && model) {
       cliArgs.push("--model", model);
     }
-    cliArgs.push("--add-dir", req.config.vaultRoot, "--add-dir", req.config.dataDir);
+    const agyBrainDir = join(homedir(), ".gemini", "antigravity", "brain");
+    cliArgs.push(
+      "--add-dir",
+      req.config.vaultRoot,
+      "--add-dir",
+      req.config.dataDir,
+      "--add-dir",
+      generatedDir,
+      ...(existsSync(agyBrainDir) ? ["--add-dir", agyBrainDir] : [])
+    );
     return cliArgs;
   };
 
@@ -744,6 +753,18 @@ async function executeCodexCli(req: SubagentRunRequest): Promise<SubagentRunResu
   const timeoutMs = req.timeoutMs ?? 180_000;
   const lastMsgFile = join(tmpdir(), `codex_last_msg_${randomUUID()}.txt`);
 
+  let fullPrompt = req.prompt;
+  const expectedArtifacts: string[] = [];
+  if (req.expectGeneratedImage) {
+    const targetImgPath = join(
+      generatedDir,
+      `codex_img_${new Date().toISOString().slice(0, 10).replace(/-/g, "_")}_${randomUUID().slice(0, 8)}.png`
+    );
+    expectedArtifacts.push(targetImgPath);
+    fullPrompt += `\n\n【图片生成输出要求】\n请优先直接调用你内置的 image_gen 工具（无需 OPENAI_API_KEY）生成图片，并将最终图片文件保存到（或复制到）此目录：${generatedDir}（建议路径：${targetImgPath}），并在回复末尾附上生成的图片完整绝对路径。`;
+  }
+
+  const codexGenImgDir = join(homedir(), ".codex", "generated_images");
   const args: string[] = [
     "exec",
     "-C",
@@ -752,6 +773,9 @@ async function executeCodexCli(req: SubagentRunRequest): Promise<SubagentRunResu
     req.config.vaultRoot,
     "--add-dir",
     req.config.dataDir,
+    "--add-dir",
+    generatedDir,
+    ...(existsSync(codexGenImgDir) ? ["--add-dir", codexGenImgDir] : []),
     "--skip-git-repo-check",
     "--dangerously-bypass-approvals-and-sandbox",
     "-o",
@@ -766,7 +790,7 @@ async function executeCodexCli(req: SubagentRunRequest): Promise<SubagentRunResu
     }
   }
 
-  args.push(req.prompt);
+  args.push(fullPrompt);
 
   const { cleanOut, stderrText, exitCode, timedOut } = await spawnCliWithTimeout(
     codexBin,
@@ -794,7 +818,8 @@ async function executeCodexCli(req: SubagentRunRequest): Promise<SubagentRunResu
     generatedDir,
     outputText,
     startMs,
-    req.config.vaultRoot
+    req.config.vaultRoot,
+    expectedArtifacts
   );
 
   if (timedOut) {
@@ -806,6 +831,12 @@ async function executeCodexCli(req: SubagentRunRequest): Promise<SubagentRunResu
   if (exitCode !== 0) {
     throw new Error(
       `Codex CLI exited with code ${exitCode}: ${stderrText.slice(0, 300)}`
+    );
+  }
+
+  if (req.expectGeneratedImage && images.length === 0) {
+    throw new Error(
+      "Codex CLI produced no attributable image; save the image to the requested output path"
     );
   }
 

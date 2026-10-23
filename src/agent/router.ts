@@ -60,6 +60,7 @@ export function findPriorComplexTaskTurn(
     const t = recentTurns[i];
     if (
       t.intent === "delegate_subagent" ||
+      t.intent === "generate_image" ||
       isDocumentGenerationTask(t.user_text) ||
       detectRequestedFormats(t.user_text).length > 0
     ) {
@@ -71,8 +72,8 @@ export function findPriorComplexTaskTurn(
 
 export function detectExplicitCliBackend(text: string): SubagentBackend | undefined {
   const m =
-    text.match(/(?:让|用|使用|调用|转交)\s*(workbuddy|codebuddy|cbc|opencode|open-code|claude|gemini|aider|codex|agy|antigravity)\b/i) ||
-    text.match(/^(workbuddy|codebuddy|cbc|opencode|open-code|claude|gemini|aider|codex|agy|antigravity)\s*[:：]/i);
+    text.match(/(?:让|用|试用|使用|调用|交给|通过|走|转交|请)\s*(workbuddy|codebuddy|cbc|opencode|open-code|claude|gemini|aider|codex|agy|antigravity)\b/i) ||
+    text.match(/^(workbuddy|codebuddy|cbc|opencode|open-code|claude|gemini|aider|codex|agy|antigravity)\s*(?:[:：]|帮我|来|去|执行|生成|画|整理|分析|看看)/i);
   if (!m) return undefined;
   const raw = m[1].toLowerCase();
   if (raw === "antigravity") return "agy";
@@ -171,13 +172,32 @@ export async function classifyMessageIntent(params: {
   // 3.5 Deterministic fast-path for task correction / retry ("不是这个，是你帮我生成...你看看我之前的需求")
   const priorTask = findPriorComplexTaskTurn(recentTurns);
   const isCorrectionOrRetry =
-    /(?:不是这个.*(?:帮我生成|指南|需求)|你看看我之前的需求|按我之前的需求|刚才没生成|重新帮我生成|没收到.*生成的文件)/i.test(
+    /(?:不是这个.*(?:帮我生成|指南|需求)|你看看我之前的需求|按我之前的需求|刚才没生成|重新帮我生成|重新生成|没收到.*生成的文件)/i.test(
       text
     );
   if (isCorrectionOrRetry && priorTask) {
     const combinedPrompt = `${priorTask.user_text}\n\n【用户补充纠偏说明】：${text}`;
+    const explicitCli =
+      detectExplicitCliBackend(text) ||
+      detectExplicitCliBackend(priorTask.user_text);
+    if (priorTask.intent === "generate_image") {
+      const preferred = explicitCli || getPreferredCliBackend(config, "agy");
+      return {
+        intent: "generate_image",
+        complexity: "deep",
+        subagentTarget: preferred,
+        reason: "User is correcting/retrying a prior image generation task",
+        targetArticleId: referencedArticle?.id ?? null,
+        slots: {
+          coreContent: combinedPrompt,
+          imagePrompt: combinedPrompt,
+          subagentTarget: preferred,
+          isTaskRetryOrCorrection: true,
+        },
+      };
+    }
     const formats = detectRequestedFormats(combinedPrompt);
-    const preferred = getPreferredCliBackend(config, "agy");
+    const preferred = explicitCli || getPreferredCliBackend(config, "agy");
     return {
       intent: "delegate_subagent",
       complexity: "deep",
@@ -200,7 +220,8 @@ export async function classifyMessageIntent(params: {
     /^(?:文件呢|文件怎么没发|怎么没有文件|文件没看到|没看到文件|把刚才生成的文件发我)/i.test(
       text
     ) &&
-    priorTask
+    priorTask &&
+    priorTask.intent !== "generate_image"
   ) {
     const formats = detectRequestedFormats(priorTask.user_text);
     // If the prior complex task did NOT deposit any file or failed with fake placeholder, re-run/complete it!
@@ -312,7 +333,7 @@ async function callLlmIntentRouter(params: {
    - "deepen"：要求现在对那篇文章进行深度阅读拆解、批判性分析或升级伴读笔记。
 4. "vault_query"：用户正在**单纯查询、检索或提问他的个人知识库/历史收藏文章**（不需要生成新文档文件导出，只要求在微信里回答，例如“我之前关于本体论的大纲写到哪了？”、“查一下我知识库里关于上下文工程的观点”）。
 5. "web_search"：用户希望**单纯联网检索外部公开信息并在微信里回答**（不要求结合知识库撰写长篇指南或导出多格式文件，例如“帮我上网搜一下最近 Anthropic 发布了什么”、“查一下最新的 Bun 版本特性”）。
-6. "generate_image"：用户要求**画图、生成概念插图、生成文章配图或视觉海报**（将转交本机 AGY CLI 调用 image-generator 生成图片并发回微信）。
+6. "generate_image"：用户要求**画图、生成概念插图、生成文章配图或视觉海报**（将转交本机 AGY 或 Codex CLI 调用内置生图工具生成图片并发回微信）。
 7. "delegate_subagent"：需要执行**复合深度研究、撰写学习指南/报告/长文并导出文件（如 md/html/pdf）、或多文件知识库深度治理**。包括但不限于：
    - **复合检索+综合写作+多格式文件生成交付**：例如“帮我搜一下 Andrej Karpathy 的 LLM Wiki，结合我的知识库构建过程整理一份新手学习指南，生成 markdown/html/pdf 格式发给我”；
    - **对前序复杂任务的纠偏或重做要求**：例如用户说“不是这个，是你帮我生成中文版适合新手的指南啊，你看看我之前的需求”；
@@ -485,20 +506,22 @@ export function buildHeuristicIntentDecision(params: {
 
   // 0. Check generate_image intent first (before send_file, since user may say "画一张图发给我")
   if (
-    /(?:画一张|生成一张.*图|生成.*配图|生成.*插图|画个.*图|文生图|generate.*image)/i.test(
+    /(?:画一张|画一幅|画一只|画一个|画个.*图|生成一张.*图|生成一幅.*图|生成.*图片|生成.*配图|生成.*插图|生图|文生图|generate.*image)/i.test(
       text
     )
   ) {
+    const explicitCli = detectExplicitCliBackend(text);
+    const preferred: SubagentBackend = explicitCli || "agy";
     return {
       intent: "generate_image",
       complexity: "deep",
-      subagentTarget: "agy",
+      subagentTarget: preferred,
       reason: "Heuristic match for image generation request",
       targetArticleId: referencedArticle?.id ?? null,
       slots: {
         coreContent: text,
         imagePrompt: text,
-        subagentTarget: "agy",
+        subagentTarget: preferred,
       },
     };
   }

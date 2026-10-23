@@ -48,6 +48,20 @@ test("AGY accepts its unique expected image without scanning shared folders", ()
   expect(result.result.generatedImages).toHaveLength(1);
   expect(basename(result.result.generatedImages[0])).toMatch(/^agy_img_/);
 });
+test("Codex CLI generates expected image via built-in image_gen and supports AGY -> Codex image fallback", () => {
+  const directCodex = childProbe("agy-process-probe.ts", "codex_expected");
+  expect(directCodex.ok).toBe(true);
+  expect(directCodex.result.backend).toBe("codex");
+  expect(directCodex.result.generatedImages).toHaveLength(1);
+  expect(basename(directCodex.result.generatedImages[0])).toMatch(/^codex_img_/);
+
+  const fallbackCodex = childProbe("agy-process-probe.ts", "agy_to_codex_fallback");
+  expect(fallbackCodex.ok).toBe(true);
+  expect(fallbackCodex.callsCount).toBe(2);
+  expect(fallbackCodex.result.backend).toBe("codex");
+  expect(fallbackCodex.result.modelUsed).toContain("fallback from agy");
+  expect(basename(fallbackCodex.result.generatedImages[0])).toMatch(/^codex_img_/);
+});
 test("unknown AGY model retry reports default model instead of claiming the rejected model", () => {
   const result = childProbe("agy-process-probe.ts", "retry");
   expect(result.retriedWithoutModel).toBe(true);

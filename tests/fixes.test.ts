@@ -456,3 +456,73 @@ test("TASK_HEARTBEAT_SECONDS configures custom heartbeat interval and supports 0
   reporter.stop("已完成");
   expect(pushed).toEqual(["已启动"]);
 });
+
+test("explicit Codex image generation and multi-turn retry preserve requested CLI backend and pruneSentOutboxMedia cleans aged sent snapshots", async () => {
+  const f = fixture();
+  f.config.llm.allowCodexFallback = true;
+  f.config.llm.cliRoutingChain = ["agy", "codex"];
+
+  const fakeImg = join(f.root, "codex_cat.png");
+  writeFileSync(fakeImg, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+
+  const seenRequests: Array<{ backend: string; expectGeneratedImage?: boolean; prompt: string }> = [];
+  setSubagentTestRunner(async (req) => {
+    seenRequests.push({
+      backend: req.backend,
+      expectGeneratedImage: req.expectGeneratedImage,
+      prompt: req.prompt,
+    });
+    return {
+      backend: req.backend,
+      modelUsed: `${req.backend}-cli`,
+      outputText: "已使用内置 image_gen 生成小猫插画",
+      generatedImages: req.expectGeneratedImage ? [fakeImg] : [],
+      generatedFiles: [],
+    };
+  });
+
+  // 1. User explicitly asks Codex to generate an image ("试用codex帮我生成一张图片吧 小猫的图片")
+  const genRes = await f.pipeline.agent.processClawBotMessage({
+    messageKey: "codex-img-1",
+    senderId: "owner",
+    rawMessage: {
+      message_id: "codex-img-1",
+      from_user_id: "owner",
+      message_type: 1,
+      item_list: [{ type: 1, text_item: { text: "试用codex帮我生成一张图片吧 小猫的图片" } }],
+    },
+  });
+  expect(seenRequests).toHaveLength(1);
+  expect(seenRequests[0].backend).toBe("codex");
+  expect(seenRequests[0].expectGeneratedImage).toBe(true);
+  expect(genRes.modelUsed).toBe("codex-cli");
+  expect(genRes.mediaDeliveries).toHaveLength(1);
+
+  // 2. User replies "按我之前的需求重新生成" -> should retry generate_image with codex and original prompt
+  const retryRes = await f.pipeline.agent.processClawBotMessage({
+    messageKey: "codex-img-retry",
+    senderId: "owner",
+    rawMessage: {
+      message_id: "codex-img-retry",
+      from_user_id: "owner",
+      message_type: 1,
+      item_list: [{ type: 1, text_item: { text: "按我之前的需求重新生成" } }],
+    },
+  });
+  expect(seenRequests).toHaveLength(2);
+  expect(seenRequests[1].backend).toBe("codex");
+  expect(seenRequests[1].expectGeneratedImage).toBe(true);
+  expect(seenRequests[1].prompt).toContain("小猫的图片");
+  expect(retryRes.mediaDeliveries).toHaveLength(1);
+
+  // 3. Verify pruneSentOutboxMedia removes aged sent snapshots only when no pending row shares the snapshot
+  f.db.queueMediaReply("sent-img", "owner", "image", fakeImg);
+  const outboxRow = f.db.db.query("SELECT media_path FROM reply_outbox WHERE id = 'sent-img'").get() as { media_path: string };
+  expect(readFileSync(outboxRow.media_path).length).toBeGreaterThan(0);
+  f.db.db.query("UPDATE reply_outbox SET status = 'sent' WHERE id = 'sent-img'").run();
+  // Other rows from genRes/retryRes sharing the same snapshot are still pending, so it must NOT be pruned yet
+  expect(f.db.pruneSentOutboxMedia(0)).toBe(0);
+  // Once all rows referencing the snapshot are sent, pruneSentOutboxMedia(0) cleans it up
+  f.db.db.query("UPDATE reply_outbox SET status = 'sent'").run();
+  expect(f.db.pruneSentOutboxMedia(0)).toBe(1);
+});

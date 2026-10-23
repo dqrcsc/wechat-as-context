@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { decodeArtifactPaths, writeNewFile } from "./storage.ts";
@@ -235,6 +235,35 @@ export class ContextDatabase {
         "INSERT OR IGNORE INTO reply_outbox (id, recipient, text, media_type, media_path, media_sha256) VALUES (?, ?, ?, ?, ?, ?)"
       )
       .run(id, recipient, captionText, mediaType, snapshot, digest);
+  }
+
+  /**
+   * Remove outbox_media snapshot files that have already been sent (`status = 'sent'`),
+   * are not referenced by any pending outbox entry, and are older than `maxAgeMs`.
+   */
+  public pruneSentOutboxMedia(maxAgeMs = 24 * 60 * 60 * 1000): number {
+    const rows = this.db
+      .query(
+        `SELECT DISTINCT media_path FROM reply_outbox
+         WHERE status = 'sent' AND media_path != ''
+           AND media_path NOT IN (
+             SELECT media_path FROM reply_outbox WHERE status = 'pending' AND media_path != ''
+           )`
+      )
+      .all() as Array<{ media_path: string }>;
+    let pruned = 0;
+    const now = Date.now();
+    for (const { media_path } of rows) {
+      try {
+        if (!existsSync(media_path)) continue;
+        const st = statSync(media_path);
+        if (st.isFile() && now - st.mtimeMs >= maxAgeMs) {
+          unlinkSync(media_path);
+          pruned++;
+        }
+      } catch {}
+    }
+    return pruned;
   }
 
   public recordConversationTurn(params: {

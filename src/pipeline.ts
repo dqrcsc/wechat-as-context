@@ -292,22 +292,52 @@ export class WeChatContextPipeline {
     });
   }
 
+  private async withActiveTaskSleepGuard<T>(action: () => Promise<T>): Promise<T> {
+    if (
+      process.platform !== "darwin" ||
+      process.env.WXCTX_TEST_ROOT ||
+      !existsSync("/usr/bin/caffeinate")
+    ) {
+      return action();
+    }
+    let guardProc: ReturnType<typeof Bun.spawn> | null = null;
+    try {
+      guardProc = Bun.spawn(
+        ["/usr/bin/caffeinate", "-i", "-s", "-w", String(process.pid)],
+        { stdout: "ignore", stderr: "ignore" }
+      );
+    } catch {}
+    try {
+      return await action();
+    } finally {
+      if (guardProc) {
+        try {
+          guardProc.kill();
+        } catch {}
+      }
+    }
+  }
+
   public async drainReadyQueue(): Promise<ArticleRecord[]> {
     if (this.isDrainingArticles) return [];
     this.isDrainingArticles = true;
     const processed: ArticleRecord[] = [];
     try {
-      for (const item of this.db.getReadyPendingArticles()) {
-        try {
-          processed.push(
-            await this.processArticleById(item.id, { sendWeChatReply: true })
-          );
-        } catch (err: any) {
-          if (!String(err?.message || "").includes("Operation busy")) {
-            console.error(`[Pipeline] Article #${item.id}:`, err);
+      const pendingItems = this.db.getReadyPendingArticles();
+      if (pendingItems.length === 0) return [];
+      await this.withActiveTaskSleepGuard(async () => {
+        for (const item of pendingItems) {
+          try {
+            processed.push(
+              await this.processArticleById(item.id, { sendWeChatReply: true })
+            );
+          } catch (err: any) {
+            if (!String(err?.message || "").includes("Operation busy")) {
+              console.error(`[Pipeline] Article #${item.id}:`, err);
+            }
           }
         }
-      }
+      });
     } finally {
       this.isDrainingArticles = false;
     }
@@ -451,6 +481,8 @@ export class WeChatContextPipeline {
         // read commands must never reset work owned by another live process.
         this.db.recoverStuckAgentTasks();
         const tasks = this.db.getPendingAgentTasks(20);
+        if (tasks.length === 0) return 0;
+        return await this.withActiveTaskSleepGuard(async () => {
         for (const task of tasks) {
           const wasRecovered = task.stage.includes("检测到中断");
           this.db.updateAgentTaskStatus(
@@ -505,6 +537,7 @@ export class WeChatContextPipeline {
           }
         }
         return processedCount;
+        });
       });
     } catch (err: any) {
       if (err?.message === "Operation busy: agent_queue") return 0;
@@ -546,6 +579,7 @@ export class WeChatContextPipeline {
           console.error(`[Outbox] ${row.id}: ${e.message}`);
         }
       }
+      this.db.pruneSentOutboxMedia();
     });
   }
 
