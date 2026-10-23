@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { writeNewFile } from "../storage.ts";
 import { TriageLevel } from "../db.ts";
 import type { AppConfig } from "../config.ts";
-import { prepareMarkdownExport } from "../agent/doc_exporter.ts";
+import { prepareMarkdownExport, isUsablePdf } from "../agent/doc_exporter.ts";
 
 export interface VaultMatch {
   wikiLink: string;
@@ -693,7 +693,7 @@ export function findSiblingMultiFormatFiles(
   for (const ext of requestedExts) {
     if (ext === "md" && isVersioned && !matchesSource(stem)) continue;
     const candidate = join(dir, `${ext === "md" ? cleanStem : exportStem}.${ext}`);
-    if (existsSync(candidate) && statSync(candidate).isFile() && statSync(candidate).size > 0) {
+    if (existsSync(candidate) && statSync(candidate).isFile() && statSync(candidate).size > 0 && (ext !== "pdf" || isUsablePdf(candidate))) {
       results.push(candidate);
     }
   }

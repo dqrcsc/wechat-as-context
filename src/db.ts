@@ -1,7 +1,8 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
-import { randomUUID } from "node:crypto";
+import { mkdirSync, readFileSync } from "node:fs";
+import { dirname, basename, join } from "node:path";
+import { randomUUID, createHash } from "node:crypto";
+import { decodeArtifactPaths, writeNewFile } from "./storage.ts";
 
 export type ArticleStatus =
   | "pending_extract"
@@ -74,7 +75,7 @@ export interface AgentTaskRecord {
 export class ContextDatabase {
   public db: Database;
 
-  constructor(dbPath: string) {
+  constructor(private dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath, { create: true });
     this.init();
@@ -177,6 +178,9 @@ export class ContextDatabase {
       this.db.exec("ALTER TABLE reply_outbox ADD COLUMN media_path TEXT NOT NULL DEFAULT ''");
     } catch {}
     try {
+      this.db.exec("ALTER TABLE reply_outbox ADD COLUMN media_sha256 TEXT NOT NULL DEFAULT ''");
+    } catch {}
+    try {
       this.db.exec("ALTER TABLE agent_tasks ADD COLUMN stage TEXT NOT NULL DEFAULT ''");
     } catch {}
     try {
@@ -218,11 +222,19 @@ export class ContextDatabase {
     mediaPath: string,
     captionText = ""
   ): void {
+    if (this.db.query("SELECT id FROM reply_outbox WHERE id = ?").get(id)) return;
+    const content = readFileSync(mediaPath);
+    const digest = createHash("sha256").update(content).digest("hex");
+    const snapshot = join(dirname(this.dbPath), "outbox_media", digest, basename(mediaPath));
+    writeNewFile(snapshot, content);
+    if (createHash("sha256").update(readFileSync(snapshot)).digest("hex") !== digest) {
+      throw new Error("Outbox media snapshot checksum mismatch");
+    }
     this.db
       .query(
-        "INSERT OR IGNORE INTO reply_outbox (id, recipient, text, media_type, media_path) VALUES (?, ?, ?, ?, ?)"
+        "INSERT OR IGNORE INTO reply_outbox (id, recipient, text, media_type, media_path, media_sha256) VALUES (?, ?, ?, ?, ?, ?)"
       )
-      .run(id, recipient, captionText, mediaType, mediaPath);
+      .run(id, recipient, captionText, mediaType, snapshot, digest);
   }
 
   public recordConversationTurn(params: {
@@ -239,6 +251,7 @@ export class ContextDatabase {
     assistantReply: string;
   }): void {
     const now = new Date().toISOString();
+    const paths = decodeArtifactPaths(params.depositedPath ?? "");
     this.db
       .query(
         `INSERT INTO conversation_turns (
@@ -264,7 +277,7 @@ export class ContextDatabase {
         params.complexity,
         params.modelUsed,
         params.relatedArticleId ?? null,
-        params.depositedPath ?? "",
+        paths.length ? JSON.stringify(paths) : "",
         params.assistantReply,
         now
       );

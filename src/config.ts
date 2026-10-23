@@ -387,53 +387,35 @@ export interface DetectedProviderKeyInfo {
   source: string;
 }
 
-export function resolveDetectedProviderKeys(
-  projectRootOverride?: string
-): Record<string, DetectedProviderKeyInfo> {
-  const projectRoot = projectRootOverride
-    ? resolve(projectRootOverride)
-    : resolve(import.meta.dir, "..");
-  const projectEnv = parseDotEnvFile(join(projectRoot, ".env"));
-  const homeEnv = parseDotEnvFile(join(homedir(), ".env"));
+function readConfigSources(projectRoot: string, customEnv?: Record<string, string | undefined>, skipProject = false): Array<[Record<string, string | undefined>, string]> {
+  const project = skipProject ? {} : parseDotEnvFile(join(projectRoot, ".env"));
+  const runtime = customEnv ?? process.env;
+  const ignoreHome = (runtime.IGNORE_HOME_DOTENV || project.IGNORE_HOME_DOTENV || "").toLowerCase() === "true";
+  const home = ignoreHome ? {} : parseDotEnvFile(join(homedir(), ".env"));
+  const projectSource: [Record<string, string | undefined>, string] = [project, "项目 .env"];
+  const runtimeSource: [Record<string, string | undefined>, string] = [runtime, "环境变量"];
+  return [...(customEnv ? [runtimeSource, projectSource] : [projectSource, runtimeSource]), [home, "全局 ~/.env"]];
+}
+
+function lookupConfigValue(sources: Array<[Record<string, string | undefined>, string]>, key: string, defaultValue = ""): {value: string; source: string} {
+  for (const [values, label] of sources) {
+    if (values[key] !== undefined && values[key] !== "") return {value: values[key]!, source: `${label} (${key})`};
+  }
+  return {value: defaultValue, source: ""};
+}
+
+export function resolveDetectedProviderKeys(projectRootOverride?: string): Record<string, DetectedProviderKeyInfo> {
+  const sources = readConfigSources(projectRootOverride ? resolve(projectRootOverride) : resolve(import.meta.dir, ".."));
   const out: Record<string, DetectedProviderKeyInfo> = {};
-
-  const lookupKey = (
-    keyNames: string[]
-  ): { val: string; keyName: string; source: string } | null => {
-    for (const k of keyNames) {
-      if (projectEnv[k]) {
-        return { val: projectEnv[k], keyName: k, source: `项目 .env (${k})` };
-      }
-    }
-    for (const k of keyNames) {
-      if (homeEnv[k]) {
-        return { val: homeEnv[k], keyName: k, source: `全局 ~/.env (${k})` };
-      }
-    }
-    for (const k of keyNames) {
-      if (process.env[k]) {
-        return { val: process.env[k]!, keyName: k, source: `环境变量 (${k})` };
-      }
-    }
-    return null;
-  };
-
   for (const preset of LLM_PROVIDER_PRESETS) {
-    const candidates = [
-      preset.envKeyName,
-      ...(preset.altEnvKeyNames ?? []),
-    ].filter(Boolean);
-    const found = lookupKey(candidates);
-    if (found) {
-      out[preset.id] = {
-        providerId: preset.id,
-        envKeyName: found.keyName,
-        apiKey: found.val,
-        source: found.source,
-      };
+    for (const key of [preset.envKeyName, ...(preset.altEnvKeyNames ?? [])].filter(Boolean)) {
+      const found = lookupConfigValue(sources, key);
+      if (found.value) {
+        out[preset.id] = {providerId: preset.id, envKeyName: key, apiKey: found.value, source: found.source};
+        break;
+      }
     }
   }
-
   return out;
 }
 
@@ -444,51 +426,8 @@ export function loadConfig(
   const projectRoot = projectRootOverride
     ? resolve(projectRootOverride)
     : resolve(import.meta.dir, "..");
-  const projectEnv =
-    customEnv && !projectRootOverride
-      ? {}
-      : parseDotEnvFile(join(projectRoot, ".env"));
-  const runtimeEnv = customEnv ?? process.env;
-  const ignoreHomeEnv =
-    (
-      runtimeEnv.IGNORE_HOME_DOTENV ||
-      projectEnv.IGNORE_HOME_DOTENV ||
-      ""
-    ).toLowerCase() === "true";
-  const homeEnv = ignoreHomeEnv ? {} : parseDotEnvFile(join(homedir(), ".env"));
-
-  // Ordinary startup, reload and Web reads share the same source precedence.
-  // An explicitly injected environment remains authoritative for tests/callers.
-  const preferProjectDotEnv = !customEnv;
-
-  const getWithSource = (
-    key: string,
-    defaultVal = ""
-  ): { value: string; source: string } => {
-    if (preferProjectDotEnv) {
-      if (projectEnv[key] !== undefined && projectEnv[key] !== "") {
-        return { value: projectEnv[key]!, source: `项目 .env (${key})` };
-      }
-      if (runtimeEnv[key] !== undefined && runtimeEnv[key] !== "") {
-        return { value: runtimeEnv[key]!, source: `环境变量 (${key})` };
-      }
-      if (homeEnv[key] !== undefined && homeEnv[key] !== "") {
-        return { value: homeEnv[key]!, source: `全局 ~/.env (${key})` };
-      }
-      return { value: defaultVal, source: "" };
-    }
-
-    if (runtimeEnv[key] !== undefined && runtimeEnv[key] !== "") {
-      return { value: runtimeEnv[key]!, source: `环境变量 (${key})` };
-    }
-    if (projectEnv[key] !== undefined && projectEnv[key] !== "") {
-      return { value: projectEnv[key]!, source: `项目 .env (${key})` };
-    }
-    if (homeEnv[key] !== undefined && homeEnv[key] !== "") {
-      return { value: homeEnv[key]!, source: `全局 ~/.env (${key})` };
-    }
-    return { value: defaultVal, source: "" };
-  };
+  const sources = readConfigSources(projectRoot, customEnv, Boolean(customEnv && !projectRootOverride));
+  const getWithSource = (key: string, defaultVal = "") => lookupConfigValue(sources, key, defaultVal);
 
   const get = (key: string, defaultVal = ""): string =>
     getWithSource(key, defaultVal).value;

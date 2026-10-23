@@ -73,7 +73,7 @@ test("sibling lookup never mixes revisions, while explicit historical HTML keeps
   const f = fixture(), path = join(f.root, "guide.md");
   writeFileSync(path, "# Old");
   const [oldHtml] = await ensureMultiFormatDeliverables({ markdownPath: path, outputDir: f.root, baseFileStem: "guide", requestedFormats: ["html"] });
-  const oldPdf = oldHtml.replace(/\.html$/, ".pdf"); writeFileSync(oldPdf, "%PDF-fixture");
+  const oldPdf = oldHtml.replace(/\.html$/, ".pdf"); writeFileSync(oldPdf, "%PDF-1.7\n" + "fixture".repeat(100) + "\n%%EOF\n");
   writeFileSync(path, "# New");
   const [newHtml] = await ensureMultiFormatDeliverables({ markdownPath: path, outputDir: f.root, baseFileStem: "guide", requestedFormats: ["html"] });
   expect(findSiblingMultiFormatFiles(path, ["html", "pdf"])).toEqual([newHtml]);
@@ -142,18 +142,14 @@ test("PDF failure reports the missing format without sending an older PDF", asyn
     expect(result.replyText).toContain("未生成");
   } finally { spawn.mockRestore(); }
 });
-test("today's output fallback also reports missing PDF without silently choosing another file", async () => {
+test("unassociated daily outputs are not used as a fallback", async () => {
   const f = fixture(), dir = (f.pipeline.agent as any).getOutputsDir();
   mkdirSync(dir,{recursive:true});
-  const md = join(dir,`${new Date().toISOString().slice(0,10).replace(/-/g,"_")}_guide.md`);
-  writeFileSync(md,"# Current");
-  const spawn = spyOn(Bun,"spawn").mockImplementation((()=>({exited:Promise.resolve(1),kill(){}})) as any);
-  try {
-    const result = await f.send([], ["pdf"]);
-    expect(result.mediaDeliveries).toEqual([]);
-    expect(result.missingFormats).toEqual(["pdf"]);
-    expect(result.replyText).toContain("未生成");
-  } finally {spawn.mockRestore();}
+  writeFileSync(join(dir,`${new Date().toISOString().slice(0,10).replace(/-/g,"_")}_guide.md`),"# Unrelated");
+  const result = await f.send([], ["pdf"]);
+  expect(result.mediaDeliveries ?? []).toEqual([]);
+  expect(result.outcome).toBe("failed");
+  expect(result.replyText).toContain("未找到");
 });
 
 test("pipeline status query honors disabled and custom heartbeat settings", () => {

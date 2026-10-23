@@ -1,5 +1,6 @@
+import { decodeArtifactPaths } from "../storage.ts";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { AppConfig, notifyExternalWebhookIfConfigured } from "../config.ts";
 import { ArticleRecord, ContextDatabase, ConversationTurnRecord, TriageLevel } from "../db.ts";
@@ -72,6 +73,8 @@ export interface IntentExecutionResult {
   relatedArticleId?: number | null;
   depositedPath?: string;
   missingFormats?: DeliverableFormat[];
+  outcome?: "success" | "partial" | "failed";
+  error?: string;
 }
 
 export type IntentHandlerFn = (
@@ -661,6 +664,7 @@ ${articlesEvidence}`,
       return {
         replyText: "⚠️ 尚未配置 LLM_API_KEY，无法执行实时联网公开信息检索。",
         modelUsed: "local_fallback",
+        outcome: "failed", error: "LLM_API_KEY not configured",
       };
     }
 
@@ -934,6 +938,7 @@ ${
       return {
         replyText: `⚠️ 调用生图链路失败：${err?.message || err}`,
         modelUsed: "agy_error",
+        outcome: "failed", error: err?.message || String(err),
       };
     } finally {
       progress.stop("视觉生图任务结束");
@@ -1010,42 +1015,6 @@ ${
     });
 
     try {
-      // Fast-path for retry/correction: if today's matching guide already exists in 05_outputs/research_notes/,
-      // ensure all requested formats (.md, .html, .pdf) are compiled and deliver them immediately!
-      if (isRetryOrCorrection && isDocGen) {
-        const existingTodayMd = this.findTodayMatchingOutputMd(effectiveRequirement);
-        if (existingTodayMd && existsSync(existingTodayMd)) {
-          await progress.start("正在读取已生成的指南并补齐多格式文件 (MD / HTML / PDF)");
-          const formatsToDeliver: DeliverableFormat[] =
-            requestedFormats.length > 0 ? requestedFormats : ["md", "html", "pdf"];
-          const deliverableFiles = await ensureMultiFormatDeliverables({
-            markdownPath: existingTodayMd,
-            outputDir: this.getOutputsDir(),
-            baseFileStem: basename(existingTodayMd, ".md"),
-            requestedFormats: formatsToDeliver,
-          });
-          if (deliverableFiles.length > 0) {
-            const mdPreview = readFileSync(existingTodayMd, "utf-8");
-            const summaryText = extractDocumentExecutiveSummary(
-              mdPreview,
-              deliverableFiles,
-              this.config.vaultRoot
-            );
-            return {
-              replyText: `✅ 已按你之前的需求准备好中文新手学习指南，并生成了 ${deliverableFiles
-                .map((f) => `\`${basename(f)}\``)
-                .join("、")}，正在逐个推送到微信：\n\n${summaryText}`,
-              mediaDeliveries: deliverableFiles.map((fPath) => ({
-                mediaType: "file" as const,
-                mediaPath: fPath,
-              })),
-              modelUsed: "vault_deliverable_compiler",
-              depositedPath: deliverableFiles.join(", "),
-            };
-          }
-        }
-      }
-
       // Send immediate progress notice to WeChat and start periodic heartbeat timer
       const fmtLabel =
         requestedFormats.length > 0
@@ -1293,6 +1262,9 @@ ${effectiveRequirement}`,
         }
       }
 
+      const missingFormats = requestedFormats.filter(fmt => !allDeliverableFiles.some(p => p.toLowerCase().endsWith(`.${fmt}`)));
+      const outcome = missingFormats.length ? (allDeliverableFiles.length ? "partial" : "failed") : "success";
+      const missingNotice = missingFormats.length ? `\n⚠️ 未生成所请求格式：${missingFormats.map(f => f.toUpperCase()).join("、")}` : "";
       const fileListBanner =
         allDeliverableFiles.length > 0
           ? `\n\n📎 已生成并为你推送文件（共 ${allDeliverableFiles.length} 个）：\n` +
@@ -1307,53 +1279,24 @@ ${effectiveRequirement}`,
       ).catch(() => {});
 
       return {
-        replyText: `🤖 任务执行完成 [${tieredRes.modelUsed}]：\n\n${replySummaryText}${fileListBanner}`,
+        replyText: `🤖 ${outcome === "success" ? "任务执行完成" : outcome === "partial" ? "任务部分完成" : "未完成所请求的文件交付"} [${tieredRes.modelUsed}]：\n\n${replySummaryText}${fileListBanner}${missingNotice}`,
+        outcome, missingFormats,
         mediaDeliveries: mediaDeliveries.length > 0 ? mediaDeliveries : undefined,
         modelUsed: tieredRes.modelUsed,
         relatedArticleId: targetArticle?.id ?? null,
         depositedPath:
           allDeliverableFiles.length > 0
-            ? allDeliverableFiles.join(", ")
+            ? JSON.stringify(allDeliverableFiles)
             : tieredRes.generatedImages[0] || undefined,
       };
     } catch (err: any) {
       return {
         replyText: `⚠️ 任务执行出错 [${backend}]：${err?.message || err}`,
         modelUsed: `${backend}_error`,
+        outcome: "failed", error: err?.message || String(err),
       };
     } finally {
       progress.stop("阶段 4/4：任务执行完毕，已入队推送微信");
-    }
-  }
-
-  private findTodayMatchingOutputMd(requirementText: string): string | null {
-    const notesDir = this.getOutputsDir();
-    if (!existsSync(notesDir)) return null;
-    const todayPrefix = new Date().toISOString().slice(0, 10).replace(/-/g, "_");
-    const lowerReq = requirementText.toLowerCase();
-    const wantsKarpathyOrWiki =
-      lowerReq.includes("karpathy") || lowerReq.includes("wiki");
-
-    try {
-      const entries = readdirSync(notesDir)
-        .filter(
-          (e) =>
-            e.endsWith(".md") &&
-            !e.endsWith("_sources.md") &&
-            !e.endsWith("_v2.md") &&
-            e.startsWith(todayPrefix)
-        )
-        .map((e) => join(notesDir, e));
-
-      for (const fullPath of entries) {
-        const nameLower = basename(fullPath).toLowerCase();
-        if (wantsKarpathyOrWiki && nameLower.includes("llm_wiki")) {
-          return fullPath;
-        }
-      }
-      return entries[0] || null;
-    } catch {
-      return null;
     }
   }
 
@@ -1361,7 +1304,7 @@ ${effectiveRequirement}`,
   // 7. Intent: send_file (C2C AES-128-ECB Upload & Multi-Format File Delivery)
   // ============================================================================
   private async resolveFileDelivery(paths: string[], requestedFormats: DeliverableFormat[]) {
-    if (requestedFormats.length === 0 && paths.length > 1) {
+    if (paths.length > 1 && (requestedFormats.length === 0 || paths.filter(p => p.toLowerCase().endsWith(".md")).length > 1)) {
       const remaining = new Set(paths);
       const files: string[] = [];
       const missing = new Set<DeliverableFormat>();
@@ -1373,13 +1316,13 @@ ${effectiveRequirement}`,
           if (p === source || name === `${sourceStem}.html` || name === `${sourceStem}.pdf`) return true;
           return name.startsWith(`${sourceStem}_export_`) && /^[a-f0-9]{16}\.(html|pdf)$/i.test(name.slice(`${sourceStem}_export_`.length));
         });
-        const formats = [...new Set(family.map((p) => p.split(".").pop()!.toLowerCase() as DeliverableFormat))];
-        const delivery = await this.resolveFileDelivery(family, formats);
+        const formats = requestedFormats.length ? requestedFormats : [...new Set(family.map((p) => p.split(".").pop()!.toLowerCase() as DeliverableFormat))];
+        const delivery = await this.resolveFileDelivery([source], formats);
         files.push(...delivery.files);
         delivery.missingFormats.forEach((fmt) => missing.add(fmt));
         family.forEach((p) => remaining.delete(p));
       }
-      files.push(...remaining);
+      if (requestedFormats.length === 0) files.push(...remaining);
       const missingFormats = [...missing];
       return { files, missingFormats, warning: missingFormats.length
         ? `\n⚠️ 未生成或无法获取所请求格式：${missingFormats.map((fmt) => fmt.toUpperCase()).join("、")}；未使用旧版本替代。`
@@ -1428,17 +1371,15 @@ ${effectiveRequirement}`,
     // 1. Check if user is asking for recently generated files from a prior turn
     if (
       fileTarget === "recent_generated" ||
-      /(?:文件呢|刚生成|刚才生成|学习指南|新手指南)/i.test(ctx.unpacked.userText)
+      (!ctx.decision.slots.fileTarget && !targetArticle && !ctx.decision.slots.fileQuery &&
+        /(?:文件呢|刚生成|刚才生成|学习指南|新手指南)/i.test(ctx.unpacked.userText))
     ) {
       const priorTurnWithFiles = [...ctx.recentTurns]
         .reverse()
-        .find((t) => Boolean(t.deposited_path));
+        .find((t) => Boolean(t.deposited_path) && !/^\[\s*\]$/.test(t.deposited_path.trim()));
 
       if (priorTurnWithFiles?.deposited_path) {
-        const paths = priorTurnWithFiles.deposited_path
-          .split(/\s*,\s*/)
-          .map((s) => s.trim())
-          .filter((p) => p && existsSync(p));
+        const paths = decodeArtifactPaths(priorTurnWithFiles.deposited_path).filter(p => existsSync(p));
         if (paths.length > 0) {
           const delivery = await this.resolveFileDelivery(paths, requestedFormats);
           const allSiblings = delivery.files;
@@ -1447,42 +1388,18 @@ ${effectiveRequirement}`,
               .map((p) => `- \`${basename(p)}\``)
               .join("\n")}${delivery.warning}`,
             missingFormats: delivery.missingFormats,
+            outcome: delivery.missingFormats.length ? (delivery.files.length ? "partial" : "failed") : "success",
             mediaDeliveries: allSiblings.map((p) => ({
               mediaType: "file" as const,
               mediaPath: p,
             })),
             modelUsed: getFastModel(this.config),
-            depositedPath: allSiblings.join(", "),
+            depositedPath: JSON.stringify(allSiblings),
           };
         }
       }
 
-      // Check today's generated guide in 05_outputs/research_notes/
-      const todayMd = this.findTodayMatchingOutputMd(
-        [
-          ctx.unpacked.userText,
-          ...ctx.recentTurns.map((t) => t.user_text),
-        ].join("\n")
-      );
-      if (todayMd && existsSync(todayMd)) {
-        const delivery = await this.resolveFileDelivery([todayMd],
-          requestedFormats.length > 0 ? requestedFormats : ["md", "html", "pdf"]);
-        const siblings = delivery.files;
-        if (siblings.length > 0 || delivery.missingFormats.length > 0) {
-          return {
-            replyText: `📎 正在为你推送生成的指南文件（共 ${siblings.length} 个）：\n${siblings
-              .map((p) => `- \`${basename(p)}\``)
-              .join("\n")}${delivery.warning}`,
-            missingFormats: delivery.missingFormats,
-            mediaDeliveries: siblings.map((p) => ({
-              mediaType: "file" as const,
-              mediaPath: p,
-            })),
-            modelUsed: getFastModel(this.config),
-            depositedPath: siblings.join(", "),
-          };
-        }
-      }
+      return { replyText: "⚠️ 未找到当前会话关联的文件，请提供明确的文档名称。", modelUsed: getFastModel(this.config), outcome: "failed", error: "No conversation artifact" };
     }
 
     let filePathToSend = "";
@@ -1516,6 +1433,7 @@ ${effectiveRequirement}`,
     if (!filePathToSend || !existsSync(filePathToSend)) {
       return {
         replyText: `⚠️ 未找到要发送的本地笔记文件（请确认文章已完成抓取，或提供准确的知识库笔记名称）。`,
+        outcome: "failed", error: "File not found",
         modelUsed: getFastModel(this.config),
       };
     }
@@ -1530,13 +1448,14 @@ ${effectiveRequirement}`,
         .map((f) => `\`${basename(f)}\``)
         .join("、")}${delivery.warning}`,
       missingFormats: delivery.missingFormats,
+      outcome: delivery.missingFormats.length ? (delivery.files.length ? "partial" : "failed") : "success",
       mediaDeliveries: filesToSend.map((f) => ({
         mediaType: "file" as const,
         mediaPath: f,
       })),
       modelUsed: getFastModel(this.config),
       relatedArticleId: targetArticle?.id ?? null,
-      depositedPath: filesToSend.join(", "),
+      depositedPath: JSON.stringify(filesToSend),
     };
   }
 

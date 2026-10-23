@@ -1,0 +1,16 @@
+import {mock,spyOn} from 'bun:test';
+import * as fs from 'node:fs';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+const originalExists=fs.existsSync;
+mock.module('node:fs',()=>({...fs,existsSync:(p:any)=>String(p)==='/usr/bin/google-chrome'||originalExists(p)}));
+const {ensureMultiFormatDeliverables,renderHtmlToPdf}=await import('../../src/agent/doc_exporter.ts');
+const root=fs.mkdtempSync(join(tmpdir(),'wx-review-pdf-')),md=join(root,'report.md');fs.writeFileSync(md,'# Current');
+const [html]=await ensureMultiFormatDeliverables({markdownPath:md,outputDir:root,baseFileStem:'report',requestedFormats:['html']});
+const pdf=html.replace(/\.html$/,'.pdf');fs.writeFileSync(pdf,'PARTIAL');
+let mode='bad',directFinalWrite=false;
+spyOn(Bun,'spawn').mockImplementation(((args:string[])=>{const output=args.find(a=>a.startsWith('--print-to-pdf='))!.slice('--print-to-pdf='.length);if(output===pdf)directFinalWrite=true;fs.writeFileSync(output,mode==='bad'?'NOT_PDF'.repeat(100):'%PDF-1.7\n'+'fixture'.repeat(100)+'\n%%EOF\n');return{exited:Promise.resolve(mode==='bad'?1:0),kill(){}};}) as any);
+const files=await ensureMultiFormatDeliverables({markdownPath:md,outputDir:root,baseFileStem:'report',requestedFormats:['pdf']});
+const failedRender=await renderHtmlToPdf(html,join(root,'failed.pdf'));mode='good';const goodRender=await renderHtmlToPdf(html,pdf);
+const oldPreserved=fs.readdirSync(root).some(name=>name.includes('.invalid.')&&fs.readFileSync(join(root,name),'utf8')==='PARTIAL');
+console.log(JSON.stringify({invalidCacheReturned:files.includes(pdf),failedRender,goodRender,directFinalWrite,oldPreserved}));

@@ -11,7 +11,7 @@ fs.writeFileSync(md,"# Current\nNEW_BODY"); fs.writeFileSync(oldPdf,"%PDF-OLD");
 let rendered = false;
 spyOn(Bun,"spawn").mockImplementation(((args: string[]) => {
   const target = args.find(arg => arg.startsWith("--print-to-pdf="))!.slice("--print-to-pdf=".length);
-  fs.writeFileSync(target, "%PDF-1.7\n" + "fixture".repeat(100)); rendered = true;
+  fs.writeFileSync(target, "%PDF-1.7\n" + "fixture".repeat(100) + "\n%%EOF\n"); rendered = true;
   return {exited:Promise.resolve(0),kill(){}};
 }) as any);
 const files = await ensureMultiFormatDeliverables({markdownPath:md,outputDir:root,baseFileStem:"guide",existingFiles:[oldPdf],requestedFormats:["html","pdf"]});

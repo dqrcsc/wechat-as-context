@@ -1083,7 +1083,9 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
     // Verify unrelated article #5 was NOT injected into the synthesis prompt
     expect(promptsSeen.some((p) => p.includes("蚂蚁取消前端工程师") && p.includes("关联文章 #"))).toBe(false);
 
-    // Verify all 3 formats (.md, .html, .pdf) were generated and queued for delivery
+    // MD/HTML succeed; the isolated browser failure must report missing PDF.
+    expect(turn1Res.outcome).toBe("partial");
+    expect(turn1Res.missingFormats).toEqual(["pdf"]);
     expect(turn1Res.mediaDeliveries?.length).toBeGreaterThanOrEqual(2);
     const deliveredExts = (turn1Res.mediaDeliveries || []).map((m) =>
       m.mediaPath.slice(m.mediaPath.lastIndexOf("."))
@@ -1140,7 +1142,8 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
       },
     });
 
-    expect(turn3Res.replyText).toContain("中文新手学习指南");
+    expect(turn3Res.replyText).toContain("新手学习指南");
+    expect(turn3Res.modelUsed).not.toBe("vault_deliverable_compiler");
     expect(turn3Res.mediaDeliveries?.length).toBeGreaterThanOrEqual(2);
     expect(
       turn3Res.mediaDeliveries?.every((m) => m.mediaPath.includes("llm_wiki_beginner_guide"))

@@ -797,13 +797,13 @@ async function executeCodexCli(req: SubagentRunRequest): Promise<SubagentRunResu
     req.config.vaultRoot
   );
 
-  if (timedOut && images.length === 0 && files.length === 0) {
+  if (timedOut) {
     throw new Error(
       `Codex CLI timed out after ${Math.round(timeoutMs / 1000)}s without completing final output`
     );
   }
 
-  if (!outputText && exitCode !== 0 && images.length === 0 && files.length === 0) {
+  if (exitCode !== 0) {
     throw new Error(
       `Codex CLI exited with code ${exitCode}: ${stderrText.slice(0, 300)}`
     );
@@ -862,11 +862,11 @@ async function executeOpenCodeCli(
     req.config.vaultRoot
   );
 
-  if (timedOut && images.length === 0 && files.length === 0) {
+  if (timedOut) {
     throw new Error(`OpenCode CLI timed out after ${Math.round(timeoutMs / 1000)}s`);
   }
 
-  if (!cleanOut && exitCode !== 0 && images.length === 0 && files.length === 0) {
+  if (exitCode !== 0) {
     throw new Error(
       `OpenCode CLI exited with code ${exitCode}: ${stderrText.slice(0, 300)}`
     );
@@ -930,11 +930,11 @@ async function executeClaudeCli(
     req.config.vaultRoot
   );
 
-  if (timedOut && images.length === 0 && files.length === 0) {
+  if (timedOut) {
     throw new Error(`Claude CLI timed out after ${Math.round(timeoutMs / 1000)}s`);
   }
 
-  if (!cleanOut && exitCode !== 0 && images.length === 0 && files.length === 0) {
+  if (exitCode !== 0) {
     throw new Error(
       `Claude CLI exited with code ${exitCode}: ${stderrText.slice(0, 300)}`
     );
@@ -982,11 +982,11 @@ async function executeGeminiCli(
     req.config.vaultRoot
   );
 
-  if (timedOut && images.length === 0 && files.length === 0) {
+  if (timedOut) {
     throw new Error(`Gemini CLI timed out after ${Math.round(timeoutMs / 1000)}s`);
   }
 
-  if (!cleanOut && exitCode !== 0 && images.length === 0 && files.length === 0) {
+  if (exitCode !== 0) {
     throw new Error(
       `Gemini CLI exited with code ${exitCode}: ${stderrText.slice(0, 300)}`
     );
@@ -1050,11 +1050,11 @@ async function executeWorkBuddyCli(
     req.config.vaultRoot
   );
 
-  if (timedOut && images.length === 0 && files.length === 0) {
+  if (timedOut) {
     throw new Error(`WorkBuddy CLI timed out after ${Math.round(timeoutMs / 1000)}s`);
   }
 
-  if (!cleanOut && exitCode !== 0 && images.length === 0 && files.length === 0) {
+  if (exitCode !== 0) {
     throw new Error(
       `WorkBuddy CLI exited with code ${exitCode}: ${stderrText.slice(0, 300)}`
     );
@@ -1105,11 +1105,11 @@ async function executeAiderCli(
     req.config.vaultRoot
   );
 
-  if (timedOut && images.length === 0 && files.length === 0) {
+  if (timedOut) {
     throw new Error(`Aider CLI timed out after ${Math.round(timeoutMs / 1000)}s`);
   }
 
-  if (!cleanOut && exitCode !== 0 && images.length === 0 && files.length === 0) {
+  if (exitCode !== 0) {
     throw new Error(
       `Aider CLI exited with code ${exitCode}: ${stderrText.slice(0, 300)}`
     );
@@ -1176,11 +1176,11 @@ async function executeCustomCli(
     req.config.vaultRoot
   );
 
-  if (timedOut && images.length === 0 && files.length === 0) {
+  if (timedOut) {
     throw new Error(`Custom CLI (${req.backend}) timed out after ${Math.round(timeoutMs / 1000)}s`);
   }
 
-  if (!cleanOut && exitCode !== 0 && images.length === 0 && files.length === 0) {
+  if (exitCode !== 0) {
     throw new Error(
       `Custom CLI (${req.backend}) exited with code ${exitCode}: ${stderrText.slice(0, 300)}`
     );

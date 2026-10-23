@@ -216,3 +216,13 @@ bun run src/cli.ts <command> [options]
 - 显式心跳秒配置（含 0）优于 legacy 毫秒变量；状态快通道使用相同配置。0 仅关闭定时进度，不关闭阶段通知。
 
 逐项复现、回归覆盖和验收边界见 [七项修复说明](./followup-reliability-fixes.md)。
+
+### 3.5 v0.2.3 文件快照与执行结果
+
+- 媒体入队读取文件字节，保存到数据库同目录的 `outbox_media/<sha256>/<basename>`；`reply_outbox.media_path` 指向快照，新增 `media_sha256`。发送前重新核验摘要，重试复用同一快照与消息 ID。原路径后续编辑或移动不改变待发字节。
+- schema 在新版打开数据库时增量添加。旧版无摘要的待发媒体和被改坏的快照均拒绝发送，沿用最多三次尝试并保留错误；必须重新入队。文本回执不受影响，原附件不变。旧版与新版不应混跑媒体发送；快照当前不自动清理。
+- 新的 `conversation_turns.deposited_path` 使用 JSON 数组；无产物存空串。读取兼容真实存在的旧单路径（含逗号）及各项均存在的旧逗号列表；损坏记录不猜测。文件选择不再使用当天目录兜底，明确文章目标优先于通用“指南”关键词。
+- `IntentExecutionResult.outcome` 支持 `success`、`partial`、`failed`。业务失败写入任务 `failed` 与错误；部分交付写入 `done`，阶段明确标注缺失，回执通过 `missingFormats` 说明。缺省结果仍按成功兼容既有处理器，微信送达由 outbox 单独记录。
+- 所有 CLI 后端以非零退出或超时判失败；多 Markdown 格式请求逐份处理。已有 Markdown 与显式正文冲突时拒绝处理；PDF 使用临时路径，进程成功且通过头尾检查后原子发布，缓存执行相同检查，损坏的旧 PDF 重命名保留。
+- 配置 Key 发现与加载共用来源顺序及 `IGNORE_HOME_DOTENV` 规则；配置刷新失败也会释放 drain 状态，恢复后同实例可以继续消费。
+- `push` 对显式历史文件的保留约定不变。详细兼容说明与验收见 [十项修复说明](./v023-reliability-fixes.md)。

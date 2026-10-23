@@ -1,6 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, renameSync, unlinkSync } from "node:fs";
 import { basename, dirname, extname, isAbsolute, join, relative, sep } from "node:path";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { writeNewFile } from "../storage.ts";
 
 export type DeliverableFormat = "md" | "html" | "pdf";
@@ -585,52 +585,43 @@ export function compileMarkdownToHtml(
 /**
  * Render an HTML file to PDF using local Headless Chrome / Chromium / Edge.
  */
-export async function renderHtmlToPdf(
-  htmlPath: string,
-  pdfPath: string,
-  timeoutMs = 35_000
-): Promise<boolean> {
-  const browserBin = findBrowserBinary();
-  if (!browserBin || !existsSync(htmlPath)) {
-    return false;
-  }
-
-  mkdirSync(dirname(pdfPath), { recursive: true });
-  const fileUrl = `file://${htmlPath}`;
-
+// This is a basic container check, not a full PDF parser or visual validation.
+export function isUsablePdf(path: string): boolean {
   try {
-    const proc = Bun.spawn(
-      [
-        browserBin,
-        "--headless",
-        "--disable-gpu",
-        "--no-sandbox",
-        "--no-pdf-header-footer",
-        `--print-to-pdf=${pdfPath}`,
-        fileUrl,
-      ],
-      {
-        stdout: "pipe",
-        stderr: "pipe",
-      }
-    );
+    if (!statSync(path).isFile()) return false;
+    const content = readFileSync(path);
+    return content.length > 500 && /^%PDF-\d\.\d/.test(content.subarray(0, 16).toString("ascii")) && /%%EOF\s*$/.test(content.subarray(-1024).toString("ascii"));
+  } catch { return false; }
+}
 
-    const timer = setTimeout(() => {
-      try {
-        proc.kill();
-      } catch {}
-    }, timeoutMs);
-
-    await proc.exited;
-    clearTimeout(timer);
-
-    if (existsSync(pdfPath) && statSync(pdfPath).size > 500) {
-      return true;
+export async function renderHtmlToPdf(htmlPath: string, pdfPath: string, timeoutMs = 35_000): Promise<boolean> {
+  const browserBin = findBrowserBinary();
+  if (!browserBin || !existsSync(htmlPath)) return false;
+  mkdirSync(dirname(pdfPath), { recursive: true });
+  const temporary = `${pdfPath}.${randomUUID()}.tmp.pdf`;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  try {
+    const proc = Bun.spawn([
+      browserBin, "--headless", "--disable-gpu", "--no-sandbox", "--no-pdf-header-footer",
+      `--print-to-pdf=${temporary}`, `file://${htmlPath}`,
+    ], {stdout: "ignore", stderr: "ignore"});
+    timer = setTimeout(() => { timedOut = true; try { proc.kill(); } catch {} }, timeoutMs);
+    const exitCode = await proc.exited;
+    if (timedOut || exitCode !== 0 || !isUsablePdf(temporary)) return false;
+    if (existsSync(pdfPath)) {
+      if (isUsablePdf(pdfPath)) return true;
+      renameSync(pdfPath, `${pdfPath}.invalid.${randomUUID()}`);
     }
+    writeNewFile(pdfPath, readFileSync(temporary));
+    return isUsablePdf(pdfPath);
   } catch (err) {
     console.warn("[DocExporter] Headless browser PDF render warning:", err);
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (existsSync(temporary)) unlinkSync(temporary);
   }
-  return false;
 }
 
 /** Compute the shared source/image revision used by export creation and lookup. */
@@ -682,7 +673,7 @@ export async function ensureMultiFormatDeliverables(params: {
   for (const f of existingFiles) {
     if (!existsSync(f)) continue;
     const ext = extname(f).toLowerCase().replace(/^\./, "");
-    if ((ext === "md" || ext === "html" || ext === "pdf") && !byExt.has(ext)) {
+    if ((ext === "md" || ext === "html" || ext === "pdf") && !byExt.has(ext) && (ext !== "pdf" || isUsablePdf(f))) {
       byExt.set(ext, f);
     }
   }
@@ -694,7 +685,7 @@ export async function ensureMultiFormatDeliverables(params: {
     const stem = basename(samplePath, extname(samplePath));
     for (const fmt of ["md", "html", "pdf"] as DeliverableFormat[]) {
       const sibling = join(dir, `${stem}.${fmt}`);
-      if (!byExt.has(fmt) && existsSync(sibling) && statSync(sibling).size > 0) {
+      if (!byExt.has(fmt) && existsSync(sibling) && statSync(sibling).size > 0 && (fmt !== "pdf" || isUsablePdf(sibling))) {
         byExt.set(fmt, sibling);
       }
     }
@@ -704,13 +695,17 @@ export async function ensureMultiFormatDeliverables(params: {
   let mdPath = params.markdownPath || byExt.get("md") || "";
   let mdContent = params.markdownContent || "";
 
-  if (mdPath && existsSync(mdPath) && !mdContent) {
-    try {
-      mdContent = readFileSync(mdPath, "utf-8");
-    } catch {}
-  } else if (mdContent && (!mdPath || !existsSync(mdPath))) {
+  if (mdPath && existsSync(mdPath)) {
+    const diskContent = readFileSync(mdPath, "utf-8");
+    if (params.markdownContent !== undefined && params.markdownContent !== diskContent) {
+      throw new Error("Markdown source conflicts with explicit markdownContent; use a new source file");
+    }
+    mdContent = diskContent;
+  } else if (params.markdownContent !== undefined) {
     mdPath = join(outputDir, `${baseFileStem}.md`);
-    writeFileSync(mdPath, mdContent, "utf-8");
+    if (!writeNewFile(mdPath, mdContent) && readFileSync(mdPath, "utf8") !== mdContent) {
+      throw new Error("Markdown target already contains different content");
+    }
     byExt.set("md", mdPath);
   }
 
@@ -740,7 +735,7 @@ export async function ensureMultiFormatDeliverables(params: {
   // Match the source revision instead of accepting stale same-stem siblings.
   for (const fmt of ["html", "pdf"] as DeliverableFormat[]) {
     const candidate = join(targetDir, `${derivedStem}.${fmt}`);
-    if (!byExt.has(fmt) && existsSync(candidate) && statSync(candidate).size > 0) {
+    if (!byExt.has(fmt) && existsSync(candidate) && statSync(candidate).size > 0 && (fmt !== "pdf" || isUsablePdf(candidate))) {
       byExt.set(fmt, candidate);
     }
   }
@@ -781,7 +776,7 @@ export async function ensureMultiFormatDeliverables(params: {
   // missing exports must stay missing rather than resurrecting stale versions.
   if (result.length === 0 && !hasMarkdownSource) {
     for (const f of existingFiles) {
-      if (existsSync(f) && !result.includes(f)) {
+      if (existsSync(f) && !result.includes(f) && (extname(f).toLowerCase() !== ".pdf" || isUsablePdf(f))) {
         result.push(f);
       }
     }

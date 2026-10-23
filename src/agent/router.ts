@@ -1,3 +1,4 @@
+import { decodeArtifactPaths } from "../storage.ts";
 import { AppConfig } from "../config.ts";
 import { ArticleRecord, ConversationTurnRecord, TriageLevel } from "../db.ts";
 import { UnpackedClawBotMessage } from "../clawbot/client.ts";
@@ -204,7 +205,7 @@ export async function classifyMessageIntent(params: {
     const formats = detectRequestedFormats(priorTask.user_text);
     // If the prior complex task did NOT deposit any file or failed with fake placeholder, re-run/complete it!
     if (
-      !priorTask.deposited_path ||
+      decodeArtifactPaths(priorTask.deposited_path).length === 0 ||
       priorTask.assistant_reply.includes("已完成任务）") ||
       priorTask.assistant_reply.includes("已完成执行）")
     ) {

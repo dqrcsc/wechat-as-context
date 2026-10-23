@@ -98,7 +98,6 @@ export class WeChatContextPipeline {
   public refreshConfigFromDiskIfChanged(): void {
     const currentMtime = this.getEnvFileMtimeMs();
     if (currentMtime > 0 && currentMtime !== this.lastEnvMtimeMs) {
-      this.lastEnvMtimeMs = currentMtime;
       const fresh = loadConfig(undefined, this.config.projectRoot);
       this.updateConfig(fresh);
     }
@@ -444,9 +443,9 @@ export class WeChatContextPipeline {
   public async drainAgentQueue(): Promise<number> {
     if (this.isDrainingAgents) return 0;
     this.isDrainingAgents = true;
-    this.refreshConfigFromDiskIfChanged();
     let processedCount = 0;
     try {
+      this.refreshConfigFromDiskIfChanged();
       return await this.db.withLock("agent_queue", async () => {
         // Only the exclusive worker may recover interrupted tasks. Constructors and
         // read commands must never reset work owned by another live process.
@@ -472,13 +471,15 @@ export class WeChatContextPipeline {
           try {
             const rawMessage = JSON.parse(task.raw_payload) as ClawBotMessage;
             await this.clawbot.withTypingIndicator(task.sender_id, async () => {
-              await this.agent.processClawBotMessage({
+              const result = await this.agent.processClawBotMessage({
                 messageKey: task.message_key,
                 senderId: task.sender_id,
                 rawMessage,
               });
+              this.db.updateAgentTaskStatus(task.id, result.outcome === "failed" ? "failed" : "done",
+                result.outcome === "failed" ? result.error || result.replyText : "",
+                result.outcome === "failed" ? "任务执行失败，错误回执已入队" : result.outcome === "partial" ? "任务部分完成，缺失内容见回执" : "任务执行完成，回执已入队");
             });
-            this.db.updateAgentTaskStatus(task.id, "done", "", "任务执行完成，回执已入队");
             processedCount++;
             if (this.clawbot.isConfigured()) {
               await this.flushReplies().catch(() => {});
@@ -523,6 +524,7 @@ export class WeChatContextPipeline {
         attempts: number;
         media_type?: string;
         media_path?: string;
+        media_sha256?: string;
       }>;
       for (const row of rows) {
         this.db.db.query("UPDATE reply_outbox SET attempts = attempts + 1 WHERE id = ?").run(row.id);
@@ -531,6 +533,9 @@ export class WeChatContextPipeline {
             (row.media_type === "file" || row.media_type === "image") &&
             row.media_path
           ) {
+            if (!row.media_sha256) throw new Error("Legacy media entry has no content snapshot; requeue the file");
+            const digest = createHash("sha256").update(readFileSync(row.media_path)).digest("hex");
+            if (digest !== row.media_sha256) throw new Error("Outbox media snapshot checksum mismatch; requeue the file");
             await this.clawbot.sendMediaFile(row.recipient, row.media_path, row.id);
           } else {
             await this.clawbot.sendTextMessage(row.recipient, row.text, row.id);
@@ -803,7 +808,7 @@ export class WeChatContextPipeline {
         complexity: "fast",
         modelUsed: "cli_push",
         relatedArticleId: targetArticle?.id ?? null,
-        depositedPath: finalFiles.join(", "),
+        depositedPath: JSON.stringify(finalFiles),
         assistantReply:
           finalText ||
           `📎 已从电脑端推送文件：${finalFiles.map((f) => basename(f)).join("、")}`,
