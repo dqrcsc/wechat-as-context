@@ -206,3 +206,13 @@ bun run src/cli.ts <command> [options]
 - HTTP 入参使用 `note`、`files`、`formats`。旧的 `annotation`、`docPath`、`exportFormats` 返回 400；`/api/sync`、`/api/articles`、`/api/ideas` 未实现，使用 CLI 对应命令。
 
 升级、测试范围和剩余限制见 [修复说明与验收](./reliability-fixes.md)。
+
+
+### 3.4 v0.2.2 图片、文件与配置一致性
+
+- AGY 不扫描共享 generated/brain 目录；只接受明确返回或本次预期路径、且真实路径处于允许目录的产物。超时和非零退出均失败；生图任务还必须有可归属图片。未知模型回退到 CLI 默认值后，`modelUsed` 标记 `default/unknown`。
+- `send_file` 从 Markdown 请求导出时，按当前正文和嵌入图片的摘要逐项补齐格式；查找不再以 mtime 混选不同版本。显式历史 HTML/PDF 只配对该 revision，缺少格式通过 `missingFormats` 和回复文本说明。
+- 普通启动、重载、Web 配置加载统一项目 `.env` > 进程环境 > home `.env`；测试或嵌入调用的 `customEnv` 显式注入优先。`IGNORE_HOME_DOTENV` 只控制 home 文件。
+- 显式心跳秒配置（含 0）优于 legacy 毫秒变量；状态快通道使用相同配置。0 仅关闭定时进度，不关闭阶段通知。
+
+逐项复现、回归覆盖和验收边界见 [七项修复说明](./followup-reliability-fixes.md)。

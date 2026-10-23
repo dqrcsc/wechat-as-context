@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { writeNewFile } from "../storage.ts";
 import { TriageLevel } from "../db.ts";
 import type { AppConfig } from "../config.ts";
+import { prepareMarkdownExport } from "../agent/doc_exporter.ts";
 
 export interface VaultMatch {
   wikiLink: string;
@@ -664,66 +665,37 @@ export function findSiblingMultiFormatFiles(
   if (!primaryFilePath || !existsSync(primaryFilePath)) return [];
   const dir = resolve(primaryFilePath, "..");
   const stem = basename(primaryFilePath).replace(/\.[a-zA-Z0-9]+$/, "");
-  // Exclude internal "_sources" companion files and "_export_<revision>" suffix if main guide exists
-  const cleanStem = stem
-    .replace(/_export_[a-f0-9]{16}$/i, "")
-    .replace(/_sources$/, "");
-  const results: string[] = [];
-
-  let dirEntries: string[] | null = null;
-  const getDirEntries = (): string[] => {
-    if (dirEntries === null) {
-      try {
-        dirEntries = readdirSync(dir);
-      } catch {
-        dirEntries = [];
-      }
-    }
-    return dirEntries;
+  const isVersioned = /_export_[a-f0-9]{16}$/i.test(stem);
+  const cleanStem = stem.replace(/_export_[a-f0-9]{16}$/i, "");
+  const source = join(dir, `${cleanStem}.md`);
+  const prepared = existsSync(source) && statSync(source).isFile()
+    ? prepareMarkdownExport(readFileSync(source, "utf8"), dir, cleanStem)
+    : undefined;
+  const matchesSource = (candidateStem: string): boolean => {
+    if (!prepared) return false;
+    if (candidateStem === prepared.derivedStem) return true;
+    const htmlPath = join(dir, `${candidateStem}.html`);
+    if (!existsSync(htmlPath) || !statSync(htmlPath).isFile()) return false;
+    return readFileSync(htmlPath, "utf8").endsWith(`\n<!-- wechat-export-source:${prepared.sourceRevision} -->\n`);
   };
-
+  // Explicit historical exports retain their revision. A source document uses
+  // its content revision, never the newest filesystem timestamp per extension.
+  let exportStem = isVersioned ? stem : prepared?.derivedStem || cleanStem;
+  if (!isVersioned && prepared && !existsSync(join(dir, `${exportStem}.html`))) {
+    // A title changes the export revision but not its source identity. Only
+    // consider exports carrying this source hash, never filesystem recency.
+    const matchingStem = readdirSync(dir).sort().find((name) =>
+      name.startsWith(`${cleanStem}_export_`) && /^[a-f0-9]{16}\.html$/i.test(name.slice(`${cleanStem}_export_`.length)) && matchesSource(name.slice(0, -5))
+    );
+    if (matchingStem) exportStem = matchingStem.slice(0, -5);
+  }
+  const results: string[] = [];
   for (const ext of requestedExts) {
-    if (ext !== "md") {
-      const exportPrefix = `${cleanStem}_export_`;
-      const exportSuffix = `.${ext}`;
-      const exportCandidates = getDirEntries()
-        .filter(
-          (name) =>
-            name.startsWith(exportPrefix) &&
-            name.endsWith(exportSuffix) &&
-            /^[a-f0-9]{16}$/i.test(
-              name.slice(exportPrefix.length, name.length - exportSuffix.length)
-            )
-        )
-        .map((name) => {
-          const fullPath = join(dir, name);
-          try {
-            const st = statSync(fullPath);
-            return st.isFile() && st.size > 0
-              ? { fullPath, mtimeMs: st.mtimeMs }
-              : null;
-          } catch {
-            return null;
-          }
-        })
-        .filter(
-          (item): item is { fullPath: string; mtimeMs: number } => item !== null
-        )
-        .sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-      if (exportCandidates.length > 0) {
-        results.push(exportCandidates[0]!.fullPath);
-        continue;
-      }
-    }
-
-    const candidate = join(dir, `${cleanStem}.${ext}`);
-    if (existsSync(candidate) && statSync(candidate).isFile()) {
+    if (ext === "md" && isVersioned && !matchesSource(stem)) continue;
+    const candidate = join(dir, `${ext === "md" ? cleanStem : exportStem}.${ext}`);
+    if (existsSync(candidate) && statSync(candidate).isFile() && statSync(candidate).size > 0) {
       results.push(candidate);
     }
-  }
-  if (results.length === 0 && existsSync(primaryFilePath)) {
-    results.push(primaryFilePath);
   }
   return results;
 }

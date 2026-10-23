@@ -82,7 +82,9 @@ bun run {{PROJECT_ROOT}}/src/cli.ts push --article <id> [--with-file] [--formats
 - 微信回执使用独立持久发送队列，最多自动尝试 3 次，重试复用同一客户端 ID。网络中断可能使远端送达结果不确定；不要宣称端到端严格只发送一次。`doctor --json` 的 `deliveryErrors`、`inboxErrors`、`lastPoll` 可查看失败记录；凭证 `configured` 不等于已联网验证。
 - 抓取/分析失败的文章保留 `failed` 和错误，可在排除原因后对原 URL 再次 `ingest`；不要删除文章文件来“重试”。已完成或已有笔记的文章不会由此重写。
 - 入站附件路径包含原名与内容 SHA-256：同名不同内容分别保存，相同内容重放复用。不要自行按原始文件名猜测已存路径。
-- Markdown 导出的 HTML/PDF 路径含内容版本摘要；正文或嵌入的本地图片变化会生成新版本，旧导出保留。PDF 生成失败不能用旧 PDF 冒充当前结果，核对返回的 `missingFormats`。
+- Markdown 导出的 HTML/PDF 路径含内容版本摘要；正文或嵌入的本地图片变化会生成新版本，旧导出保留。请求多格式时逐项补齐，已有 MD 不表示 HTML/PDF 已满足；PDF 生成失败不能用旧 PDF 冒充当前结果，核对返回的 `missingFormats` 和用户可见提示。显式指定历史导出时只配对同一版本，不附带已改写的当前 MD。
+- AGY 生图只收集明确返回或本次预期路径的文件，真实路径须在允许的生成目录或知识库内；不扫描共享 generated/brain 目录。AGY 应将图片复制到提示指定路径，超时、非零退出或生图没有可归属图片均按失败处理。未知模型去掉 `--model` 重试后标记 default/unknown，不能宣称仍是原模型。
+- `TASK_HEARTBEAT_SECONDS=0` 关闭定时进度，阶段通知仍保留；显式秒配置优于旧 `TASK_HEARTBEAT_MS`。普通启动、重载和配置工作台统一项目 `.env` > 进程环境 > home `.env`，`IGNORE_HOME_DOTENV=true` 仅跳过 home 文件。
 - Agent 任务 `done` 表示执行完成、回执入队，不代表微信已送达。恢复中断任务可能重试已发生的外部动作，不能宣称严格只执行一次。
 - 本地 HTTP 仅监听 `127.0.0.1`，校验 Host/Origin 和 URL。外部抓取拒绝已覆盖的私网 IP 字面量及重定向目标，但没有 DNS 地址绑定，不能视为完整的 SSRF 隔离。不要自行改成全网监听。
 

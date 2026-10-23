@@ -149,21 +149,18 @@ export class TaskProgressReporter {
     this.taskTitle = options.taskTitle || "复杂任务";
     this.sendProgressCallback = options.sendProgressCallback;
 
-    const envMs = Number(process.env.TASK_HEARTBEAT_MS || "");
-    const envSecRaw = process.env.TASK_HEARTBEAT_SECONDS;
-    const envSec =
-      envSecRaw !== undefined && envSecRaw !== "" ? Number(envSecRaw) : NaN;
-    const configuredMs =
-      options.heartbeatIntervalMs !== undefined
-        ? options.heartbeatIntervalMs
-        : options.heartbeatIntervalSeconds !== undefined
-        ? options.heartbeatIntervalSeconds * 1000
-        : Number.isFinite(envSec) && envSec >= 0
-        ? envSec * 1000
-        : 25_000;
-
-    this.heartbeatIntervalMs =
-      Number.isFinite(envMs) && envMs >= 100 ? envMs : configuredMs;
+    // Explicit options (including zero) win over compatibility environment keys.
+    const envSeconds = process.env.TASK_HEARTBEAT_SECONDS;
+    const envMs = process.env.TASK_HEARTBEAT_MS;
+    const candidates = [
+      options.heartbeatIntervalMs,
+      options.heartbeatIntervalSeconds === undefined ? undefined : options.heartbeatIntervalSeconds * 1000,
+      envSeconds?.trim() ? Number(envSeconds) * 1000 : undefined,
+      envMs?.trim() ? Number(envMs) : undefined,
+    ];
+    this.heartbeatIntervalMs = candidates.find(
+      (ms): ms is number => ms !== undefined && Number.isFinite(ms) && ms >= 0 && ms <= 2_147_483_647
+    ) ?? 25_000;
   }
 
   public async start(

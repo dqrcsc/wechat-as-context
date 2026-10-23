@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { randomBytes } from "node:crypto";
 import {
   existsSync,
@@ -944,6 +944,16 @@ describe("WeChat Agent V2 Upgrade (6 Extension Scenarios + Two-Tier LLM Router)"
   });
 
   test("Complex compound task (web search + vault architecture + multi-format MD/HTML/PDF delivery + follow-up '文件呢' + retry '你看看我之前的需求')", async () => {
+    // This orchestration test must not depend on a local browser process.
+    // PDF rendering failures have dedicated coverage; real rendering is a separate integration check.
+    const originalSpawn = Bun.spawn;
+    const pdfSpawn = spyOn(Bun, "spawn").mockImplementation(((args: any, options: any) => {
+      if (Array.isArray(args) && args.some((arg: string) => arg.startsWith("--print-to-pdf="))) {
+        return { exited: Promise.resolve(1), kill() {} };
+      }
+      return originalSpawn(args, options);
+    }) as any);
+    try {
     const f = createAgentFixture(true);
     mkdirSync(join(f.root, "04_topics", "knowledge_systems"), { recursive: true });
     mkdirSync(join(f.root, "01_inputs", "articles", "clippings"), { recursive: true });
@@ -1135,11 +1145,12 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
     expect(
       turn3Res.mediaDeliveries?.every((m) => m.mediaPath.includes("llm_wiki_beginner_guide"))
     ).toBe(true);
+    } finally { pdfSpawn.mockRestore(); }
   }, 15_000);
 
   test("Long-running task periodic heartbeat push & instant '还在跑吗 / 进度' status query while running", async () => {
-    process.env.TASK_HEARTBEAT_MS = "120";
     const f = createAgentFixture(true);
+    f.config.taskHeartbeatSeconds = 0.12;
     f.config.llm.allowCodexFallback = true;
     f.config.llm.cliRoutingChain = ["opencode", "claude"];
 
@@ -1192,63 +1203,60 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
       };
     });
 
-    try {
-      const taskRawMsg = {
-        message_id: "long_task_1",
+    const taskRawMsg = {
+      message_id: "long_task_1",
+      from_user_id: "user@im.wechat",
+      message_type: 1,
+      item_list: [
+        {
+          type: 1,
+          text_item: { text: "让 opencode 深度巡检我的知识库双向链接" },
+        },
+      ],
+    };
+
+    f.db.enqueueAgentTask(
+      "msg_long_task_1",
+      "user@im.wechat",
+      JSON.stringify(taskRawMsg)
+    );
+
+    const processedCount = await f.pipeline.drainAgentQueue();
+    expect(processedCount).toBe(1);
+
+    // 1. Verify initial progress notice, periodic heartbeat, and CLI fallback alert were pushed to WeChat
+    expect(sentWeChatTexts.some((t) => t.includes("已收到复合任务"))).toBe(true);
+    expect(
+      sentWeChatTexts.some(
+        (t) => t.includes("正在持续处理中") && t.includes("状态同步")
+      )
+    ).toBe(true);
+    expect(
+      sentWeChatTexts.some(
+        (t) =>
+          t.includes("自动切换至备用智能体 [claude]") && t.includes("任务未中断")
+      )
+    ).toBe(true);
+
+    // 2. Verify mid-flight "还在跑吗？" query returned live active status with stage & activity
+    expect(statusWhileRunning).toContain("正在后台运行中（未异常中断）");
+    expect(statusWhileRunning).toContain("claude");
+    expect(statusWhileRunning).toContain("已产生流式输出 4.2 KB");
+
+    // 3. Verify post-completion "进度" query reports task completed
+    const postStatus = await f.pipeline.agent.processClawBotMessage({
+      messageKey: "msg_status_query_after",
+      senderId: "user@im.wechat",
+      rawMessage: {
+        message_id: "sq_2",
         from_user_id: "user@im.wechat",
         message_type: 1,
-        item_list: [
-          {
-            type: 1,
-            text_item: { text: "让 opencode 深度巡检我的知识库双向链接" },
-          },
-        ],
-      };
+        item_list: [{ type: 1, text_item: { text: "进度" } }],
+      },
+    });
+    expect(postStatus.replyText).toContain("当前无正在运行的长任务");
+    expect(postStatus.replyText).toContain("✅ 已完成");
 
-      f.db.enqueueAgentTask(
-        "msg_long_task_1",
-        "user@im.wechat",
-        JSON.stringify(taskRawMsg)
-      );
-
-      const processedCount = await f.pipeline.drainAgentQueue();
-      expect(processedCount).toBe(1);
-
-      // 1. Verify initial progress notice, periodic heartbeat, and CLI fallback alert were pushed to WeChat
-      expect(sentWeChatTexts.some((t) => t.includes("已收到复合任务"))).toBe(true);
-      expect(
-        sentWeChatTexts.some(
-          (t) => t.includes("正在持续处理中") && t.includes("状态同步")
-        )
-      ).toBe(true);
-      expect(
-        sentWeChatTexts.some(
-          (t) =>
-            t.includes("自动切换至备用智能体 [claude]") && t.includes("任务未中断")
-        )
-      ).toBe(true);
-
-      // 2. Verify mid-flight "还在跑吗？" query returned live active status with stage & activity
-      expect(statusWhileRunning).toContain("正在后台运行中（未异常中断）");
-      expect(statusWhileRunning).toContain("claude");
-      expect(statusWhileRunning).toContain("已产生流式输出 4.2 KB");
-
-      // 3. Verify post-completion "进度" query reports task completed
-      const postStatus = await f.pipeline.agent.processClawBotMessage({
-        messageKey: "msg_status_query_after",
-        senderId: "user@im.wechat",
-        rawMessage: {
-          message_id: "sq_2",
-          from_user_id: "user@im.wechat",
-          message_type: 1,
-          item_list: [{ type: 1, text_item: { text: "进度" } }],
-        },
-      });
-      expect(postStatus.replyText).toContain("当前无正在运行的长任务");
-      expect(postStatus.replyText).toContain("✅ 已完成");
-    } finally {
-      delete process.env.TASK_HEARTBEAT_MS;
-    }
   });
 
   test("Proactive Push to WeChat (pushToWeChat / CLI push / POST /api/push): pushes text, images, multi-format MD/HTML deliverables, and syncs conversation_turns", async () => {

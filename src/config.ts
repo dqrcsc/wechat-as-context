@@ -457,10 +457,9 @@ export function loadConfig(
     ).toLowerCase() === "true";
   const homeEnv = ignoreHomeEnv ? {} : parseDotEnvFile(join(homedir(), ".env"));
 
-  // In normal mode (!ignoreHomeEnv && !customEnv) or when projectRootOverride is explicitly supplied,
-  // project .env takes highest priority so editing .env on disk immediately overrides shell/global environment variables.
-  const preferProjectDotEnv =
-    !customEnv && (Boolean(projectRootOverride) || !ignoreHomeEnv);
+  // Ordinary startup, reload and Web reads share the same source precedence.
+  // An explicitly injected environment remains authoritative for tests/callers.
+  const preferProjectDotEnv = !customEnv;
 
   const getWithSource = (
     key: string,
@@ -493,6 +492,14 @@ export function loadConfig(
 
   const get = (key: string, defaultVal = ""): string =>
     getWithSource(key, defaultVal).value;
+
+  const heartbeatSecondsRaw = get("TASK_HEARTBEAT_SECONDS", "").trim();
+  const heartbeatLegacyRaw = get("TASK_HEARTBEAT_MS", "").trim();
+  const heartbeatValue = heartbeatSecondsRaw !== ""
+    ? Number(heartbeatSecondsRaw)
+    : heartbeatLegacyRaw !== "" ? Number(heartbeatLegacyRaw) / 1000 : 25;
+  const taskHeartbeatSeconds = Number.isFinite(heartbeatValue) && heartbeatValue >= 0 && heartbeatValue <= 2_147_483.647
+    ? heartbeatValue : 25;
 
   const explicitProvider = get("LLM_PROVIDER", "").toLowerCase() as LlmProviderId | "";
   const getPresetKey = (
@@ -855,12 +862,7 @@ export function loadConfig(
       Number(get("ANNOTATION_WAIT_SECONDS", "10")) >= 0
         ? Number(get("ANNOTATION_WAIT_SECONDS", "10"))
         : 10,
-    taskHeartbeatSeconds:
-      get("TASK_HEARTBEAT_SECONDS", "") !== "" &&
-      Number.isFinite(Number(get("TASK_HEARTBEAT_SECONDS", "25"))) &&
-      Number(get("TASK_HEARTBEAT_SECONDS", "25")) >= 0
-        ? Number(get("TASK_HEARTBEAT_SECONDS", "25"))
-        : 25,
+    taskHeartbeatSeconds,
     notifyWebhookUrl: get("NOTIFY_WEBHOOK_URL", "").trim(),
     notifyWebhookSecret: get("NOTIFY_WEBHOOK_SECRET", "").trim(),
     notifyWebhookKeyword: get("NOTIFY_WEBHOOK_KEYWORD", "").trim(),

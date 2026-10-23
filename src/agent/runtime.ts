@@ -71,6 +71,7 @@ export interface IntentExecutionResult {
   modelUsed: string;
   relatedArticleId?: number | null;
   depositedPath?: string;
+  missingFormats?: DeliverableFormat[];
 }
 
 export type IntentHandlerFn = (
@@ -1359,6 +1360,54 @@ ${effectiveRequirement}`,
   // ============================================================================
   // 7. Intent: send_file (C2C AES-128-ECB Upload & Multi-Format File Delivery)
   // ============================================================================
+  private async resolveFileDelivery(paths: string[], requestedFormats: DeliverableFormat[]) {
+    if (requestedFormats.length === 0 && paths.length > 1) {
+      const remaining = new Set(paths);
+      const files: string[] = [];
+      const missing = new Set<DeliverableFormat>();
+      for (const source of paths.filter((p) => p.toLowerCase().endsWith(".md"))) {
+        const sourceStem = basename(source).slice(0, -3);
+        const family = paths.filter((p) => {
+          if (resolve(p, "..") !== resolve(source, "..")) return false;
+          const name = basename(p);
+          if (p === source || name === `${sourceStem}.html` || name === `${sourceStem}.pdf`) return true;
+          return name.startsWith(`${sourceStem}_export_`) && /^[a-f0-9]{16}\.(html|pdf)$/i.test(name.slice(`${sourceStem}_export_`.length));
+        });
+        const formats = [...new Set(family.map((p) => p.split(".").pop()!.toLowerCase() as DeliverableFormat))];
+        const delivery = await this.resolveFileDelivery(family, formats);
+        files.push(...delivery.files);
+        delivery.missingFormats.forEach((fmt) => missing.add(fmt));
+        family.forEach((p) => remaining.delete(p));
+      }
+      files.push(...remaining);
+      const missingFormats = [...missing];
+      return { files, missingFormats, warning: missingFormats.length
+        ? `\n⚠️ 未生成或无法获取所请求格式：${missingFormats.map((fmt) => fmt.toUpperCase()).join("、")}；未使用旧版本替代。`
+        : "" };
+    }
+    const markdownPath = paths.find((p) => p.toLowerCase().endsWith(".md"));
+    const formats = requestedFormats;
+    let files: string[];
+    if (markdownPath && formats.length > 0) {
+      files = await ensureMultiFormatDeliverables({
+        markdownPath,
+        outputDir: resolve(markdownPath, ".."),
+        baseFileStem: basename(markdownPath, ".md"),
+        existingFiles: paths,
+        requestedFormats: formats,
+      });
+    } else if (/\.(md|html|pdf)$/i.test(paths[0] || "")) {
+      files = findSiblingMultiFormatFiles(paths[0], requestedFormats.length ? requestedFormats : ["md", "html", "pdf"]);
+    } else {
+      files = requestedFormats.length ? [] : paths;
+    }
+    const missingFormats = formats.filter((fmt) => !files.some((p) => p.toLowerCase().endsWith(`.${fmt}`)));
+    const warning = missingFormats.length
+      ? `\n⚠️ 未生成或无法获取所请求格式：${missingFormats.map((fmt) => fmt.toUpperCase()).join("、")}；未使用旧版本替代。`
+      : "";
+    return { files, missingFormats, warning };
+  }
+
   private async handleSendFile(
     ctx: IntentExecutionContext
   ): Promise<IntentExecutionResult> {
@@ -1391,41 +1440,13 @@ ${effectiveRequirement}`,
           .map((s) => s.trim())
           .filter((p) => p && existsSync(p));
         if (paths.length > 0) {
-          const targetExts =
-            requestedFormats.length > 0
-              ? requestedFormats
-              : (["md", "html", "pdf"] as Array<"md" | "html" | "pdf">);
-          const primaryMd = paths.find((p) => p.toLowerCase().endsWith(".md"));
-          let allSiblings =
-            paths.length === 1
-              ? findSiblingMultiFormatFiles(paths[0], targetExts)
-              : requestedFormats.length > 0
-              ? findSiblingMultiFormatFiles(
-                  primaryMd || paths[0],
-                  requestedFormats
-                )
-              : paths;
-          const hasAnyRequested =
-            requestedFormats.length > 0 &&
-            requestedFormats.some((fmt) =>
-              allSiblings.some((p) => p.toLowerCase().endsWith(`.${fmt}`))
-            );
-          if (primaryMd && requestedFormats.length > 0 && !hasAnyRequested) {
-            const compiled = await ensureMultiFormatDeliverables({
-              markdownPath: primaryMd,
-              outputDir: resolve(primaryMd, ".."),
-              baseFileStem: basename(primaryMd, ".md"),
-              existingFiles: allSiblings,
-              requestedFormats,
-            });
-            if (compiled.length > 0) {
-              allSiblings = compiled;
-            }
-          }
+          const delivery = await this.resolveFileDelivery(paths, requestedFormats);
+          const allSiblings = delivery.files;
           return {
             replyText: `📎 正在为你推送刚生成的文件（共 ${allSiblings.length} 个）：\n${allSiblings
               .map((p) => `- \`${basename(p)}\``)
-              .join("\n")}`,
+              .join("\n")}${delivery.warning}`,
+            missingFormats: delivery.missingFormats,
             mediaDeliveries: allSiblings.map((p) => ({
               mediaType: "file" as const,
               mediaPath: p,
@@ -1444,18 +1465,15 @@ ${effectiveRequirement}`,
         ].join("\n")
       );
       if (todayMd && existsSync(todayMd)) {
-        const siblings = await ensureMultiFormatDeliverables({
-          markdownPath: todayMd,
-          outputDir: this.getOutputsDir(),
-          baseFileStem: basename(todayMd, ".md"),
-          requestedFormats:
-            requestedFormats.length > 0 ? requestedFormats : ["md", "html", "pdf"],
-        });
-        if (siblings.length > 0) {
+        const delivery = await this.resolveFileDelivery([todayMd],
+          requestedFormats.length > 0 ? requestedFormats : ["md", "html", "pdf"]);
+        const siblings = delivery.files;
+        if (siblings.length > 0 || delivery.missingFormats.length > 0) {
           return {
             replyText: `📎 正在为你推送生成的指南文件（共 ${siblings.length} 个）：\n${siblings
               .map((p) => `- \`${basename(p)}\``)
-              .join("\n")}`,
+              .join("\n")}${delivery.warning}`,
+            missingFormats: delivery.missingFormats,
             mediaDeliveries: siblings.map((p) => ({
               mediaType: "file" as const,
               mediaPath: p,
@@ -1502,43 +1520,16 @@ ${effectiveRequirement}`,
       };
     }
 
-    // Check if sibling formats (.md, .html, .pdf) exist for this note when it's in 05_outputs/ or outputs/
-    let filesToSend =
-      filePathToSend.includes("05_outputs") ||
-      filePathToSend.includes("/outputs/") ||
-      requestedFormats.length > 0
-        ? findSiblingMultiFormatFiles(
-            filePathToSend,
-            requestedFormats.length > 0 ? requestedFormats : ["md", "html", "pdf"]
-          )
-        : [filePathToSend];
-
-    const hasAnyRequestedFormat =
-      requestedFormats.length > 0 &&
-      requestedFormats.some((fmt) =>
-        filesToSend.some((p) => p.toLowerCase().endsWith(`.${fmt}`))
-      );
-    if (
-      filePathToSend.toLowerCase().endsWith(".md") &&
-      requestedFormats.length > 0 &&
-      !hasAnyRequestedFormat
-    ) {
-      const compiled = await ensureMultiFormatDeliverables({
-        markdownPath: filePathToSend,
-        outputDir: resolve(filePathToSend, ".."),
-        baseFileStem: basename(filePathToSend, ".md"),
-        existingFiles: filesToSend,
-        requestedFormats,
-      });
-      if (compiled.length > 0) {
-        filesToSend = compiled;
-      }
-    }
+    const delivery = requestedFormats.length > 0 || filePathToSend.includes("05_outputs") || filePathToSend.includes("/outputs/")
+      ? await this.resolveFileDelivery([filePathToSend], requestedFormats)
+      : { files: [filePathToSend], missingFormats: [], warning: "" };
+    const filesToSend = delivery.files;
 
     return {
       replyText: `📎 正在为你推送文件：${fileDescription}\n文件列表：${filesToSend
         .map((f) => `\`${basename(f)}\``)
-        .join("、")}`,
+        .join("、")}${delivery.warning}`,
+      missingFormats: delivery.missingFormats,
       mediaDeliveries: filesToSend.map((f) => ({
         mediaType: "file" as const,
         mediaPath: f,

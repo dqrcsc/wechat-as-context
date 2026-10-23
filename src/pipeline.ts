@@ -389,7 +389,7 @@ export class WeChatContextPipeline {
           if ((!m.message_type || m.message_type === 1) && hasContent) {
             if (!m.from_user_id) throw new Error("Message has no sender identity");
             if (isTaskStatusQuery(unpacked.userText) && unpacked.mediaItems.length === 0) {
-              const statusText = formatLiveTaskStatusReport(this.db, m.from_user_id);
+              const statusText = formatLiveTaskStatusReport(this.db, m.from_user_id, this.config.taskHeartbeatSeconds ?? 25);
               this.db.queueReply(
                 `message_${createHash("sha256").update(pending.message_key).digest("hex")}`,
                 m.from_user_id,

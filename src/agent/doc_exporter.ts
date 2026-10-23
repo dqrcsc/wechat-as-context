@@ -633,10 +633,28 @@ export async function renderHtmlToPdf(
   return false;
 }
 
-/**
- * Given a base Markdown file (or existing generated files) and the user's requested formats
- * (e.g. ["md", "html", "pdf"]), ensure all requested formats exist on disk and return their paths.
- */
+/** Compute the shared source/image revision used by export creation and lookup. */
+export function prepareMarkdownExport(markdown: string, targetDir: string, targetStem: string, title?: string): { derivedStem: string; html: string; sourceRevision: string } {
+  const embeddedMarkdown = markdown.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (original, alt, url) => {
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(url)) return original;
+    const imagePath = join(targetDir, url);
+    const mime = ({ ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".gif":"image/gif", ".webp":"image/webp" } as Record<string,string>)[extname(imagePath).toLowerCase()];
+    if (!mime || !existsSync(imagePath)) return original;
+    const imageRelative = relative(realpathSync(targetDir), realpathSync(imagePath));
+    if (imageRelative === ".." || imageRelative.startsWith(`..${sep}`) || isAbsolute(imageRelative)) {
+      return `${alt}（图片路径超出文档目录，未嵌入）`;
+    }
+    return `![${alt}](data:${mime};base64,${readFileSync(imagePath).toString("base64")})`;
+  });
+  const revision = createHash("sha256").update("html-v2\0" + (title || targetStem) + "\0" + embeddedMarkdown).digest("hex").slice(0, 16);
+  const sourceRevision = createHash("sha256").update("source-v1\0" + embeddedMarkdown).digest("hex");
+  return {
+    derivedStem: `${targetStem}_export_${revision}`,
+    sourceRevision,
+    html: compileMarkdownToHtml(embeddedMarkdown, title || targetStem) + `\n<!-- wechat-export-source:${sourceRevision} -->\n`,
+  };
+}
+
 export async function ensureMultiFormatDeliverables(params: {
   markdownPath?: string;
   markdownContent?: string;
@@ -710,21 +728,11 @@ export async function ensureMultiFormatDeliverables(params: {
   // local image bytes). Keep old/manual exports intact under their own names.
   let derivedStem = targetStem;
   let htmlString = "";
-  if (mdContent) {
-    const embeddedMarkdown = mdContent.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (original, alt, url) => {
-      if (/^(?:[a-z][a-z0-9+.-]*:|\/)/i.test(url)) return original;
-      const imagePath = join(targetDir, url);
-      const mime = ({ ".png":"image/png", ".jpg":"image/jpeg", ".jpeg":"image/jpeg", ".gif":"image/gif", ".webp":"image/webp" } as Record<string,string>)[extname(imagePath).toLowerCase()];
-      if (!mime || !existsSync(imagePath)) return original;
-      const imageRelative = relative(realpathSync(targetDir), realpathSync(imagePath));
-      if (imageRelative === ".." || imageRelative.startsWith(`..${sep}`) || isAbsolute(imageRelative)) {
-        return `${alt}（图片路径超出文档目录，未嵌入）`;
-      }
-      return `![${alt}](data:${mime};base64,${readFileSync(imagePath).toString("base64")})`;
-    });
-    const revision = createHash("sha256").update("html-v2\0" + (title || targetStem) + "\0" + embeddedMarkdown).digest("hex").slice(0, 16);
-    derivedStem = `${targetStem}_export_${revision}`;
-    htmlString = compileMarkdownToHtml(embeddedMarkdown, title || targetStem);
+  const hasMarkdownSource = params.markdownContent !== undefined || Boolean(mdPath && existsSync(mdPath));
+  if (hasMarkdownSource) {
+    const prepared = prepareMarkdownExport(mdContent, targetDir, targetStem, title);
+    derivedStem = prepared.derivedStem;
+    htmlString = prepared.html;
     byExt.delete("html");
     byExt.delete("pdf");
   }
@@ -742,7 +750,7 @@ export async function ensureMultiFormatDeliverables(params: {
     (formats.includes("html") && !byExt.has("html")) ||
     (formats.includes("pdf") && !byExt.has("pdf") && !byExt.has("html"));
 
-  if (needsHtml && mdContent) {
+  if (needsHtml && hasMarkdownSource) {
     const htmlPath = join(targetDir, `${derivedStem}.html`);
     writeNewFile(htmlPath, htmlString);
     byExt.set("html", htmlPath);
@@ -771,7 +779,7 @@ export async function ensureMultiFormatDeliverables(params: {
 
   // Without a Markdown source, pass through supplied files. Once source exists,
   // missing exports must stay missing rather than resurrecting stale versions.
-  if (result.length === 0 && !mdContent) {
+  if (result.length === 0 && !hasMarkdownSource) {
     for (const f of existingFiles) {
       if (existsSync(f) && !result.includes(f)) {
         result.push(f);

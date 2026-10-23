@@ -16,14 +16,18 @@
 
 ---
 
-**v0.2.1 升级与使用边界声明**：
-- **本轮可靠性修复与升级**：见 [修复说明与验收](./docs/reliability-fixes.md)。升级前先停止旧 worker，避免没有 Agent 队列锁的旧版与新版同时运行。
+**v0.2.2 升级与使用边界声明**：
+- **本轮七项回归修复**：见 [图片归属、文件版本与配置一致性验收](./docs/followup-reliability-fixes.md)。历史队列锁与附件修复见 [v0.2.1 修复说明](./docs/reliability-fixes.md)；从未使用 Agent 队列锁的旧版升级时，须先停止旧 worker。
 - **BYOK 连通性验证**：配置密钥或选择模型预设不代表该模型的长文本、多模态视觉或实时联网能力已在你的账户下开通；首次配置后请在 Web 配置工作台（`bun run config`）点击 **「⚡ 测试模型连通性」** 做一次真实请求验证。
 - **双协议能力差异**：实时联网搜索（Google Search Grounding）原生支持 Google Gemini 协议（`/v1beta/models/*:generateContent`）或具备内置联网能力的本地 CLI（如 `agy` / `codex` / `opencode` / `claude`）；普通纯文本 OpenAI 兼容端点默认基于本地知识库与抓取正文回答，不代表实际执行了联网检索。
 - **多模态图片与 PDF 解析**：微信发送图片/截图解析要求所配置的模型支持 Vision 输入（如 `gemini-2.5-flash`、`gpt-4o`、`qwen-vl-max`、`glm-4v-plus`）或启用支持读图的本机 CLI。PDF 和其他未转换为 API 可读正文的附件仅尝试本地 CLI；CLI 禁用或失败时会明确返回「已归档，未解析」，不会把没有正文的 API 回答当成文件摘要。混合附件包含不可读文件时，也不会将局部结果冒充完整分析。
 - **本机直连与数据隐私边界**：所有 API Key、微信 `bot_token` 与 SQLite 状态库均 100% 存储在你的本机（`.env` 与 `data/`），本项目**不提供自建中转服务器**。普通网页第三方 Jina Reader 回退默认关闭，显式设置 `ALLOW_JINA_FALLBACK=true` 后，抓取失败时会将完整 URL（含 query）交给 Jina；配置通知 webhook 时还会发送事件摘要。你转发的链接正文、语音转写文本、图片或关联的本地笔记片段会随请求直接发往你所配置的模型 API Endpoint 或本机 CLI 处理。
 
 ---
+
+本轮交付约定：AGY 图片只从明确返回或本次预期路径收集，超时或非零退出不冒充成功。请求 Markdown 的 HTML/PDF 时按当前正文和嵌入图片计算版本，逐项补齐格式；缺失格式明确报告，显式历史导出只配对同版本文件。
+
+`TASK_HEARTBEAT_SECONDS` 默认 25，设为 0 关闭定时进度（仍保留阶段通知和主动查询）；只有未设置秒配置时才兼容 `TASK_HEARTBEAT_MS`。普通启动、重载与配置工作台统一使用项目 `.env` > 进程环境 > home `.env`；`IGNORE_HOME_DOTENV=true` 仅跳过 home 文件。
 
 ## 📑 目录
 
