@@ -242,7 +242,7 @@ export class ContextDatabase {
 
   /**
    * Remove outbox_media snapshot files that have already been sent (`status = 'sent'`),
-   * are not referenced by any pending outbox entry, and are older than `maxAgeMs`.
+   * are not referenced by any unsent outbox entry, and are older than `maxAgeMs`.
    */
   public pruneSentOutboxMedia(maxAgeMs = 24 * 60 * 60 * 1000): number {
     const rows = this.db
@@ -250,7 +250,7 @@ export class ContextDatabase {
         `SELECT DISTINCT media_path FROM reply_outbox
          WHERE status = 'sent' AND media_path != ''
            AND media_path NOT IN (
-             SELECT media_path FROM reply_outbox WHERE status = 'pending' AND media_path != ''
+             SELECT media_path FROM reply_outbox WHERE status != 'sent' AND media_path != ''
            )`
       )
       .all() as Array<{ media_path: string }>;
@@ -311,7 +311,7 @@ export class ContextDatabase {
     const outboxRes = this.db
       .query(
         `DELETE FROM reply_outbox
-         WHERE status IN ('sent', 'failed')
+         WHERE status = 'sent'
            AND rowid NOT IN (
              SELECT rowid FROM reply_outbox ORDER BY rowid DESC LIMIT ?
            )`
