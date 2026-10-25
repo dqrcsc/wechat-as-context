@@ -11,6 +11,7 @@ import {
   createIdeaSeedInVault,
   ensureStarterVaultInitialized,
 } from "./vault/context.ts";
+import { loadAnalysisContext } from "./vault/analysis_context.ts";
 import { renderQrCodeToTerminal } from "./clawbot/client.ts";
 import { scanLocalAgentClis } from "./agent/subagent_cli.ts";
 import { detectRequestedFormats } from "./agent/doc_exporter.ts";
@@ -385,6 +386,9 @@ async function main() {
       const vaultExists = existsSync(config.vaultRoot);
       const vaultMode = config.vaultMode || (vaultExists ? "generic_folder" : "standalone");
       const skillsHealth = auditSkillsDirectoryHealth();
+      const analysisContext = config.analysisContextFile
+        ? loadAnalysisContext(config.analysisContextFile)
+        : null;
 
       const report = {
         ok: Boolean(clawbotCreds),
@@ -399,6 +403,8 @@ async function main() {
         wechatArticlesDir: config.wechatArticlesDir,
         webArticlesDir: config.webArticlesDir,
         ideasSeedsDir: config.ideasSeedsDir,
+        analysisContextFile: config.analysisContextFile || null,
+        analysisContext,
         dbPath: config.dbPath,
         skillsHealth,
         checks: {
@@ -416,6 +422,13 @@ async function main() {
             : skillsHealth.invalidSkillFiles.length === 0
               ? `ok (${skillsHealth.totalSkills} skills valid)`
               : `warning (${skillsHealth.invalidSkillFiles.length} invalid SKILL.md frontmatter files)`,
+          analysisContext: !config.analysisContextFile
+            ? "not configured (optional; set ANALYSIS_CONTEXT_FILE in .env to enable viewpoint & business snapshot)"
+            : analysisContext && analysisContext.warnings.length > 0 && analysisContext.entries.length === 0
+              ? `warning (${analysisContext.warnings.join("; ")})`
+              : `ok (${analysisContext?.entries.length ?? 0} active entries${
+                  analysisContext?.warnings.length ? `; warnings: ${analysisContext.warnings.join("; ")}` : ""
+                })`,
         },
       };
 

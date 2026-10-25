@@ -51,11 +51,16 @@ export function resolveModelEndpoint(
       (p) => p.id === explicitProviderId && p.apiKey
     );
     if (matched) {
+      const explicitTierModel =
+        tier === "deep" ? config.llm.proModel : config.llm.fastModel;
+      const resolvedModel =
+        explicitTierModel ||
+        (matched.models.includes(model) ? model : matched.models[0] || model);
       return {
         providerId: matched.id,
         baseUrl: matched.baseUrl,
         apiKey: matched.apiKey,
-        model,
+        model: resolvedModel,
       };
     }
   }

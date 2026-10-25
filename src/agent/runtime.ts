@@ -10,6 +10,7 @@ import { isWeChatArticleUrl, normalizeExternalWebUrl } from "../extractor/web.ts
 import { sanitizeSlug } from "../extractor/wechat.ts";
 import { normalizeWeChatUrl } from "../pipeline.ts";
 import { ANALYSIS_CONTEXT_POLICY, formatAnalysisContext, loadAnalysisContext } from "../vault/analysis_context.ts";
+import { ARTICLE_REVIEW_POLICY } from "../vault/analysis_policy.ts";
 import {
   createIdeaSeedInVault,
   createInboxCaptureInVault,
@@ -487,7 +488,10 @@ export class WeChatAgentRuntime {
       : gatherVaultContext(
           this.config.vaultRoot,
           `${target.title}\n${target.user_notes}\n${ctx.unpacked.userText}`,
-          this.config.vaultLayout
+          { ...this.config.vaultLayout,
+            excludePaths: [target.source_md_path, target.note_md_path].filter(Boolean),
+            excludeSourceUrls: [target.url],
+          }
         );
     const analysisBackground = loadAnalysisContext(this.config.analysisContextFile);
 
@@ -507,6 +511,7 @@ export class WeChatAgentRuntime {
       systemPrompt: `你是用户的个人知识库深度阅读搭档。用户正在手机微信上针对已入库的文章 #${target.id}《${target.title}》进行追问或要求深度拆解。
 请严格基于文章原文与用户知识库既有上下文直接回答。
 ${ANALYSIS_CONTEXT_POLICY}
+${ARTICLE_REVIEW_POLICY}
 要求：
 - 手机微信阅读友好，分段清晰；精读建议 800–1600 字，普通追问按问题需要回答；
 - 如果用户引用了特定片段（partial_text），重点围绕该片段展开；

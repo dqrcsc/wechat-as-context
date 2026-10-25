@@ -163,10 +163,24 @@ export function compileMarkdownToHtml(
   let inCodeBlock = false;
   let codeLang = "";
   let codeLines: string[] = [];
+  let inPreBlock = false;
+  let preLines: string[] = [];
   let inUl = false;
   let inOl = false;
   let inBlockquote = false;
   let tableRows: string[][] = [];
+
+  const sanitizePreBlockContent = (raw: string): string => {
+    const decoded = raw
+      .replace(/&#91;/g, "[")
+      .replace(/&#93;/g, "]")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&amp;/g, "&");
+    return escapeHtml(decoded);
+  };
 
   const flushList = () => {
     if (inUl) {
@@ -248,6 +262,42 @@ export function compileMarkdownToHtml(
 
     if (inCodeBlock) {
       codeLines.push(rawLine);
+      continue;
+    }
+
+    if (inPreBlock) {
+      if (trimmed.endsWith("</pre>")) {
+        const trailing = rawLine.replace(/<\/pre>\s*$/, "");
+        if (trailing) preLines.push(trailing);
+        inPreBlock = false;
+        htmlBlocks.push(
+          `<div class="code-block"><pre><code>${sanitizePreBlockContent(
+            preLines.join("\n")
+          )}</code></pre></div>`
+        );
+        preLines = [];
+      } else {
+        preLines.push(rawLine);
+      }
+      continue;
+    }
+
+    if (trimmed.startsWith("<pre>")) {
+      flushList();
+      flushBlockquote();
+      flushTable();
+      if (trimmed.endsWith("</pre>")) {
+        const inner = trimmed.slice("<pre>".length, -"</pre>".length);
+        htmlBlocks.push(
+          `<div class="code-block"><pre><code>${sanitizePreBlockContent(
+            inner
+          )}</code></pre></div>`
+        );
+      } else {
+        inPreBlock = true;
+        const leading = rawLine.replace(/^\s*<pre>/, "");
+        preLines = leading ? [leading] : [];
+      }
       continue;
     }
 
@@ -343,6 +393,13 @@ export function compileMarkdownToHtml(
     htmlBlocks.push(
       `<div class="code-block"><pre><code>${escapeHtml(
         codeLines.join("\n")
+      )}</code></pre></div>`
+    );
+  }
+  if (inPreBlock) {
+    htmlBlocks.push(
+      `<div class="code-block"><pre><code>${sanitizePreBlockContent(
+        preLines.join("\n")
       )}</code></pre></div>`
     );
   }

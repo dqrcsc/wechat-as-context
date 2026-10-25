@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { sanitizeSlug, yamlQuote } from "../extractor/wechat.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { writeNewFile } from "../storage.ts";
@@ -22,7 +22,12 @@ export interface VaultContextSnapshot {
   matchedNotes: VaultMatch[];
 }
 
-export interface VaultContextOptions {
+export interface VaultContextExclusions {
+  excludePaths?: string[];
+  excludeSourceUrls?: string[];
+}
+
+export interface VaultContextOptions extends VaultContextExclusions {
   nowFile?: string;
   queueFile?: string;
   topicsFile?: string;
@@ -140,16 +145,22 @@ export function gatherVaultContext(
     "INDEX.md",
   ]);
 
-  const nowSummary = safeReadExcerpt(nowPath, 2400);
-  const queueSummary = safeReadExcerpt(queuePath, 2000);
-  const topicsOverview = safeReadExcerpt(topicsPath, 1800);
+  const isExcluded = createContextExclusion(vaultRoot, options);
+  const readContext = (path: string, limit: number) => {
+    if (isExcluded(path)) return "";
+    const cached = getCachedVaultMarkdown(path);
+    return cached && !isExcluded(path, cached.rawContent) ? safeReadExcerpt(path, limit) : "";
+  };
+  const nowSummary = readContext(nowPath, 2400);
+  const queueSummary = readContext(queuePath, 2000);
+  const topicsOverview = readContext(topicsPath, 1800);
 
   const dynamicFocusTerms = extractDynamicFocusTerms(
     [nowSummary, topicsOverview].filter(Boolean).join("\n"),
     options?.domainKeywords
   );
   const keywords = extractSearchKeywords(searchContent, dynamicFocusTerms);
-  const matchedNotes = searchVaultNotes(vaultRoot, keywords, 6, options?.searchDirs);
+  const matchedNotes = searchVaultNotes(vaultRoot, keywords, 6, options?.searchDirs, options);
 
   return {
     nowSummary,
@@ -345,7 +356,8 @@ export function searchVaultNotes(
   vaultRoot: string,
   keywords: string[],
   limit = 6,
-  customSearchDirs?: string[]
+  customSearchDirs?: string[],
+  exclusions?: VaultContextExclusions
 ): VaultMatch[] {
   if (!existsSync(vaultRoot) || keywords.length === 0) return [];
 
@@ -370,9 +382,11 @@ export function searchVaultNotes(
 
   const lowerKeywords = keywords.map((k) => k.toLowerCase());
   const scored: Array<{ filePath: string; count: number }> = [];
+  const isExcluded = createContextExclusion(vaultRoot, exclusions);
 
   for (const filePath of mdFiles) {
     try {
+      if (isExcluded(filePath)) continue;
       const relFromRoot = relative(vaultRoot, filePath).replace(/\\/g, "/");
       if (
         relFromRoot.startsWith("00_home/") ||
@@ -381,7 +395,7 @@ export function searchVaultNotes(
         continue;
       }
       const cached = getCachedVaultMarkdown(filePath);
-      if (!cached) continue;
+      if (!cached || isExcluded(filePath, cached.rawContent)) continue;
       const content = cached.lowerContent;
       const fileNameLower = basename(filePath, ".md").toLowerCase();
       let score = 0;
@@ -426,6 +440,49 @@ export function searchVaultNotes(
   }
 
   return matches;
+}
+
+/** Filter identity before ranking, never by title or keyword similarity. */
+function createContextExclusion(vaultRoot: string, options?: VaultContextExclusions) {
+  const canonicalPath = (path: string, base = vaultRoot) => {
+    const absolute = resolve(base, path);
+    try { return realpathSync(absolute); } catch { return absolute; }
+  };
+  const paths = new Set((options?.excludePaths || []).filter(Boolean).map(path => canonicalPath(path)));
+  const urls = new Set((options?.excludeSourceUrls || []).filter(Boolean).map(sourceUrlIdentity));
+  return (path: string, raw?: string): boolean => {
+    if (paths.size && paths.has(canonicalPath(path))) return true;
+    if (!raw || (!paths.size && !urls.size)) return false;
+    const header = raw.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1];
+    if (!header) return false;
+    const sourceUrl = frontmatterString(header, "source_url");
+    if (sourceUrl && urls.has(sourceUrlIdentity(sourceUrl))) return true;
+    const sourcePath = frontmatterString(header, "source_path");
+    return Boolean(sourcePath && paths.has(canonicalPath(sourcePath, dirname(path))));
+  };
+}
+
+function frontmatterString(header: string, key: string): string {
+  const value = header.match(new RegExp(`^${key}:[ \\t]*(.*)$`, "m"))?.[1]?.trim() || "";
+  if (value.startsWith('"')) {
+    try { const parsed = JSON.parse(value); return typeof parsed === "string" ? parsed : ""; } catch { return ""; }
+  }
+  if (value.startsWith("'") && value.endsWith("'")) return value.slice(1, -1).replace(/''/g, "'");
+  return value;
+}
+
+function sourceUrlIdentity(raw: string): string {
+  try {
+    const url = new URL(raw);
+    const biz = url.searchParams.get("__biz"), mid = url.searchParams.get("mid");
+    // Explicit WeChat article identity survives share/tracking/signature variations.
+    if (url.hostname === "mp.weixin.qq.com" && biz && mid) {
+      return JSON.stringify([url.hostname, biz, mid, url.searchParams.get("idx") || "1"]);
+    }
+    url.hash = "";
+    url.searchParams.sort();
+    return url.toString();
+  } catch { return raw.trim(); }
 }
 
 function collectMarkdownFiles(dir: string, out: string[]): void {

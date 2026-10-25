@@ -175,7 +175,10 @@ export class WeChatContextPipeline {
                 record.user_notes,
                 extracted.markdownBody.slice(0, 3000),
               ].join("\n"),
-              this.config.vaultLayout
+              { ...this.config.vaultLayout,
+                excludePaths: [record.source_md_path, record.note_md_path].filter(Boolean),
+                excludeSourceUrls: [record.url],
+              }
             );
             const analysis = await analyzeArticleWithVault({
               config: this.config,

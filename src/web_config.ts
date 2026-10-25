@@ -17,6 +17,7 @@ import { ContextDatabase } from "./db.ts";
 import { WeChatContextPipeline } from "./pipeline.ts";
 import { scanLocalAgentClis } from "./agent/subagent_cli.ts";
 import { ensureStarterVaultInitialized } from "./vault/context.ts";
+import { loadAnalysisContext, type AnalysisContextSnapshot } from "./vault/analysis_context.ts";
 
 export interface VaultSubdirStatus {
   id: string;
@@ -69,6 +70,8 @@ export interface ConfigApiResponse {
     vaultEnabled?: boolean;
     wechatArticlesDir: string;
     ideasSeedsDir: string;
+    analysisContextFile?: string;
+    analysisContext?: AnalysisContextSnapshot | null;
     annotationWaitSeconds: number;
     taskHeartbeatSeconds: number;
     vaultLayout: AppConfig["vaultLayout"];
@@ -152,6 +155,10 @@ export function buildConfigApiPayload(
       vaultEnabled: Boolean(freshConfig.vaultEnabled),
       wechatArticlesDir: freshConfig.wechatArticlesDir,
       ideasSeedsDir: freshConfig.ideasSeedsDir,
+      analysisContextFile: freshConfig.analysisContextFile || "",
+      analysisContext: freshConfig.analysisContextFile
+        ? loadAnalysisContext(freshConfig.analysisContextFile)
+        : null,
       annotationWaitSeconds: freshConfig.annotationWaitSeconds,
       taskHeartbeatSeconds: freshConfig.taskHeartbeatSeconds ?? 25,
       vaultLayout: freshConfig.vaultLayout,
