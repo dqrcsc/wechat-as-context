@@ -482,6 +482,7 @@ export function saveCompanionLightNote(params: {
     `updated: ${nowDate}`,
     "process_level: light",
     `triage: ${params.triage}`,
+    `candidate_vault_nodes: ${JSON.stringify(params.relatedVaultNodes.map(node => node.replace(/^\[\[|\]\]$/g, "")))}`,
     "tags:",
     "  - wechat_article",
     "  - source_note",
@@ -493,9 +494,7 @@ export function saveCompanionLightNote(params: {
     `- **公众号 / 作者**：${params.author}`,
     `- **处理深度**：\`light\`（后台自动初筛）`,
     `- **建议分诊（Triage）**：\`${params.triage}\``,
-    params.relatedVaultNodes.length > 0
-      ? `- **关联知识库节点**：${params.relatedVaultNodes.join("、")}`
-      : `- **关联知识库节点**：暂无直接命中节点`,
+    "- **关联状态**：候选线索仅供精读核验，尚未建立笔记关系。",
     "",
     "---",
     "",

@@ -9,6 +9,7 @@ import { downloadAndDecryptCdnMedia } from "../clawbot/media.ts";
 import { isWeChatArticleUrl, normalizeExternalWebUrl } from "../extractor/web.ts";
 import { sanitizeSlug } from "../extractor/wechat.ts";
 import { normalizeWeChatUrl } from "../pipeline.ts";
+import { ANALYSIS_CONTEXT_POLICY, formatAnalysisContext, loadAnalysisContext } from "../vault/analysis_context.ts";
 import {
   createIdeaSeedInVault,
   createInboxCaptureInVault,
@@ -481,11 +482,14 @@ export class WeChatAgentRuntime {
         ? readFileSync(target.note_md_path, "utf-8").slice(0, 6_000)
         : "";
 
-    const vaultCtx = gatherVaultContext(
-      this.config.vaultRoot,
-      `${target.title}\n${ctx.unpacked.userText}`,
-      this.config.vaultLayout
-    );
+    const vaultCtx = this.config.vaultEnabled === false
+      ? { matchedNotes: [] }
+      : gatherVaultContext(
+          this.config.vaultRoot,
+          `${target.title}\n${target.user_notes}\n${ctx.unpacked.userText}`,
+          this.config.vaultLayout
+        );
+    const analysisBackground = loadAnalysisContext(this.config.analysisContextFile);
 
     const tier = subAction === "deepen" ? "deep" : ctx.decision.complexity;
     if (!this.config.llm.apiKey && !this.config.llm.allowCodexFallback) {
@@ -502,12 +506,21 @@ export class WeChatAgentRuntime {
       preferredBackend: ctx.decision.slots.subagentTarget || "agy",
       systemPrompt: `你是用户的个人知识库深度阅读搭档。用户正在手机微信上针对已入库的文章 #${target.id}《${target.title}》进行追问或要求深度拆解。
 请严格基于文章原文与用户知识库既有上下文直接回答。
+${ANALYSIS_CONTEXT_POLICY}
 要求：
-- 手机微信阅读友好，分段清晰，控制在 250~550 字以内；
+- 手机微信阅读友好，分段清晰；精读建议 800–1600 字，普通追问按问题需要回答；
 - 如果用户引用了特定片段（partial_text），重点围绕该片段展开；
-- 明确区分原文事实与你的推演判断。`,
+- 明确区分原文事实与你的推演判断；初筛是待复核分析，不能当作原文证据。
+- 精读时才讨论具体笔记链接，逐项说明支持、修正、反驳或适用边界；只基于实际提供的材料，片段不足时将关系标为待全文核验，不宣称读完笔记或已建立双向链接。
+- 具体关系需桌面精读核对全文后再写入；普通追问不主动罗列笔记链接。`,
       userPrompt: `【用户的问题/指令】
 ${ctx.unpacked.userText}
+
+【文章已有批注】
+${target.user_notes || "（无）"}
+
+【当前观点与业务背景快照】
+${formatAnalysisContext(analysisBackground)}
 
 ${
   ctx.unpacked.refContext?.partialText
@@ -519,13 +532,13 @@ ${noteText}
 【文章原文内容（节选）】
 ${sourceText}
 
-【知识库相关节点】
+【精读候选笔记片段（未核验语义关系）】
 ${vaultCtx.matchedNotes.map((m) => `${m.wikiLink}: ${m.excerpt}`).join("\n\n") || "（无直接命中）"}`,
       temperature: 0.25,
     });
 
     return {
-      replyText: `📖 针对《${target.title || `#${target.id}`}》的回应（${llmRes.modelUsed}）：\n\n${llmRes.text}`,
+      replyText: `📖 针对《${target.title || `#${target.id}`}》的回应（${llmRes.modelUsed}）：\n\n${llmRes.text}${analysisBackground.warnings.length ? `\n\n⚠️ 背景材料未完整采用：${analysisBackground.warnings.join("；")}` : ""}`,
       modelUsed: llmRes.modelUsed,
       relatedArticleId: target.id,
     };

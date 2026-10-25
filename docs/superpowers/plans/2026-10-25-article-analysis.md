@@ -16,10 +16,14 @@
 
 ## Tasks
 
-- [ ] `tests/article_analysis.test.ts`：先写失败回归，覆盖路径加载、版本选择、同日冲突、无背景/损坏/过大背景、请求契约、模型返回链接过滤、离线降级、长消息保存与入队。
-- [ ] `src/config.ts` 新增可选 `analysisContextFile`；`src/vault/analysis_context.ts` 提供 `loadAnalysisContext(filePath?: string): AnalysisContextSnapshot`（entries / warnings），按 kind/topic 确定性选最新版本。
-- [ ] `src/vault/analyzer.ts` 读取快照，统一六模块要求；保留候选检索元数据但不在初筛正文中建立文件链接；失败时明确仅生成摘要。
-- [ ] `src/vault/context.ts` 将新伴读文件中的候选链接改为不生成 WikiLink 的溯源元数据；旧文件保留。`src/agent/runtime.ts` 精读获得业务快照与候选资料，标明未核验关系。
-- [ ] 运行 `bun --no-env-file run test tests/article_analysis.test.ts`；通过后运行全量、隔离审计与 typecheck，检查回归和未修改范围。
-- [ ] README、`.env.example`、通用 JSON 示例、技能模板和使用/验收文档同步；全局 Skill 仅同步文档，保持部署路径；准备未启用的私有背景快照。
-- [ ] `git diff --check`，复核契约、边界与语义验收样例。提交功能，升级 v0.3.0、更新 CHANGELOG，推送后等待精确提交 CI，再创建注释标签与 GitHub Release。
+- [x] `tests/article_analysis.test.ts`：先写失败回归，覆盖路径加载、版本选择、同日冲突、无背景/损坏/过大背景、请求契约、模型返回链接过滤、离线降级、长消息保存与入队。
+- [x] `src/config.ts` 新增可选 `analysisContextFile`；`src/vault/analysis_context.ts` 提供 `loadAnalysisContext(filePath?: string): AnalysisContextSnapshot`（entries / warnings），按 kind/topic 确定性选最新版本。
+- [x] `src/vault/analyzer.ts` 读取快照，统一六模块要求；保留候选检索元数据但不在初筛正文中建立文件链接；失败时明确仅生成摘要。
+- [x] `src/vault/context.ts` 将新伴读文件中的候选链接改为不生成 WikiLink 的溯源元数据；旧文件保留。`src/agent/runtime.ts` 精读获得业务快照与候选资料，标明未核验关系。
+- [x] 运行 `bun --no-env-file run test tests/article_analysis.test.ts`；通过后运行全量、隔离审计与 typecheck，检查回归和未修改范围。
+- [x] README、`.env.example`、通用 JSON 示例、技能模板和使用/验收文档同步；全局 Skill 仅同步文档，保持部署路径；准备未启用的私有背景快照。
+- [x] `git diff --check`，复核契约、边界与语义验收样例。准备功能提交与 v0.3.0 版本、CHANGELOG；发布流程为推送后等待精确提交 CI，再创建注释标签与 GitHub Release。最终状态以远端 CI 和 Release 为准。
+
+## 发布复核补充
+
+远端基线 `dfd99b5` / `924ea0d` 新增了自动历史清理，会删掉较旧的失败发送记录及其共享快照，与保留历史失败记录的约定冲突。`tests/history_retention.test.ts` 用三个合成失败记录和 510 条已发记录复现，另测失败与已发共享快照。`src/db.ts` 仅调整两处筛选条件，失败记录及其快照保留，不重试；未访问实际部署数据。

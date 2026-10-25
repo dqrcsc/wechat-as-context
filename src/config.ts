@@ -245,6 +245,7 @@ export interface AppConfig {
   inboxDir?: string;
   papersDir?: string;
   ideasSeedsDir: string;
+  analysisContextFile?: string;
   vaultLayout?: {
     nowFile: string;
     queueFile: string;
@@ -788,6 +789,9 @@ export function loadConfig(
     inboxDir: resolveInVault("VAULT_INBOX_DIR", join("01_inputs", "inbox"), "inbox"),
     papersDir: resolveInVault("VAULT_PAPERS_DIR", join("01_inputs", "papers"), "papers"),
     ideasSeedsDir: resolveInVault("VAULT_IDEAS_DIR", join("03_ideas", "seeds"), "ideas"),
+    analysisContextFile: get("ANALYSIS_CONTEXT_FILE", "").trim()
+      ? expandHomePath(get("ANALYSIS_CONTEXT_FILE", "").trim(), projectRoot)
+      : undefined,
     vaultLayout: {
       nowFile: get("VAULT_NOW_FILE", join("00_home", "now.md")),
       queueFile: get("VAULT_QUEUE_FILE", join("00_home", "queue.md")),
