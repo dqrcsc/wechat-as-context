@@ -1,6 +1,6 @@
 {
   "name": "wechat-as-context",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Bridge mobile WeChat Official Account articles & ideas into your Personal Knowledge Base & AI Agents (Codex, AntiGravity, Claude Code, OpenCode) via WeChat ClawBot iLink long-polling.",
   "type": "module",
   "license": "MIT",
