@@ -150,6 +150,11 @@ export class WeChatClawBotClient {
     this.db.setState(`clawbot_ctx_${userId}`, contextToken);
   }
 
+  public clearContextToken(userId: string): void {
+    if (!userId) return;
+    this.db.db.query("DELETE FROM kv_state WHERE key = ?").run(`clawbot_ctx_${userId}`);
+  }
+
   /**
    * Resolve the target WeChat user ID (`...@im.wechat`) for proactive outbound pushes.
    * Priority: explicit `--to` -> bound `creds.userId` -> latest `conversation_turns.sender_id`
@@ -395,43 +400,70 @@ export class WeChatClawBotClient {
     const creds = this.getCredentials();
     if (!creds || !toUserId) throw new Error("Missing ClawBot credentials or recipient");
 
-    const contextToken = this.getContextToken(toUserId);
+    let contextToken = this.getContextToken(toUserId);
     const base = creds.baseUrl.endsWith("/")
       ? creds.baseUrl
       : `${creds.baseUrl}/`;
     const url = new URL("ilink/bot/sendmessage", base);
     const chunks = splitWeChatTextChunks(text, 2500);
+    const progressKey = chunks.length > 1 ? `outbox_chunk_progress_${clientId}` : "";
+    const startIndex = progressKey
+      ? Math.max(0, Number.parseInt(this.db.getState(progressKey) || "0", 10) || 0)
+      : 0;
 
-    for (let i = 0; i < chunks.length; i++) {
+    for (let i = startIndex; i < chunks.length; i++) {
       const chunkText = chunks[i];
       const chunkClientId = i === 0 ? clientId : `${clientId}_part_${i + 1}`;
-      const payload = {
-        msg: {
-          from_user_id: "",
-          to_user_id: toUserId,
-          client_id: chunkClientId,
-          message_type: 2, // BOT
-          message_state: 2, // FINISH
-          item_list: [
-            {
-              type: 1, // TEXT
-              text_item: { text: chunkText },
-            },
-          ],
-          ...(contextToken ? { context_token: contextToken } : {}),
-        },
-        base_info: buildBaseInfo(),
+      const sendChunk = async (token?: string) => {
+        const payload = {
+          msg: {
+            from_user_id: "",
+            to_user_id: toUserId,
+            client_id: chunkClientId,
+            message_type: 2, // BOT
+            message_state: 2, // FINISH
+            item_list: [
+              {
+                type: 1, // TEXT
+                text_item: { text: chunkText },
+              },
+            ],
+            ...(token ? { context_token: token } : {}),
+          },
+          base_info: buildBaseInfo(),
+        };
+
+        const resp = await fetch(url.toString(), {
+          method: "POST",
+          headers: buildHeaders(creds.botToken),
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(30_000),
+        });
+
+        if (!resp.ok) throw new Error(`sendmessage HTTP ${resp.status}`);
+        return resp.json();
       };
 
-      const resp = await fetch(url.toString(), {
-        method: "POST",
-        headers: buildHeaders(creds.botToken),
-        body: JSON.stringify(payload),
-        signal: AbortSignal.timeout(30_000),
-      });
+      let data = await sendChunk(contextToken);
+      if (
+        contextToken &&
+        data &&
+        typeof data === "object" &&
+        !Array.isArray(data) &&
+        Number((data as any).ret) === -2
+      ) {
+        this.clearContextToken(toUserId);
+        contextToken = undefined;
+        data = await sendChunk(undefined);
+      }
+      assertApiSuccess(data, "sendmessage");
+      if (progressKey) {
+        this.db.setState(progressKey, String(i + 1));
+      }
+    }
 
-      if (!resp.ok) throw new Error(`sendmessage HTTP ${resp.status}`);
-      assertApiSuccess(await resp.json(), "sendmessage");
+    if (progressKey) {
+      this.db.db.query("DELETE FROM kv_state WHERE key = ?").run(progressKey);
     }
   }
 
@@ -639,28 +671,43 @@ export class WeChatClawBotClient {
             },
           };
 
-    const msgResp = await fetch(sendEndpoint.toString(), {
-      method: "POST",
-      headers: buildHeaders(creds.botToken),
-      body: JSON.stringify({
-        msg: {
-          from_user_id: "",
-          to_user_id: toUserId,
-          client_id: clientId,
-          message_type: 2, // BOT
-          message_state: 2, // FINISH
-          item_list: [itemPayload],
-          ...(contextToken ? { context_token: contextToken } : {}),
-        },
-        base_info: buildBaseInfo(),
-      }),
-      signal: AbortSignal.timeout(30_000),
-    });
+    const sendMediaMsg = async (token?: string) => {
+      const msgResp = await fetch(sendEndpoint.toString(), {
+        method: "POST",
+        headers: buildHeaders(creds.botToken),
+        body: JSON.stringify({
+          msg: {
+            from_user_id: "",
+            to_user_id: toUserId,
+            client_id: clientId,
+            message_type: 2, // BOT
+            message_state: 2, // FINISH
+            item_list: [itemPayload],
+            ...(token ? { context_token: token } : {}),
+          },
+          base_info: buildBaseInfo(),
+        }),
+        signal: AbortSignal.timeout(30_000),
+      });
 
-    if (!msgResp.ok) {
-      throw new Error(`sendmessage (media) HTTP ${msgResp.status}`);
+      if (!msgResp.ok) {
+        throw new Error(`sendmessage (media) HTTP ${msgResp.status}`);
+      }
+      return msgResp.json();
+    };
+
+    let msgData = await sendMediaMsg(contextToken);
+    if (
+      contextToken &&
+      msgData &&
+      typeof msgData === "object" &&
+      !Array.isArray(msgData) &&
+      Number((msgData as any).ret) === -2
+    ) {
+      this.clearContextToken(toUserId);
+      msgData = await sendMediaMsg(undefined);
     }
-    assertApiSuccess(await msgResp.json(), "sendmessage_media");
+    assertApiSuccess(msgData, "sendmessage_media");
   }
 }
 

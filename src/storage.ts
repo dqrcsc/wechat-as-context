@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, linkSync, unlinkSync, openSync, fsyncSync, closeSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, linkSync, renameSync, unlinkSync, openSync, fsyncSync, closeSync } from "node:fs";
 import { dirname } from "node:path";
 import { randomUUID } from "node:crypto";
 
@@ -12,6 +12,21 @@ export function writeNewFile(path: string, content: string | Uint8Array): boolea
     try { linkSync(temporary, path); return true; }
     catch (error: any) { if (error.code === "EEXIST") return false; throw error; }
   } finally { unlinkSync(temporary); }
+}
+
+// Atomically replace an existing fallback note when explicitly re-analyzing.
+export function replaceFileAtomically(path: string, content: string | Uint8Array): void {
+  mkdirSync(dirname(path), { recursive: true });
+  const temporary = `${path}.${randomUUID()}.tmp`;
+  const fd = openSync(temporary, "wx", 0o600);
+  try {
+    try { writeFileSync(fd, content, "utf8"); fsyncSync(fd); } finally { closeSync(fd); }
+    renameSync(temporary, path);
+  } finally {
+    if (existsSync(temporary)) {
+      try { unlinkSync(temporary); } catch {}
+    }
+  }
 }
 
 export function documentLevel(path: string): string | undefined {

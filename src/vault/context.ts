@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSyn
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { sanitizeSlug, yamlQuote } from "../extractor/wechat.ts";
 import { createHash, randomUUID } from "node:crypto";
-import { writeNewFile } from "../storage.ts";
+import { replaceFileAtomically, writeNewFile } from "../storage.ts";
 import { TriageLevel } from "../db.ts";
 import type { AppConfig } from "../config.ts";
 import { prepareMarkdownExport, isUsablePdf } from "../agent/doc_exporter.ts";
@@ -298,28 +298,59 @@ export function extractSearchKeywords(
     }
   }
 
-  // 4. Extract meaningful Chinese phrases (2-6 chars) when querying
-  const zhPhrases =
-    head
-      .replace(
-        /(?:请问|查一下|搜一下|帮我找|我的知识库|关于|是什么|有哪些|怎么|如何)/g,
-        " "
-      )
-      .match(/[\u4e00-\u9fa5]{2,6}/g) ?? [];
+  // 4. Extract meaningful Chinese words and phrases (2-6 chars) using Intl.Segmenter + phrase fallback
+  const cleanedHead = head.replace(
+    /(?:请问|查一下|搜一下|帮我找|我的知识库|关于|是什么|有哪些|怎么|如何)/g,
+    " "
+  );
+  const zhStopwords = new Set([
+    "想法",
+    "灵感",
+    "观点",
+    "文章",
+    "笔记",
+    "今天",
+    "这个",
+    "那个",
+    "我们",
+    "可以",
+    "一个",
+    "一些",
+    "进行",
+    "通过",
+    "以及",
+    "或者",
+    "因为",
+    "所以",
+    "如果",
+    "但是",
+    "没有",
+    "已经",
+  ]);
+  if (typeof Intl !== "undefined" && typeof Intl.Segmenter === "function") {
+    try {
+      const segmenter = new Intl.Segmenter("zh-CN", { granularity: "word" });
+      const wordTokens: string[] = [];
+      for (const seg of segmenter.segment(cleanedHead)) {
+        const w = seg.segment.trim();
+        if (seg.isWordLike && /^[\u4e00-\u9fa5]{2,6}$/.test(w) && !zhStopwords.has(w)) {
+          wordTokens.push(w);
+        }
+      }
+      for (let i = 0; i < wordTokens.length && keywords.size < 14; i++) {
+        keywords.add(wordTokens[i]);
+        if (i + 1 < wordTokens.length) {
+          const compound = `${wordTokens[i]}${wordTokens[i + 1]}`;
+          if (compound.length >= 3 && compound.length <= 6) {
+            keywords.add(compound);
+          }
+        }
+      }
+    } catch {}
+  }
+  const zhPhrases = cleanedHead.match(/[\u4e00-\u9fa5]{2,6}/g) ?? [];
   for (const p of zhPhrases.slice(0, 6)) {
-    if (
-      ![
-        "想法",
-        "灵感",
-        "观点",
-        "文章",
-        "笔记",
-        "今天",
-        "这个",
-        "那个",
-        "我们",
-      ].includes(p)
-    ) {
+    if (!zhStopwords.has(p)) {
       keywords.add(p);
     }
   }
@@ -417,6 +448,10 @@ export function searchVaultNotes(
         // Boost compiled synthesis layers (04_topics, 05_outputs/research_notes) over raw clippings
         if (relFromRoot.startsWith("04_topics/") || relFromRoot.startsWith("05_outputs/research_notes/")) {
           score += 4;
+        }
+        // Downweight append-only operational logs (_system/log.md) so they don't crowd out topical notes
+        if (relFromRoot === "_system/log.md" || fileNameLower === "log") {
+          score = Math.max(1, Math.floor(score * 0.25));
         }
         scored.push({ filePath, count: score });
       }
@@ -522,9 +557,10 @@ export function saveCompanionLightNote(params: {
   relatedVaultNodes: string[];
   noteMarkdownBody: string;
   existingPath?: string;
+  overwriteExisting?: boolean;
 }): string {
   const noteMdPath = params.existingPath || params.sourceMdPath.replace(/\.md$/, "_note.md");
-  if (existsSync(noteMdPath)) return noteMdPath;
+  if (!params.overwriteExisting && existsSync(noteMdPath)) return noteMdPath;
   const nowDate = new Date().toISOString().slice(0, 10);
   const sourceWiki = `[[${basename(params.sourceMdPath, ".md")}]]`;
 
@@ -559,7 +595,11 @@ export function saveCompanionLightNote(params: {
     "",
   ];
 
-  writeNewFile(noteMdPath, frontmatter.join("\n"));
+  if (params.overwriteExisting) {
+    replaceFileAtomically(noteMdPath, frontmatter.join("\n"));
+  } else {
+    writeNewFile(noteMdPath, frontmatter.join("\n"));
+  }
 
   return noteMdPath;
 }

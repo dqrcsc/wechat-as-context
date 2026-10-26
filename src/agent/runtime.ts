@@ -268,11 +268,29 @@ export class WeChatAgentRuntime {
   private async handleCaptureIdea(
     ctx: IntentExecutionContext
   ): Promise<IntentExecutionResult> {
-    const rawThought =
-      ctx.decision.slots.coreContent?.trim() ||
-      ctx.unpacked.userText
-        .replace(/^(?:想法|灵感|观点|我有一个想法|idea)\s*[:：]\s*/i, "")
-        .trim();
+    const verbatimThought = ctx.unpacked.userText
+      .replace(/^(?:想法|灵感|观点|我有一个想法|idea)\s*[:：]\s*/i, "")
+      .trim();
+    const coreSummary = ctx.decision.slots.coreContent?.trim() || "";
+    const refQuote =
+      ctx.unpacked.refContext?.partialText?.trim() ||
+      ctx.unpacked.refContext?.quotedText?.trim() ||
+      "";
+    const baseThought = verbatimThought || coreSummary;
+    const rawThought = [
+      coreSummary &&
+      verbatimThought &&
+      coreSummary !== verbatimThought &&
+      !verbatimThought.includes(coreSummary)
+        ? `> **核心提炼**：${coreSummary}`
+        : "",
+      baseThought,
+      refQuote && !baseThought.includes(refQuote)
+        ? `> **引用原文片段**：\n> ${refQuote.replace(/\r?\n/g, "\n> ")}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
 
     const targetArticle =
       (ctx.decision.targetArticleId
@@ -349,11 +367,31 @@ export class WeChatAgentRuntime {
   ): Promise<IntentExecutionResult> {
     const inboxDir =
       this.config.inboxDir || join(this.config.vaultRoot, "01_inputs", "inbox");
-    const bodyText =
-      ctx.decision.slots.coreContent?.trim() || ctx.unpacked.userText.trim();
+    const verbatimText = ctx.unpacked.userText.trim();
+    const coreSummary = ctx.decision.slots.coreContent?.trim() || "";
+    const refQuote =
+      ctx.unpacked.refContext?.partialText?.trim() ||
+      ctx.unpacked.refContext?.quotedText?.trim() ||
+      "";
+    const baseBody = verbatimText || coreSummary;
+    const bodyText = [
+      coreSummary &&
+      verbatimText &&
+      coreSummary !== verbatimText &&
+      !verbatimText.includes(coreSummary)
+        ? `> **核心提炼**：${coreSummary}`
+        : "",
+      baseBody,
+      refQuote && !baseBody.includes(refQuote)
+        ? `> **引用上下文**：\n> ${refQuote.replace(/\r?\n/g, "\n> ")}`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    const titleSource = coreSummary || baseBody;
     const title =
       ctx.decision.slots.ideaTitle?.trim() ||
-      bodyText.slice(0, 36).replace(/\r?\n/g, " ");
+      titleSource.slice(0, 36).replace(/\r?\n/g, " ");
 
     const filePath = createInboxCaptureInVault({
       inboxDir,

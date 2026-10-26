@@ -1,11 +1,18 @@
 import { AppConfig } from "../config.ts";
-import { resolveModelEndpoint } from "../agent/llm.ts";
+import { fetchWithTransientRetry, resolveModelEndpoint } from "../agent/llm.ts";
 import { TriageLevel } from "../db.ts";
 import { ExtractedWeChatArticle } from "../extractor/wechat.ts";
 import { VaultContextSnapshot } from "./context.ts";
 import { ANALYSIS_CONTEXT_POLICY, formatAnalysisContext, loadAnalysisContext, type AnalysisContextSnapshot } from "./analysis_context.ts";
 import { ARTICLE_REVIEW_POLICY } from "./analysis_policy.ts";
 import { applyValidationContract } from "./validation_contract.ts";
+
+export const FALLBACK_ANALYSIS_MARKER =
+  "未完成模型分析，以下仅为本地原文摘录，不代表已完成观点或业务判断。";
+
+export function isFallbackLightNote(content: string): boolean {
+  return Boolean(content && content.includes("未完成模型分析，以下仅为本地原文摘录"));
+}
 
 export interface LightAnalysisResult {
   english_slug: string;
@@ -120,13 +127,17 @@ validation_contract 对象结构：{"metrics":[{"name":"指标短名","numerator
   const endpoint = `${(resolvedEp.baseUrl || config.llm.baseUrl).replace(/\/+$/, "")}/chat/completions`;
   const targetModel = resolvedEp.model || config.llm.fastModel || config.llm.model;
   const authKey = resolvedEp.apiKey || config.llm.apiKey;
-  const messages = [
+  const messages: Array<{ role: string; content: string }> = [
     { role: "system", content: systemPrompt },
     { role: "user", content: userPrompt },
   ];
 
-  const sendCompletionRequest = (useJsonObjectFormat: boolean) =>
-    fetch(endpoint, {
+  let preferJsonObjectFormat = true;
+  const sendCompletionRequest = (
+    chatMessages: Array<{ role: string; content: string }>,
+    useJsonObjectFormat: boolean
+  ) =>
+    fetchWithTransientRetry(endpoint, () => ({
       method: "POST",
       signal: AbortSignal.timeout(60_000),
       headers: {
@@ -137,33 +148,66 @@ validation_contract 对象结构：{"metrics":[{"name":"指标短名","numerator
         model: targetModel,
         temperature: 0.2,
         ...(useJsonObjectFormat ? { response_format: { type: "json_object" } } : {}),
-        messages,
+        messages: chatMessages,
       }),
-    });
+    }));
 
-  let resp = await sendCompletionRequest(true);
-  if (resp.status === 400) {
-    resp = await sendCompletionRequest(false);
-  }
+  const requestParsedOutput = async (
+    chatMessages: Array<{ role: string; content: string }>
+  ): Promise<{ rawContent: string; parsed: any }> => {
+    let resp = await sendCompletionRequest(chatMessages, preferJsonObjectFormat);
+    if (preferJsonObjectFormat && resp.status === 400) {
+      preferJsonObjectFormat = false;
+      resp = await sendCompletionRequest(chatMessages, false);
+    }
 
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error(`LLM HTTP ${resp.status}: ${errText.slice(0, 300)}`);
-  }
+    if (!resp.ok) {
+      const errText = await resp.text();
+      throw new Error(`LLM HTTP ${resp.status}: ${errText.slice(0, 300)}`);
+    }
 
-  const data = (await resp.json()) as {
-    choices?: Array<{ message?: { content?: string } }>;
+    const data = (await resp.json()) as {
+      choices?: Array<{ message?: { content?: string } }>;
+    };
+    const content = data.choices?.[0]?.message?.content;
+    if (!content) {
+      throw new Error("Empty LLM response content");
+    }
+
+    const parsed = parseJsonFromLlm(content);
+    if (
+      !parsed ||
+      typeof parsed.wechat_reply !== "string" ||
+      !parsed.wechat_reply.trim() ||
+      typeof parsed.companion_note_markdown !== "string" ||
+      !parsed.companion_note_markdown.trim()
+    ) {
+      throw new Error("Incomplete analysis response");
+    }
+    return { rawContent: content, parsed };
   };
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) {
-    throw new Error("Empty LLM response content");
+
+  let { rawContent, parsed } = await requestParsedOutput(messages);
+  let rendered: { wechat_reply: string; companion_note_markdown: string };
+  try {
+    rendered = applyValidationContract(parsed);
+  } catch (validationErr: any) {
+    const errMsg = validationErr?.message || String(validationErr);
+    const retryMessages = [
+      ...messages,
+      { role: "assistant", content: rawContent },
+      {
+        role: "user",
+        content: `你上次输出的 JSON 未通过 validation_contract 契约校验（原因：${errMsg}）。请修正后重新输出完整 JSON：
+1. 若保留业务量化试验（validation_contract 不为 null），必须确保 wechat_reply 与 companion_note_markdown 的“🏢 业务与规划启发”章节内各包含且仅包含一次 {{VALIDATION_CONTRACT}} 占位符，且该章节除占位符外严禁出现“显著、波动范围、置信区间、百分点、相对提升、相对下降”等统计表述；
+2. 若本文无需设计量化对照试验，请将 validation_contract 设为 null，并从两份正文中移除 {{VALIDATION_CONTRACT}}。`,
+      },
+    ];
+    const retried = await requestParsedOutput(retryMessages);
+    parsed = retried.parsed;
+    rendered = applyValidationContract(parsed);
   }
 
-  const parsed = parseJsonFromLlm(content);
-  if (!parsed || typeof parsed.wechat_reply !== "string" || !parsed.wechat_reply.trim() ||
-      typeof parsed.companion_note_markdown !== "string" || !parsed.companion_note_markdown.trim()) {
-    throw new Error("Incomplete analysis response");
-  }
   const validTriage: TriageLevel[] = [
     "keep_raw",
     "reference",
@@ -173,7 +217,6 @@ validation_contract 对象结构：{"metrics":[{"name":"指标短名","numerator
   const triage: TriageLevel = validTriage.includes(parsed.triage)
     ? parsed.triage
     : "process_later";
-  const rendered = applyValidationContract(parsed);
 
   return {
     english_slug:

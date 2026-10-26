@@ -12,6 +12,7 @@ import {
   ensureStarterVaultInitialized,
 } from "./vault/context.ts";
 import { loadAnalysisContext } from "./vault/analysis_context.ts";
+import { isFallbackLightNote } from "./vault/analyzer.ts";
 import { renderQrCodeToTerminal } from "./clawbot/client.ts";
 import { scanLocalAgentClis } from "./agent/subagent_cli.ts";
 import { detectRequestedFormats } from "./agent/doc_exporter.ts";
@@ -389,6 +390,20 @@ async function main() {
       const analysisContext = config.analysisContextFile
         ? loadAnalysisContext(config.analysisContextFile)
         : null;
+      const skillTemplatePath = join(config.projectRoot, "skills", "wechat-as-context", "SKILL.md");
+      const installedSkillPath = join(homedir(), ".codex", "skills", "wechat-as-context", "SKILL.md");
+      let installedSkillCheck = "not_installed";
+      if (existsSync(skillTemplatePath) && existsSync(installedSkillPath)) {
+        const expectedSkill = readFileSync(skillTemplatePath, "utf-8").replace(
+          /\{\{PROJECT_ROOT\}\}/g,
+          config.projectRoot
+        );
+        const actualSkill = readFileSync(installedSkillPath, "utf-8");
+        installedSkillCheck =
+          expectedSkill === actualSkill
+            ? `ok (in sync: ${installedSkillPath})`
+            : `out_of_sync (run \`bun run src/cli.ts install-skill\` to sync ${installedSkillPath})`;
+      }
 
       const report = {
         ok: Boolean(clawbotCreds),
@@ -422,6 +437,7 @@ async function main() {
             : skillsHealth.invalidSkillFiles.length === 0
               ? `ok (${skillsHealth.totalSkills} skills valid)`
               : `warning (${skillsHealth.invalidSkillFiles.length} invalid SKILL.md frontmatter files)`,
+          installedSkill: installedSkillCheck,
           analysisContext: !config.analysisContextFile
             ? "not configured (optional; set ANALYSIS_CONTEXT_FILE in .env to enable viewpoint & business snapshot)"
             : analysisContext && analysisContext.warnings.length > 0 && analysisContext.entries.length === 0
@@ -557,6 +573,7 @@ async function main() {
             {
               ok: true,
               article: item,
+              isFallbackNote: isFallbackLightNote(noteContent || item.short_summary),
               noteMarkdown: noteContent,
             },
             null,
@@ -564,7 +581,10 @@ async function main() {
           )
         );
       } else {
-        console.log(`=== [#${item.id}] ${item.title} ===`);
+        const fallbackTag = isFallbackLightNote(noteContent || item.short_summary)
+          ? " ⚠️ [未完成模型分析/本地回退摘录]"
+          : "";
+        console.log(`=== [#${item.id}] ${item.title}${fallbackTag} ===`);
         console.log(`- 公众号/作者: ${item.author}`);
         console.log(`- 原文链接: ${item.url}`);
         console.log(`- 状态/分诊: ${item.process_level} / ${item.triage}`);
@@ -573,6 +593,132 @@ async function main() {
         console.log(`- 伴读笔记 Markdown: ${item.note_md_path}`);
         if (noteContent) {
           console.log(`\n--- 伴读笔记 (_note.md) ---\n${noteContent}`);
+        }
+      }
+      break;
+    }
+
+    case "reanalyze": {
+      const id = Number(args[1]);
+      if (!id) {
+        console.error(
+          "用法: bun run src/cli.ts reanalyze <id> [--force] [--send] [--json]"
+        );
+        process.exit(1);
+      }
+      const force = args.includes("--force");
+      const sendWeChatReply = args.includes("--send");
+      const res = await pipeline.reanalyzeArticleById(id, {
+        force,
+        sendWeChatReply,
+      });
+      if (sendWeChatReply && pipeline.clawbot.isConfigured()) {
+        await pipeline.flushRepliesWithRetry();
+      }
+      if (isJson) {
+        console.log(
+          JSON.stringify(
+            {
+              ok: !res.isFallback,
+              upgradedFromFallback: res.upgradedFromFallback,
+              isFallback: res.isFallback,
+              article: res.record,
+            },
+            null,
+            2
+          )
+        );
+      } else {
+        const statusIcon = res.isFallback ? "⚠️" : "✅";
+        console.log(
+          `${statusIcon} 文章 #${id}《${res.record.title}》重新初筛完成 (${
+            res.isFallback
+              ? "仍为本地回退摘录，请检查 LLM 网络或配置"
+              : res.upgradedFromFallback
+                ? "已从本地回退摘录升级为完整模型初筛"
+                : "已更新模型初筛"
+          })`
+        );
+        console.log(`- 建议分诊 (Triage): ${res.record.triage}`);
+        console.log(`- 伴读笔记: ${res.record.note_md_path}`);
+        console.log(`\n--- 📲 手机微信初筛回执 ---\n${res.record.short_summary}\n`);
+      }
+      break;
+    }
+
+    case "recent":
+    case "turns":
+    case "inbox":
+    case "tasks": {
+      const limit = Number(getFlag("--limit") ?? "15") || 15;
+      const intentFilter =
+        getFlag("--intent") ||
+        (command === "inbox" ? "capture_inbox" : undefined);
+      const turns =
+        command === "tasks"
+          ? []
+          : db.listConversationTurns({ intent: intentFilter, limit });
+      const tasks =
+        command === "inbox"
+          ? []
+          : db.getRecentAgentTasks(undefined, command === "tasks" ? limit : 10);
+
+      if (isJson) {
+        console.log(
+          JSON.stringify(
+            {
+              ok: true,
+              intentFilter: intentFilter || null,
+              turnsCount: turns.length,
+              turns,
+              tasksCount: tasks.length,
+              tasks,
+            },
+            null,
+            2
+          )
+        );
+      } else {
+        if (turns.length > 0) {
+          console.log(
+            `💬 最近微信消息与捕获记录（共 ${turns.length} 条${
+              intentFilter ? `，intent=${intentFilter}` : ""
+            }）：\n`
+          );
+          for (const t of turns) {
+            console.log(
+              `[Turn #${t.id}] [${t.intent}/${t.complexity}] (${t.created_at
+                .slice(0, 19)
+                .replace("T", " ")}) 模型: ${t.model_used || "-"}`
+            );
+            console.log(
+              `  👤 用户消息: ${t.user_text.slice(0, 180).replace(/\r?\n/g, " ")}${
+                t.user_text.length > 180 ? "…" : ""
+              }`
+            );
+            if (t.deposited_path) {
+              console.log(`  📂 落盘文件: ${t.deposited_path}`);
+            }
+            console.log(
+              `  🤖 回复摘要: ${t.assistant_reply.slice(0, 140).replace(/\r?\n/g, " ")}${
+                t.assistant_reply.length > 140 ? "…" : ""
+              }\n`
+            );
+          }
+        } else if (command !== "tasks") {
+          console.log("📭 未找到匹配的微信对话或收集箱记录。");
+        }
+        if (tasks.length > 0 && command !== "inbox") {
+          console.log(`⚙️ 最近 Agent 异步任务队列（共 ${tasks.length} 条）：\n`);
+          for (const tk of tasks) {
+            console.log(
+              `[Task #${tk.id}] [${tk.status}] (${tk.updated_at
+                .slice(0, 19)
+                .replace("T", " ")}) stage=${tk.stage || "-"} ${
+                tk.error ? `error=${tk.error}` : ""
+              }`
+            );
+          }
         }
       }
       break;
@@ -789,6 +935,9 @@ async function main() {
   bun run src/cli.ts doctor                                检查本地环境、知识库、LLM 与 微信ClawBot 绑定状态
   bun run src/cli.ts list [--triage <t>] [--json]          列出公众号文章收件箱及知识库初筛状态
   bun run src/cli.ts show <id> [--json]                    查看单篇文章详情、原文路径及伴读笔记
+  bun run src/cli.ts reanalyze <id> [--force] [--send]     重新执行单篇文章的模型初筛（可将未完成模型分析的本地摘录升级为完整伴读）
+  bun run src/cli.ts recent [--intent <i>] [--json]        查看最近的非文章类微信消息、收集箱速记 (inbox)、想法与 Agent 任务记录
+  bun run src/cli.ts inbox [--limit <n>] [--json]          查看最近通过微信转发存入 01_inputs/inbox/ 的速记与备忘记录
   bun run src/cli.ts ingest <url> [--note "关注点"]         手动/测试抓取一篇公众号文章并生成知识库初筛卡
   bun run src/cli.ts sync                                  主动从「微信ClawBot [AI]」拉取离线期间发送的文章
   bun run src/cli.ts push [text] [--file <path>] [--formats md,html,pdf] [--article <id>]

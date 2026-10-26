@@ -10,7 +10,7 @@ import {
   normalizeExternalWebUrl,
   saveRawWebArticleToVault,
 } from "./extractor/web.ts";
-import { analyzeArticleWithVault } from "./vault/analyzer.ts";
+import { analyzeArticleWithVault, isFallbackLightNote } from "./vault/analyzer.ts";
 import { createIdeaSeedInVault, gatherVaultContext, saveCompanionLightNote } from "./vault/context.ts";
 import {
   ClawBotMessage,
@@ -292,6 +292,183 @@ export class WeChatContextPipeline {
           }
         }
       );
+    });
+  }
+
+  /**
+   * Explicitly re-run initial model analysis on an existing article (e.g., to upgrade
+   * a fallback local digest note after transient network or validation errors).
+   * Never overwrites deep/synthesis notes, and only overwrites non-fallback light notes
+   * when `force: true` is passed.
+   */
+  public async reanalyzeArticleById(
+    id: number,
+    options?: { sendWeChatReply?: boolean; force?: boolean }
+  ): Promise<{
+    record: ArticleRecord;
+    upgradedFromFallback: boolean;
+    isFallback: boolean;
+  }> {
+    this.refreshConfigFromDiskIfChanged();
+    return this.db.withLock(`article_${id}`, async () => {
+      const record = this.db.getArticleById(id);
+      if (!record) throw new Error(`Article #${id} not found`);
+
+      const existingNoteLevel = record.note_md_path
+        ? documentLevel(record.note_md_path)
+        : undefined;
+      if (
+        record.process_level === "deep" ||
+        existingNoteLevel === "deep" ||
+        existingNoteLevel === "synthesis"
+      ) {
+        throw new Error(
+          `Article #${id} is already at ${existingNoteLevel || record.process_level} level; refusing to overwrite with light re-analysis.`
+        );
+      }
+
+      const existingNoteContent =
+        record.note_md_path && existsSync(record.note_md_path)
+          ? readFileSync(record.note_md_path, "utf8")
+          : "";
+      const wasFallback =
+        !existingNoteContent ||
+        isFallbackLightNote(existingNoteContent) ||
+        isFallbackLightNote(record.short_summary);
+
+      if (existingNoteContent && !wasFallback && !options?.force) {
+        throw new Error(
+          `Article #${id} already has a completed model analysis note (${record.note_md_path}). Pass --force to re-generate light note.`
+        );
+      }
+
+      const isWeChat = isWeChatArticleUrl(record.url);
+      const extracted =
+        record.source_md_path && existsSync(record.source_md_path)
+          ? {
+              url: record.url,
+              title: record.title,
+              author: record.author,
+              digest: record.digest,
+              publishDate: record.created_at?.slice(0, 10) || new Date().toISOString().slice(0, 10),
+              markdownBody: readFileSync(record.source_md_path, "utf8").replace(
+                /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
+                ""
+              ),
+              imageUrls: [],
+              extractorUsed: "native_http" as const,
+            }
+          : isWeChat
+            ? await extractWeChatArticle(
+                record.url,
+                record.title,
+                record.author,
+                record.digest
+              )
+            : await extractGeneralWebArticle(
+                record.url,
+                record.title,
+                record.author,
+                record.digest,
+                { allowJinaFallback: this.config.allowJinaFallback }
+              );
+
+      const vaultContext = gatherVaultContext(
+        this.config.vaultRoot,
+        [
+          extracted.title,
+          extracted.digest,
+          record.user_notes,
+          extracted.markdownBody.slice(0, 3000),
+        ].join("\n"),
+        {
+          ...this.config.vaultLayout,
+          excludePaths: [record.source_md_path, record.note_md_path].filter(Boolean),
+          excludeSourceUrls: [record.url],
+        }
+      );
+
+      const analysis = await analyzeArticleWithVault({
+        config: this.config,
+        article: extracted,
+        userNotes: record.user_notes,
+        vaultContext,
+      });
+
+      const isStillFallback = isFallbackLightNote(analysis.wechat_reply);
+      if (isStillFallback && existingNoteContent) {
+        return {
+          record,
+          upgradedFromFallback: false,
+          isFallback: true,
+        };
+      }
+
+      const webArticlesDir =
+        this.config.webArticlesDir ||
+        join(this.config.vaultRoot, "01_inputs", "articles", "web");
+      const sourceMdPath =
+        record.source_md_path && existsSync(record.source_md_path)
+          ? record.source_md_path
+          : isWeChat
+            ? await saveRawArticleToVault({
+                wechatArticlesDir: this.config.wechatArticlesDir,
+                article: extracted,
+                slug: analysis.english_slug,
+                userNotes: record.user_notes,
+                existingPath: record.source_md_path || undefined,
+              })
+            : await saveRawWebArticleToVault({
+                articlesDir: webArticlesDir,
+                article: extracted,
+                slug: analysis.english_slug,
+                userNotes: record.user_notes,
+                existingPath: record.source_md_path || undefined,
+              });
+
+      const noteMdPath =
+        record.note_md_path || sourceMdPath.replace(/\.md$/, "_note.md");
+      saveCompanionLightNote({
+        sourceMdPath,
+        existingPath: noteMdPath,
+        overwriteExisting: true,
+        sourceUrl: extracted.url,
+        title: extracted.title,
+        author: extracted.author,
+        triage: analysis.triage,
+        relatedVaultNodes: analysis.related_vault_nodes,
+        noteMarkdownBody: analysis.companion_note_markdown,
+      });
+
+      const updated = this.db.db.transaction(() => {
+        const row = this.db.updateArticle(id, {
+          title: extracted.title || record.title,
+          author: extracted.author || record.author,
+          digest: extracted.digest || record.digest,
+          source_md_path: sourceMdPath,
+          note_md_path: noteMdPath,
+          status: "light_done",
+          process_level: "light",
+          triage: analysis.triage,
+          short_summary: analysis.wechat_reply,
+          related_vault_nodes: JSON.stringify(analysis.related_vault_nodes),
+          error_message: "",
+        })!;
+        if (options?.sendWeChatReply && record.sender_id) {
+          this.db.queueReply(
+            `article_${id}_reanalyze_${Date.now()}`,
+            record.sender_id,
+            analysis.wechat_reply
+          );
+        }
+        return row;
+      })();
+
+      return {
+        record: updated,
+        upgradedFromFallback: wasFallback && !isStillFallback,
+        isFallback: isStillFallback,
+      };
     });
   }
 
@@ -598,55 +775,66 @@ export class WeChatContextPipeline {
   public async flushReplies(options?: {
     enforceRetryBackoff?: boolean;
     nowMs?: number;
+    ignoreBusy?: boolean;
   }): Promise<void> {
     const nowMs = options?.nowMs ?? Date.now();
     const enforceBackoff = Boolean(options?.enforceRetryBackoff);
-    await this.db.withLock("outbox", async () => {
-      this.db.db.query("UPDATE reply_outbox SET status = 'failed', error = CASE WHEN error = '' THEN 'Delivery outcome unknown after interrupted attempt' ELSE error END WHERE status = 'pending' AND attempts >= 3").run();
-      const rows = this.db.db
-        .query(
-          "SELECT * FROM reply_outbox WHERE status = 'pending' AND attempts < 3 AND (? = 0 OR next_retry_at <= ?) ORDER BY rowid"
-        )
-        .all(enforceBackoff ? 1 : 0, nowMs) as Array<{
-        id: string;
-        recipient: string;
-        text: string;
-        attempts: number;
-        media_type?: string;
-        media_path?: string;
-        media_sha256?: string;
-      }>;
-      for (const row of rows) {
-        const nextAttempts = row.attempts + 1;
-        this.db.db.query("UPDATE reply_outbox SET attempts = ? WHERE id = ?").run(nextAttempts, row.id);
-        try {
-          if (
-            (row.media_type === "file" || row.media_type === "image") &&
-            row.media_path
-          ) {
-            if (!row.media_sha256) throw new Error("Legacy media entry has no content snapshot; requeue the file");
-            const digest = createHash("sha256").update(readFileSync(row.media_path)).digest("hex");
-            if (digest !== row.media_sha256) throw new Error("Outbox media snapshot checksum mismatch; requeue the file");
-            await this.clawbot.sendMediaFile(row.recipient, row.media_path, row.id);
-          } else {
-            await this.clawbot.sendTextMessage(row.recipient, row.text, row.id);
+    try {
+      await this.db.withLock("outbox", async () => {
+        this.db.db.query("UPDATE reply_outbox SET status = 'failed', error = CASE WHEN error = '' THEN 'Delivery outcome unknown after interrupted attempt' ELSE error END WHERE status = 'pending' AND attempts >= 3").run();
+        const rows = this.db.db
+          .query(
+            "SELECT * FROM reply_outbox WHERE status = 'pending' AND attempts < 3 AND (? = 0 OR next_retry_at <= ?) ORDER BY rowid"
+          )
+          .all(enforceBackoff ? 1 : 0, nowMs) as Array<{
+          id: string;
+          recipient: string;
+          text: string;
+          attempts: number;
+          media_type?: string;
+          media_path?: string;
+          media_sha256?: string;
+        }>;
+        for (const row of rows) {
+          const nextAttempts = row.attempts + 1;
+          this.db.db.query("UPDATE reply_outbox SET attempts = ? WHERE id = ?").run(nextAttempts, row.id);
+          try {
+            if (
+              (row.media_type === "file" || row.media_type === "image") &&
+              row.media_path
+            ) {
+              if (!row.media_sha256) throw new Error("Legacy media entry has no content snapshot; requeue the file");
+              const digest = createHash("sha256").update(readFileSync(row.media_path)).digest("hex");
+              if (digest !== row.media_sha256) throw new Error("Outbox media snapshot checksum mismatch; requeue the file");
+              await this.clawbot.sendMediaFile(row.recipient, row.media_path, row.id);
+            } else {
+              await this.clawbot.sendTextMessage(row.recipient, row.text, row.id);
+            }
+            this.db.db.query("UPDATE reply_outbox SET status = 'sent', error = '', next_retry_at = 0 WHERE id = ?").run(row.id);
+          } catch (e: any) {
+            const backoffMs =
+              nextAttempts === 1 ? 5_000 : nextAttempts === 2 ? 15_000 : 45_000;
+            const nextRetryAt = nextAttempts >= 3 ? 0 : nowMs + backoffMs;
+            this.db.db
+              .query(
+                "UPDATE reply_outbox SET status = ?, error = ?, next_retry_at = ? WHERE id = ?"
+              )
+              .run(nextAttempts >= 3 ? "failed" : "pending", e.message, nextRetryAt, row.id);
+            console.error(`[Outbox] ${row.id}: ${e.message}`);
           }
-          this.db.db.query("UPDATE reply_outbox SET status = 'sent', error = '', next_retry_at = 0 WHERE id = ?").run(row.id);
-        } catch (e: any) {
-          const backoffMs =
-            nextAttempts === 1 ? 5_000 : nextAttempts === 2 ? 15_000 : 45_000;
-          const nextRetryAt = nextAttempts >= 3 ? 0 : nowMs + backoffMs;
-          this.db.db
-            .query(
-              "UPDATE reply_outbox SET status = ?, error = ?, next_retry_at = ? WHERE id = ?"
-            )
-            .run(nextAttempts >= 3 ? "failed" : "pending", e.message, nextRetryAt, row.id);
-          console.error(`[Outbox] ${row.id}: ${e.message}`);
         }
+        this.db.pruneSentOutboxMedia();
+        this.db.pruneHistoricalRecords({ nowMs });
+      });
+    } catch (err: any) {
+      if (
+        options?.ignoreBusy &&
+        String(err?.message || "").includes("Operation busy: outbox")
+      ) {
+        return;
       }
-      this.db.pruneSentOutboxMedia();
-      this.db.pruneHistoricalRecords({ nowMs });
-    });
+      throw err;
+    }
   }
 
   public async flushRepliesWithRetry(maxLockRetries = 5, retryDelayMs = 300): Promise<void> {
@@ -944,7 +1132,7 @@ export class WeChatContextPipeline {
     return this.db.withLock("sync", async () => {
       let count = this.processPendingMessages();
       if (options?.backgroundDrain) {
-        await this.flushReplies();
+        await this.flushReplies({ ignoreBusy: true });
         void this.drainAgentQueue().catch((e) =>
           console.error("[BackgroundAgentDrain]", e)
         );
@@ -961,19 +1149,19 @@ export class WeChatContextPipeline {
       count += this.processPendingMessages();
       if (options?.backgroundDrain) {
         // Flush any immediate synchronous replies (e.g. "进度" status query or link ack) right away
-        await this.flushReplies();
+        await this.flushReplies({ ignoreBusy: true });
         // Run heavy agent/article queues in background so long-polling is never blocked!
         void (async () => {
           const aCount = await this.drainAgentQueue();
           const rList = await this.drainReadyQueue();
           if (aCount > 0 || rList.length > 0) {
-            await this.flushReplies();
+            await this.flushReplies({ ignoreBusy: true });
           }
         })().catch((e) => console.error("[BackgroundDrain]", e));
       } else {
         await this.drainAgentQueue();
         await this.drainReadyQueue();
-        await this.flushReplies();
+        await this.flushReplies({ ignoreBusy: true });
       }
       return count;
     });

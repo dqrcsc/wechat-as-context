@@ -25,14 +25,25 @@ bun run {{PROJECT_ROOT}}/src/cli.ts list --json
 bun run {{PROJECT_ROOT}}/src/cli.ts show <id> --json
 ```
 
-汇报 ID、标题、作者、批注 `user_notes`、处理状态 `status` / `process_level`、分诊 `triage`、候选笔记线索（若有，未确认语义关系），以及 `error_message`（如有）。列表默认最近 20 篇，可用 `--limit` 调整；不要把这 20 篇称为全部文章。
+当用户询问**非公众号链接的微信转发内容**（如转发的老师课堂笔记、备忘速记、灵感想法、近期问答或后台长任务状态）时，执行：
+
+```bash
+# 查看最近的微信对话记录（含 capture_inbox、capture_idea、vault_query、delegate_subagent）与异步任务队列
+bun run {{PROJECT_ROOT}}/src/cli.ts recent --json
+# 仅查看最近存入 01_inputs/inbox/ 的微信收集箱速记/转发笔记（及其完整 user_text 与 deposited_path）
+bun run {{PROJECT_ROOT}}/src/cli.ts inbox --json
+# 仅查看最近 Agent 异步任务状态
+bun run {{PROJECT_ROOT}}/src/cli.ts tasks --json
+```
+
+汇报文章时包含 ID、标题、作者、批注 `user_notes`、处理状态 `status` / `process_level`、分诊 `triage`、是否仅为未完成模型分析的本地摘录 `isFallbackNote`、候选笔记线索（若有，未确认语义关系），以及 `error_message`（如有）。列表默认最近 20 篇，可用 `--limit` 调整；不要把这 20 篇称为全部文章。
 
 **不要因怀疑有新消息而自动运行 `sync`。** 查看本地收件箱不会拉取微信、调用模型、写文件或发送回执。没有找到目标时说明当前本地记录范围；用户已明确要求同步时直接执行同步。
 
-## 同步、绑定与手动导入
+## 同步、绑定、手动导入与回退重分析
 
 ```bash
-# 本地配置自检（查看 vaultMode、落盘路径及收发队列状态）；不会验证 token 当前有效
+# 本地配置自检（查看 vaultMode、落盘路径、Skill 同步状态及收发队列状态）；不会验证 token 当前有效
 bun run {{PROJECT_ROOT}}/src/cli.ts doctor --json
 # 仅用户要求首次连接或更换绑定时使用，扫码由用户完成
 bun run {{PROJECT_ROOT}}/src/cli.ts login
@@ -40,6 +51,8 @@ bun run {{PROJECT_ROOT}}/src/cli.ts login
 bun run {{PROJECT_ROOT}}/src/cli.ts sync --json
 # 用户明确要求将公众号或外部网页链接抓取归档并初筛时使用
 bun run {{PROJECT_ROOT}}/src/cli.ts ingest "<https://mp.weixin.qq.com/s/...>" --note "<关注点>" --json
+# 当某篇文章因网络波动或契约校验降级为“未完成模型分析”的本地摘录（isFallbackNote: true）且用户要求补跑模型初筛时使用
+bun run {{PROJECT_ROOT}}/src/cli.ts reanalyze <id> [--send] --json
 ```
 
 `sync` 是有副作用的操作：接收消息、推进持久游标、抓取新文章和图片、调用已配置模型、写入本地归档/知识库、向原发送者发送接收/处理回执。对明确的同步请求，这些是该流程的预期动作；不要把它用于仅查看或检查状态的请求。手动 `ingest` 会抓取、分析并落盘，但不发送微信回执。仅要求在聊天里阅读链接时，不据此推定用户要求入库。
@@ -84,7 +97,7 @@ bun run {{PROJECT_ROOT}}/src/cli.ts push --article <id> [--with-file] [--formats
 - 每次 CLI `idea [<id>] "<想法>"` 创建独立文件。手机“想法：...”使用消息标识去重，重放同一条消息不会重复创建想法。
 - 消息批次与下一游标在同一 SQLite 事务中保存，随后处理持久收件箱。处理失败的消息保留并在后续同步重试，不能承诺服务端永久保留消息或任何情况下绝不丢失。
 - 微信回执使用独立持久发送队列，最多自动尝试 3 次，重试复用同一客户端 ID。网络中断可能使远端送达结果不确定；不要宣称端到端严格只发送一次。`doctor --json` 的 `deliveryErrors`、`inboxErrors`、`lastPoll` 可查看失败记录；凭证 `configured` 不等于已联网验证。
-- 抓取/分析失败的文章保留 `failed` 和错误，可在排除原因后对原 URL 再次 `ingest`；不要删除文章文件来“重试”。已完成或已有笔记的文章不会由此重写。
+- 抓取/分析失败的文章保留 `failed` 和错误，可在排除原因后对原 URL 再次 `ingest`；不要删除文章文件来“重试”。已完成或已有笔记的文章不会由此重写。若文章抓取成功但模型初筛降级为本地原文摘录（`isFallbackNote: true`），可使用 `reanalyze <id> [--send]` 在保留已抓原文的前提下升级伴读笔记为完整模型初筛；已完成人工精读（`deep` / `synthesis`）的笔记绝不会被 `reanalyze` 覆盖。
 - 入站附件路径包含原名与内容 SHA-256：同名不同内容分别保存，相同内容重放复用。不要自行按原始文件名猜测已存路径。
 - Markdown 导出的 HTML/PDF 路径含内容版本摘要；正文或嵌入的本地图片变化会生成新版本，旧导出保留。请求多格式时逐项补齐，已有 MD 不表示 HTML/PDF 已满足；PDF 生成失败不能用旧 PDF 冒充当前结果，核对返回的 `missingFormats` 和用户可见提示。显式指定历史导出时只配对同一版本，不附带已改写的当前 MD。
 - AGY 生图只收集明确返回或本次预期路径的文件，真实路径须在允许的生成目录或知识库内；不扫描共享 generated/brain 目录。AGY 应将图片复制到提示指定路径，超时、非零退出或生图没有可归属图片均按失败处理。未知模型去掉 `--model` 重试后标记 default/unknown，不能宣称仍是原模型。

@@ -135,6 +135,7 @@ export interface SubagentRunRequest {
   preferredModel?: string;
   expectGeneratedImage?: boolean;
   timeoutMs?: number;
+  honorCooldownInTests?: boolean;
   onStageChange?: (
     stage: string,
     options?: { detail?: string; pushWeChat?: boolean; wechatMessage?: string }
@@ -150,6 +151,41 @@ export interface SubagentRunResult {
   generatedFiles: string[];
 }
 
+export const CLI_COOLDOWN_TTL_MS = 3 * 60 * 1000;
+const cliFailureCooldownMap = new Map<
+  string,
+  { failedAt: number; reason: string }
+>();
+
+export function recordCliBackendFailure(backend: string, reason: string, nowMs = Date.now()): void {
+  cliFailureCooldownMap.set(backend.toLowerCase(), {
+    failedAt: nowMs,
+    reason,
+  });
+}
+
+export function clearCliBackendFailure(backend: string): void {
+  cliFailureCooldownMap.delete(backend.toLowerCase());
+}
+
+export function isCliBackendInCooldown(
+  backend: string,
+  nowMs = Date.now(),
+  ttlMs = CLI_COOLDOWN_TTL_MS
+): boolean {
+  const entry = cliFailureCooldownMap.get(backend.toLowerCase());
+  if (!entry) return false;
+  if (nowMs - entry.failedAt >= ttlMs) {
+    cliFailureCooldownMap.delete(backend.toLowerCase());
+    return false;
+  }
+  return true;
+}
+
+export function resetCliBackendCooldowns(): void {
+  cliFailureCooldownMap.clear();
+}
+
 type SubagentRunnerHook = (req: SubagentRunRequest) => Promise<SubagentRunResult>;
 let customTestRunner: SubagentRunnerHook | null = null;
 
@@ -158,6 +194,7 @@ let customTestRunner: SubagentRunnerHook | null = null;
  */
 export function setSubagentTestRunner(runner: SubagentRunnerHook | null): void {
   customTestRunner = runner;
+  resetCliBackendCooldowns();
 }
 
 function getStandardSearchDirs(): string[] {
@@ -462,9 +499,17 @@ export async function runCliSubagent(
   };
 
   let primaryError: any = null;
-  const candidatosToTry = req.expectGeneratedImage
+  const rawCandidates = req.expectGeneratedImage
     ? orderedBackends.filter((b) => b === req.backend || b === "agy" || b === "codex")
     : orderedBackends;
+
+  const shouldApplyCooldown = !customTestRunner || req.honorCooldownInTests === true;
+  const candidatosToTry = shouldApplyCooldown
+    ? [
+        ...rawCandidates.filter((b) => !isCliBackendInCooldown(b)),
+        ...rawCandidates.filter((b) => isCliBackendInCooldown(b)),
+      ]
+    : rawCandidates;
 
   for (let i = 0; i < candidatosToTry.length; i++) {
     const candidate = candidatosToTry[i];
@@ -474,7 +519,8 @@ export async function runCliSubagent(
         { detail: "等待子智能体启动与推理输出" }
       );
       const res = await dispatchSingleBackend(candidate);
-      if (i > 0) {
+      clearCliBackendFailure(candidate);
+      if (candidate !== req.backend) {
         return {
           ...res,
           modelUsed: `${res.modelUsed} (fallback from ${req.backend})`,
@@ -482,6 +528,7 @@ export async function runCliSubagent(
       }
       return res;
     } catch (err: any) {
+      recordCliBackendFailure(candidate, err?.message || String(err));
       if (i === 0) primaryError = err;
       if (i + 1 < candidatosToTry.length) {
         const nextCli = candidatosToTry[i + 1];

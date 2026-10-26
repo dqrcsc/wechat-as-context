@@ -556,3 +556,117 @@ test("doctor CLI and buildConfigApiPayload report analysisContext entries and wa
     db.db.close();
   }
 });
+
+test("inline WeChat business heading with colon and numbered markdown headings pass validation_contract, and self-correction retry recovers from first-pass contract error", async () => {
+  const f = fixture([entry()]);
+  let callCount = 0;
+  globalThis.fetch = (async () => {
+    callCount++;
+    if (callCount === 1) {
+      // First attempt forgets {{VALIDATION_CONTRACT}} in wechat_reply
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify(
+                modelResult({
+                  validation_contract: statisticsContract(),
+                  wechat_reply:
+                    "💧 脱水干货：核心结论。\n🏢 业务与规划启发：先做最小验证但漏写了占位符。\n🔍 边界与待验证：样本有限。\n🚦 分诊与下一步：process_later",
+                  companion_note_markdown: `## 4. 🏢 业务与规划启发\n先做最小验证。\n${statisticsSlot}\n## 5. 🔍 边界与待验证\n样本有限。`,
+                })
+              ),
+            },
+          },
+        ],
+      });
+    }
+    // Second attempt (self-correction retry) places {{VALIDATION_CONTRACT}} inline after colon in wechat_reply
+    return Response.json({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify(
+              modelResult({
+                validation_contract: statisticsContract(),
+                wechat_reply: `💧 脱水干货：核心结论。\n4. 🏢 业务与规划启发：先做最小验证，两组等量信息对照。${statisticsSlot}\n5. 🔍 边界与待验证：样本有限。\n6. 🚦 分诊与下一步：process_later`,
+                companion_note_markdown: `## 4. 🏢 业务与规划启发（最小验证）\n先做最小验证，两组等量信息对照。\n${statisticsSlot}\n## 5. 🔍 边界与待验证\n样本有限。`,
+              })
+            ),
+          },
+        },
+      ],
+    });
+  }) as unknown as typeof fetch;
+
+  const result = await analyzeArticleWithVault({
+    config: f.config,
+    article,
+    userNotes: "",
+    vaultContext: emptyVault,
+  });
+  expect(callCount).toBe(2);
+  expect(result.wechat_reply).not.toContain("未完成模型分析");
+  expect(result.wechat_reply).toContain("准确率 = 正确判定样本数 / 有效样本总数");
+  expect(result.companion_note_markdown).toContain("准确率 = 正确判定样本数 / 有效样本总数");
+});
+
+test("analyzer retries transient ECONNRESET socket errors and reanalyzeArticleById upgrades fallback notes without touching deep notes", async () => {
+  const f = fixture([entry()]);
+  mkdirSync(f.config.dataDir, { recursive: true });
+  mkdirSync(f.config.wechatArticlesDir, { recursive: true });
+  const db = new ContextDatabase(f.config.dbPath);
+  try {
+    const source = join(f.config.wechatArticlesDir, "fallback_source.md");
+    writeFileSync(
+      source,
+      `---\nprocess_level: raw\ntriage: process_later\n---\n${article.markdownBody}`
+    );
+    const row = db.enqueueArticle({
+      msgid: "reanalyze-fixture",
+      url: article.url,
+      channel: "cli",
+    }).record;
+    db.updateArticle(row.id, { source_md_path: source, title: article.title });
+
+    // 1. First run fails all retries with offline error -> writes fallback note
+    globalThis.fetch = (async () => {
+      throw new Error("fixture offline");
+    }) as unknown as typeof fetch;
+    const pipeline = new WeChatContextPipeline(f.config, db);
+    const first = await pipeline.processArticleById(row.id, { sendWeChatReply: false });
+    expect(first.short_summary).toContain("未完成模型分析");
+    expect(readFileSync(first.note_md_path, "utf8")).toContain("未完成模型分析");
+
+    // 2. Reanalyze encounters 1 transient ECONNRESET socket error, retries automatically, and upgrades the fallback note!
+    let attempts = 0;
+    globalThis.fetch = (async () => {
+      attempts++;
+      if (attempts === 1) {
+        const err: any = new Error("The socket connection was closed unexpectedly.");
+        err.code = "ECONNRESET";
+        throw err;
+      }
+      return Response.json({
+        choices: [{ message: { content: JSON.stringify(modelResult()) } }],
+      });
+    }) as unknown as typeof fetch;
+
+    const upgraded = await pipeline.reanalyzeArticleById(row.id);
+    expect(attempts).toBe(2);
+    expect(upgraded.upgradedFromFallback).toBe(true);
+    expect(upgraded.isFallback).toBe(false);
+    expect(upgraded.record.short_summary).toContain("💧 脱水干货：验证业务规则。");
+    expect(readFileSync(upgraded.record.note_md_path, "utf8")).not.toContain("未完成模型分析");
+    expect(readFileSync(upgraded.record.note_md_path, "utf8")).toContain("作者主张从场景验证");
+
+    // 3. Reanalyzing an already completed light note without --force is refused
+    await expect(pipeline.reanalyzeArticleById(row.id)).rejects.toThrow("--force");
+
+    // 4. Deep notes are never overwritten even with force: true
+    pipeline.markArticleTriage(row.id, "process_now", "deep");
+    await expect(pipeline.reanalyzeArticleById(row.id, { force: true })).rejects.toThrow("deep");
+  } finally {
+    db.db.close();
+  }
+});

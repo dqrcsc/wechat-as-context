@@ -19,10 +19,10 @@ export function applyValidationContract(input: {
     throw new Error("Each output requires exactly one validation slot");
   }
   for (const body of bodies) {
-    const section = /(?:^|\n)(?:#{1,2}\s*)?(?:🏢\s*)?业务(?:与规划启发|验证|启发)[^\n]*\n/u.exec(body);
+    const section = /(?:^|\n)(?:#{1,3}\s*)?(?:\d+[.、]\s*)?(?:🏢\s*)?业务(?:与规划启发|验证|启发)(?:（[^）\n]*）|\([^)\n]*\))?(?:[：:][ \t]*\n?|[ \t]*\n)/u.exec(body);
     if (!section) throw new Error("Missing business validation section");
     const rest = body.slice(section.index + section[0].length);
-    const end = rest.search(/\n(?:##\s|(?:#{1,2}\s*)?(?:🔍|🚦))/u);
+    const end = rest.search(/\n(?:##\s|(?:#{1,3}\s*)?(?:\d+[.、]\s*)?(?:🔍|🚦))/u);
     const business = end < 0 ? rest : rest.slice(0, end);
     if (!business.includes(VALIDATION_SLOT)) throw new Error("Validation slot must be in business section");
     // This section describes a proposed experiment. Its statistics belong only to the contract.

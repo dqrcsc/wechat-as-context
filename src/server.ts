@@ -1,3 +1,5 @@
+import { existsSync, renameSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { LOCAL_HOST, createHttpHandler } from "./http.ts";
 import { loadConfig } from "./config.ts";
 import { ContextDatabase } from "./db.ts";
@@ -6,6 +8,19 @@ import { WeChatContextPipeline } from "./pipeline.ts";
 const config = loadConfig();
 const db = new ContextDatabase(config.dbPath);
 const pipeline = new WeChatContextPipeline(config, db);
+
+function rotateDaemonLogsIfOversized(dataDir: string, maxBytes = 5 * 1024 * 1024): void {
+  for (const name of ["daemon.stdout.log", "daemon.stderr.log"]) {
+    const logPath = join(dataDir, name);
+    try {
+      if (existsSync(logPath) && statSync(logPath).size > maxBytes) {
+        renameSync(logPath, `${logPath}.1`);
+      }
+    } catch {}
+  }
+}
+
+rotateDaemonLogsIfOversized(config.dataDir);
 
 const server = Bun.serve({ hostname: LOCAL_HOST, port: config.port, fetch: createHttpHandler(db, pipeline), maxRequestBodySize: 1024 * 1024 });
 
@@ -27,13 +42,16 @@ console.log(
 // Background queue drainer (checks annotation wait windows, pending agent tasks & outbox retries every 5 seconds)
 setInterval(async () => {
   try {
+    rotateDaemonLogsIfOversized(config.dataDir);
     await pipeline.drainAgentQueue();
     await pipeline.drainReadyQueue();
     if (pipeline.clawbot.isConfigured()) {
-      await pipeline.flushReplies({ enforceRetryBackoff: true });
+      await pipeline.flushReplies({ enforceRetryBackoff: true, ignoreBusy: true });
     }
-  } catch (err) {
-    console.error("[Timer] drainReadyQueue error:", err);
+  } catch (err: any) {
+    if (!String(err?.message || "").includes("Operation busy")) {
+      console.error(`[${new Date().toISOString()}] [Timer] drainReadyQueue error:`, err);
+    }
   }
 }, 5000);
 
@@ -47,7 +65,9 @@ setInterval(async () => {
         await Bun.sleep(3000);
       }
     } catch (err: any) {
-      console.warn("[ClawBot Poll] retrying after error:", err?.message || err);
+      if (!String(err?.message || "").includes("Operation busy")) {
+        console.warn(`[${new Date().toISOString()}] [ClawBot Poll] retrying after error:`, err?.message || err);
+      }
       await Bun.sleep(3000);
     }
   }

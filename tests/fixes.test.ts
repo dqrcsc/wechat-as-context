@@ -8,10 +8,11 @@ import { ContextDatabase } from "../src/db.ts";
 import { WeChatContextPipeline } from "../src/pipeline.ts";
 import { splitWeChatTextChunks } from "../src/clawbot/client.ts";
 import { downloadAndDecryptCdnMedia } from "../src/clawbot/media.ts";
-import { discoverGeneratedArtifacts, setSubagentTestRunner, spawnCliWithTimeout } from "../src/agent/subagent_cli.ts";
+import { discoverGeneratedArtifacts, isCliBackendInCooldown, runCliSubagent, setSubagentTestRunner, spawnCliWithTimeout } from "../src/agent/subagent_cli.ts";
 import { compileMarkdownToHtml, ensureMultiFormatDeliverables } from "../src/agent/doc_exporter.ts";
 import {
   clearVaultMarkdownCache,
+  extractSearchKeywords,
   findSiblingMultiFormatFiles,
   findVaultFilesByQuery,
   getVaultCacheStats,
@@ -845,4 +846,183 @@ test("auditSkillsDirectoryHealth detects missing YAML frontmatter and nested nod
   expect(health.totalSkills).toBe(2);
   expect(health.invalidSkillFiles).toEqual([join(badSkill, "SKILL.md")]);
   expect(health.heavyNodeModulesDirs).toEqual([heavySkill]);
+});
+
+test("handleCaptureInbox and handleCaptureIdea preserve full verbatim user text alongside shortened router summary", async () => {
+  const f = fixture("synthetic-key");
+  const fullMeetingMemo = [
+    "工程架构同步会议纪要：",
+    "1. 已完成项：异步消息队列增加指数退避与死信保护；",
+    "2. 本周重点：优化长连接断线重连策略，补充端到端压测用例；",
+    "3. 后续待办：整理接口契约文档并完成跨模块联调验收。",
+  ].join("\n");
+
+  globalThis.fetch = (async () =>
+    Response.json({
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              intent: "capture_inbox",
+              complexity: "fast",
+              reason: "Forwarded meeting memo",
+              slots: {
+                ideaTitle: "工程架构同步纪要与待办",
+                ideaSlug: "arch_sync_memo",
+                coreContent: "同步异步队列改造进展及本周联调待办摘要。",
+              },
+            }),
+          },
+        },
+      ],
+    })) as unknown as typeof fetch;
+
+  const res = await f.pipeline.agent.processClawBotMessage({
+    messageKey: "memo-inbox-1",
+    senderId: "owner",
+    rawMessage: {
+      message_id: "memo-inbox-1",
+      from_user_id: "owner",
+      message_type: 1,
+      item_list: [{ type: 1, text_item: { text: fullMeetingMemo } }],
+    },
+  });
+
+  expect(res.depositedPath).toBeTruthy();
+  const saved = readFileSync(res.depositedPath!, "utf8");
+  expect(saved).toContain("同步异步队列改造进展及本周联调待办摘要。");
+  expect(saved).toContain("异步消息队列增加指数退避与死信保护");
+  expect(saved).toContain("优化长连接断线重连策略");
+  expect(saved).toContain("整理接口契约文档并完成跨模块联调验收");
+
+  // Also verify CLI `inbox --json` returns the recorded turn with full user_text
+  const proc = Bun.spawnSync(
+    [process.execPath, join(import.meta.dir, "../src/cli.ts"), "inbox", "--json"],
+    {
+      env: {
+        PATH: process.env.PATH,
+        IGNORE_HOME_DOTENV: "true",
+        WECHAT_CONTEXT_DATA_DIR: f.root,
+        VAULT_ROOT: f.root,
+      },
+    }
+  );
+  expect(proc.exitCode).toBe(0);
+  const inboxReport = JSON.parse(proc.stdout.toString());
+  expect(inboxReport.ok).toBe(true);
+  expect(inboxReport.turnsCount).toBe(1);
+  expect(inboxReport.turns[0].user_text).toContain("优化长连接断线重连策略");
+});
+
+test("sendTextMessage recovers from stale context_token (ret=-2) and resumes multi-chunk send without duplicating delivered chunks", async () => {
+  const f = fixture();
+  f.pipeline.clawbot.saveCredentials({
+    botToken: "tok",
+    baseUrl: "https://ilink.example.test",
+    botId: "bot1",
+    userId: "owner",
+    savedAt: new Date().toISOString(),
+  });
+  f.pipeline.clawbot.setContextToken("owner", "stale-ctx-token-999");
+
+  const para1 = "第一段长内容：".padEnd(1500, "甲");
+  const para2 = "第二段长内容：".padEnd(1500, "乙");
+  const longText = `${para1}\n\n${para2}`;
+
+  const calls: Array<{ clientId: string; contextToken?: string }> = [];
+  let failSecondChunkOnce = true;
+
+  globalThis.fetch = (async (_url: any, init?: any) => {
+    const body = JSON.parse(init.body);
+    const clientId = body.msg.client_id;
+    const contextToken = body.msg.context_token;
+    calls.push({ clientId, contextToken });
+
+    if (contextToken === "stale-ctx-token-999") {
+      return Response.json({ ret: -2, errmsg: "prepare failed" });
+    }
+    if (clientId === "multi-msg_part_2" && failSecondChunkOnce) {
+      failSecondChunkOnce = false;
+      return new Response("gateway timeout", { status: 502 });
+    }
+    return Response.json({ ret: 0 });
+  }) as unknown as typeof fetch;
+
+  // First call: chunk 1 fails with ret=-2 on stale token, retries chunk 1 without token & succeeds, then chunk 2 fails with 502
+  await expect(
+    f.pipeline.clawbot.sendTextMessage("owner", longText, "multi-msg")
+  ).rejects.toThrow("502");
+  expect(f.pipeline.clawbot.getContextToken("owner")).toBeUndefined();
+
+  // Second call (retry): skips already-delivered chunk 1 and only sends chunk 2!
+  await f.pipeline.clawbot.sendTextMessage("owner", longText, "multi-msg");
+
+  expect(calls).toEqual([
+    { clientId: "multi-msg", contextToken: "stale-ctx-token-999" },
+    { clientId: "multi-msg", contextToken: undefined },
+    { clientId: "multi-msg_part_2", contextToken: undefined },
+    { clientId: "multi-msg_part_2", contextToken: undefined },
+  ]);
+});
+
+test("extractSearchKeywords segments Chinese compounds via Intl.Segmenter and searchVaultNotes downweights _system/log.md", () => {
+  const f = fixture();
+  clearVaultMarkdownCache();
+  const kws = extractSearchKeywords("分布式系统架构设计：微服务时代的容错与可观测性实践");
+  expect(kws.some((k) => k.includes("架构设计") || k === "架构" || k === "设计")).toBe(true);
+
+  mkdirSync(join(f.root, "04_topics"), { recursive: true });
+  mkdirSync(join(f.root, "_system"), { recursive: true });
+  writeFileSync(
+    join(f.root, "04_topics", "system_architecture.md"),
+    "# 系统架构设计与容错\n系统架构设计的核心是明确模块边界与故障隔离机制。"
+  );
+  writeFileSync(
+    join(f.root, "_system", "log.md"),
+    "# System Log\n" + "架构设计 ".repeat(14)
+  );
+
+  const hits = searchVaultNotes(f.root, ["架构设计"], 2);
+  expect(hits).toHaveLength(2);
+  expect(hits[0].relativePath).toBe("04_topics/system_architecture.md");
+  expect(hits[1].relativePath).toBe("_system/log.md");
+});
+
+test("CLI circuit breaker cooldown deprioritizes a failing backend on subsequent invocations", async () => {
+  const f = fixture();
+  f.config.llm.allowCodexFallback = true;
+  f.config.llm.cliRoutingChain = ["opencode", "claude"];
+
+  const seenOrder: string[] = [];
+  setSubagentTestRunner(async (req) => {
+    seenOrder.push(req.backend);
+    if (req.backend === "opencode") {
+      throw new Error("opencode broken");
+    }
+    return {
+      backend: req.backend,
+      modelUsed: `${req.backend}-cli`,
+      outputText: "ok",
+      generatedImages: [],
+      generatedFiles: [],
+    };
+  });
+
+  // Run 1: tries opencode first, fails -> records cooldown -> falls back to claude
+  await runCliSubagent({
+    config: f.config,
+    backend: "opencode",
+    prompt: "task 1",
+    honorCooldownInTests: true,
+  });
+  expect(isCliBackendInCooldown("opencode")).toBe(true);
+
+  // Run 2: because opencode is in cooldown, tries healthy claude FIRST without waiting for opencode to fail again
+  await runCliSubagent({
+    config: f.config,
+    backend: "opencode",
+    prompt: "task 2",
+    honorCooldownInTests: true,
+  });
+  expect(seenOrder).toEqual(["opencode", "claude", "claude"]);
 });

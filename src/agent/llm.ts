@@ -22,6 +22,78 @@ export interface ResolvedModelEndpoint {
   model: string;
 }
 
+const TRANSIENT_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+
+export function isTransientNetworkError(err: unknown): boolean {
+  if (!err) return false;
+  const anyErr = err as Record<string, any>;
+  const code = typeof anyErr.code === "string" ? anyErr.code : "";
+  if (
+    [
+      "ECONNRESET",
+      "ETIMEDOUT",
+      "ECONNREFUSED",
+      "EPIPE",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "UND_ERR_SOCKET",
+      "UND_ERR_CONNECT_TIMEOUT",
+    ].includes(code)
+  ) {
+    return true;
+  }
+  const name = typeof anyErr.name === "string" ? anyErr.name : "";
+  if (name === "AbortError" || name === "TimeoutError") {
+    return true;
+  }
+  const msg = String(anyErr.message || err);
+  return /(?:ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|ENOTFOUND|EAI_AGAIN|socket connection was closed|unable to connect|fetch failed|network error|timed? ?out)/i.test(
+    msg
+  );
+}
+
+export async function fetchWithTransientRetry(
+  url: string,
+  initFactory: () => RequestInit,
+  options?: { maxAttempts?: number; baseDelayMs?: number; retryHttpStatuses?: boolean }
+): Promise<Response> {
+  const maxAttempts = Math.max(1, options?.maxAttempts ?? 3);
+  const retryHttpStatuses = options?.retryHttpStatuses ?? true;
+  const defaultDelay =
+    process.env.WECHAT_CTX_TEST_ISOLATION === "1" || process.env.WXCTX_TEST_ROOT
+      ? 10
+      : 600;
+  const baseDelayMs = options?.baseDelayMs ?? defaultDelay;
+
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const resp = await fetch(url, initFactory());
+      if (
+        retryHttpStatuses &&
+        attempt < maxAttempts &&
+        TRANSIENT_HTTP_STATUSES.has(resp.status)
+      ) {
+        const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      return resp;
+    } catch (err) {
+      lastError = err;
+      if (attempt < maxAttempts && isTransientNetworkError(err)) {
+        const delayMs = baseDelayMs * Math.pow(2, attempt - 1);
+        await new Promise((r) => setTimeout(r, delayMs));
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(String(lastError || "LLM request failed after retries"));
+}
+
 export function getFastModel(config: AppConfig): string {
   return config.llm.fastModel || config.llm.model || "gemini-2.5-flash";
 }
@@ -121,6 +193,11 @@ export async function callAgentLlm(params: {
       throw new Error(`API Key is not configured for provider ${ep.providerId}`);
     }
 
+    const hasFastFallback =
+      usedTier === "deep" &&
+      (primaryEndpoint.model !== fastEndpoint.model ||
+        primaryEndpoint.baseUrl !== fastEndpoint.baseUrl);
+
     if (
       params.enableWebSearch &&
       !params.jsonMode &&
@@ -132,6 +209,7 @@ export async function callAgentLlm(params: {
         apiKey: effectiveApiKey,
         model: ep.model,
         tierUsed: usedTier,
+        retryHttpStatuses: !hasFastFallback,
       });
     }
     const text = await executeOpenAICompatibleCall({
@@ -139,6 +217,7 @@ export async function callAgentLlm(params: {
       baseUrl: effectiveBaseUrl,
       apiKey: effectiveApiKey,
       model: ep.model,
+      retryHttpStatuses: !hasFastFallback,
     });
     return { text, modelUsed: ep.model, tierUsed: usedTier };
   };
@@ -175,6 +254,7 @@ async function executeGeminiGroundedSearchCall(params: {
   images?: MultimodalImageInput[];
   temperature?: number;
   timeoutMs?: number;
+  retryHttpStatuses?: boolean;
 }): Promise<LlmCallResult> {
   const nativeBase = (params.baseUrl || params.config.llm.baseUrl)
     .replace(/\/+$/, "")
@@ -184,31 +264,35 @@ async function executeGeminiGroundedSearchCall(params: {
     params.apiKey || params.config.llm.apiKey
   )}`;
 
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    signal: AbortSignal.timeout(params.timeoutMs ?? 60_000),
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: {
-        parts: [{ text: params.systemPrompt }],
-      },
-      contents: [
-        {
-          role: "user",
-          parts: [
-            { text: params.userPrompt },
-            ...(params.images || []).map(img => ({
-              inlineData: { mimeType: img.mimeType, data: img.base64Data },
-            })),
-          ],
+  const resp = await fetchWithTransientRetry(
+    endpoint,
+    () => ({
+      method: "POST",
+      signal: AbortSignal.timeout(params.timeoutMs ?? 60_000),
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: {
+          parts: [{ text: params.systemPrompt }],
         },
-      ],
-      tools: [{ google_search: {} }],
-      generationConfig: {
-        temperature: params.temperature ?? 0.25,
-      },
+        contents: [
+          {
+            role: "user",
+            parts: [
+              { text: params.userPrompt },
+              ...(params.images || []).map(img => ({
+                inlineData: { mimeType: img.mimeType, data: img.base64Data },
+              })),
+            ],
+          },
+        ],
+        tools: [{ google_search: {} }],
+        generationConfig: {
+          temperature: params.temperature ?? 0.25,
+        },
+      }),
     }),
-  });
+    { retryHttpStatuses: params.retryHttpStatuses }
+  );
 
   if (!resp.ok) {
     const errText = await resp.text();
@@ -269,6 +353,7 @@ async function executeOpenAICompatibleCall(params: {
   jsonMode?: boolean;
   temperature?: number;
   timeoutMs?: number;
+  retryHttpStatuses?: boolean;
 }): Promise<string> {
   const endpoint = `${(params.baseUrl || params.config.llm.baseUrl).replace(/\/+$/, "")}/chat/completions`;
 
@@ -294,19 +379,33 @@ async function executeOpenAICompatibleCall(params: {
     ],
   };
 
-  if (params.jsonMode) {
-    body.response_format = { type: "json_object" };
-  }
+  const sendRequest = (useJsonObjectFormat: boolean) => {
+    const reqBody: Record<string, any> = {
+      ...body,
+      ...(useJsonObjectFormat ? { response_format: { type: "json_object" } } : {}),
+    };
+    if (!useJsonObjectFormat) {
+      delete reqBody.response_format;
+    }
+    return fetchWithTransientRetry(
+      endpoint,
+      () => ({
+        method: "POST",
+        signal: AbortSignal.timeout(params.timeoutMs ?? 60_000),
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${params.apiKey || params.config.llm.apiKey}`,
+        },
+        body: JSON.stringify(reqBody),
+      }),
+      { retryHttpStatuses: params.retryHttpStatuses }
+    );
+  };
 
-  const resp = await fetch(endpoint, {
-    method: "POST",
-    signal: AbortSignal.timeout(params.timeoutMs ?? 60_000),
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${params.apiKey || params.config.llm.apiKey}`,
-    },
-    body: JSON.stringify(body),
-  });
+  let resp = await sendRequest(Boolean(params.jsonMode));
+  if (params.jsonMode && resp.status === 400) {
+    resp = await sendRequest(false);
+  }
 
   if (!resp.ok) {
     const errText = await resp.text();

@@ -136,7 +136,7 @@ export class ContextDatabase {
         media_type TEXT NOT NULL DEFAULT 'text',
         media_path TEXT NOT NULL DEFAULT ''
       );
-      CREATE TABLE IF NOT EXISTS operation_locks (name TEXT PRIMARY KEY, pid INTEGER NOT NULL, owner TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS operation_locks (name TEXT PRIMARY KEY, pid INTEGER NOT NULL, owner TEXT NOT NULL, acquired_at INTEGER NOT NULL DEFAULT 0);
 
       CREATE TABLE IF NOT EXISTS conversation_turns (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -192,21 +192,63 @@ export class ContextDatabase {
     try {
       this.db.exec("ALTER TABLE agent_tasks ADD COLUMN heartbeat_at TEXT NOT NULL DEFAULT ''");
     } catch {}
+    try {
+      this.db.exec("ALTER TABLE operation_locks ADD COLUMN acquired_at INTEGER NOT NULL DEFAULT 0");
+    } catch {}
   }
 
-  public async withLock<T>(name: string, action: () => Promise<T>): Promise<T> {
+  public isLockHeld(name: string, ttlMs = 15 * 60 * 1000): boolean {
+    const row = this.db
+      .query("SELECT pid, acquired_at FROM operation_locks WHERE name = ?")
+      .get(name) as { pid: number; acquired_at?: number } | null;
+    if (!row) return false;
+    if (row.acquired_at && row.acquired_at > 0 && Date.now() - row.acquired_at > ttlMs) {
+      return false;
+    }
+    try {
+      process.kill(row.pid, 0);
+      return true;
+    } catch (e: any) {
+      if (e.code === "ESRCH") return false;
+      return true;
+    }
+  }
+
+  public async withLock<T>(
+    name: string,
+    action: () => Promise<T>,
+    options?: { ttlMs?: number }
+  ): Promise<T> {
     const owner = randomUUID();
+    const ttlMs = options?.ttlMs ?? 15 * 60 * 1000;
+    const nowMs = Date.now();
     this.db.transaction(() => {
-      const row = this.db.query("SELECT pid FROM operation_locks WHERE name = ?").get(name) as { pid: number } | null;
+      const row = this.db
+        .query("SELECT pid, acquired_at FROM operation_locks WHERE name = ?")
+        .get(name) as { pid: number; acquired_at?: number } | null;
       if (row) {
         let alive = true;
-        try { process.kill(row.pid, 0); } catch (e: any) { if (e.code === "ESRCH") alive = false; }
-        if (alive) throw new Error(`Operation busy: ${name}`);
+        try {
+          process.kill(row.pid, 0);
+        } catch (e: any) {
+          if (e.code === "ESRCH") alive = false;
+        }
+        const expired =
+          Boolean(row.acquired_at && row.acquired_at > 0 && nowMs - row.acquired_at > ttlMs);
+        if (alive && !expired) throw new Error(`Operation busy: ${name}`);
       }
-      this.db.query("INSERT OR REPLACE INTO operation_locks (name, pid, owner) VALUES (?, ?, ?)").run(name, process.pid, owner);
+      this.db
+        .query(
+          "INSERT OR REPLACE INTO operation_locks (name, pid, owner, acquired_at) VALUES (?, ?, ?, ?)"
+        )
+        .run(name, process.pid, owner, nowMs);
     }).immediate();
-    try { return await action(); } finally {
-      this.db.query("DELETE FROM operation_locks WHERE name = ? AND owner = ?").run(name, owner);
+    try {
+      return await action();
+    } finally {
+      this.db
+        .query("DELETE FROM operation_locks WHERE name = ? AND owner = ?")
+        .run(name, owner);
     }
   }
 
@@ -402,6 +444,28 @@ export class ContextDatabase {
       )
       .all(senderId, limit) as ConversationTurnRecord[];
     return rows.reverse();
+  }
+
+  public listConversationTurns(options?: {
+    intent?: string;
+    limit?: number;
+  }): ConversationTurnRecord[] {
+    const limit = options?.limit ?? 20;
+    if (options?.intent) {
+      return this.db
+        .query(
+          `SELECT * FROM conversation_turns
+           WHERE intent = ?
+           ORDER BY id DESC LIMIT ?`
+        )
+        .all(options.intent, limit) as ConversationTurnRecord[];
+    }
+    return this.db
+      .query(
+        `SELECT * FROM conversation_turns
+         ORDER BY id DESC LIMIT ?`
+      )
+      .all(limit) as ConversationTurnRecord[];
   }
 
   public enqueueAgentTask(
@@ -741,13 +805,14 @@ export class ContextDatabase {
 
   public getReadyPendingArticles(): ArticleRecord[] {
     const now = Date.now();
-    return this.db
+    const candidates = this.db
       .query(
         `SELECT * FROM articles
          WHERE status IN ('pending_extract', 'extracting', 'analyzing') AND ready_after <= ?
          ORDER BY id ASC`
       )
       .all(now) as ArticleRecord[];
+    return candidates.filter((item) => !this.isLockHeld(`article_${item.id}`));
   }
 
   public getArticleById(id: number): ArticleRecord | null {
