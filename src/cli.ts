@@ -17,6 +17,14 @@ import { renderQrCodeToTerminal } from "./clawbot/client.ts";
 import { scanLocalAgentClis } from "./agent/subagent_cli.ts";
 import { detectRequestedFormats } from "./agent/doc_exporter.ts";
 import { createHttpHandler, LOCAL_HOST } from "./http.ts";
+import { parseNaturalScheduleSpec } from "./scheduler/time_parser.ts";
+import {
+  describeCronExpression,
+  formatZonedDateTime,
+  getNextCronRunMs,
+  isValidCronExpression,
+} from "./scheduler/cron.ts";
+import { syncScheduledTasksToVaultQueue } from "./scheduler/vault_sync.ts";
 
 let config = loadConfig();
 const db = new ContextDatabase(config.dbPath);
@@ -924,6 +932,180 @@ async function main() {
       break;
     }
 
+    case "schedule":
+    case "schedules":
+    case "todo": {
+      const subCmd = (args[1] || "list").toLowerCase();
+      if (subCmd === "list" || subCmd.startsWith("--")) {
+        const statusFlag = getFlag("--status");
+        const tasks = db.listScheduledTasks({
+          status: statusFlag as any,
+          limit: Number(getFlag("--limit") ?? 50),
+        });
+        syncScheduledTasksToVaultQueue(config, db);
+        if (isJson) {
+          console.log(JSON.stringify({ ok: true, tasks }, null, 2));
+        } else {
+          console.log(`⏰ === 定时任务与待办事项 (${tasks.length} 项) ===`);
+          for (const t of tasks) {
+            const nextStr = t.next_run_at
+              ? formatZonedDateTime(t.next_run_at, t.timezone || "Asia/Shanghai")
+              : "无";
+            const ruleStr =
+              t.schedule_type === "cron"
+                ? `${t.cron_expr} (${describeCronExpression(t.cron_expr)})`
+                : t.is_default_time
+                  ? "单次 (默认20:00兜底)"
+                  : "单次";
+            console.log(
+              `  #${t.id} [${t.status}] (${t.task_kind}) ${t.title} | 规则: ${ruleStr} | 下次触发: ${nextStr}`
+            );
+          }
+        }
+        break;
+      }
+
+      if (subCmd === "add" || subCmd === "create") {
+        const rawText = args
+          .slice(2)
+          .filter((a) => !a.startsWith("--"))
+          .join(" ")
+          .trim();
+        const cronFlag = getFlag("--cron");
+        const promptFlag = getFlag("--prompt");
+        if (!rawText && !promptFlag) {
+          console.error(
+            '用法: bun run src/cli.ts schedule add "提醒我今天下午4点半给招行回电话" [--cron "30 8 * * *"] [--json]'
+          );
+          process.exit(1);
+        }
+        const effectiveText = rawText || promptFlag || "";
+        const spec = parseNaturalScheduleSpec(effectiveText);
+        let scheduleType = spec.scheduleType;
+        let cronExpr = spec.cronExpr;
+        let nextRunAt = spec.nextRunAt;
+        let isDefaultTime = spec.isDefaultTime;
+        if (cronFlag && isValidCronExpression(cronFlag)) {
+          scheduleType = "cron";
+          cronExpr = cronFlag.trim();
+          nextRunAt = getNextCronRunMs(cronExpr, Date.now(), "Asia/Shanghai");
+          isDefaultTime = false;
+        }
+        const created = db.createScheduledTask({
+          senderId: pipeline.clawbot.resolveDefaultRecipient() || "",
+          title: spec.cleanedTitle || effectiveText.slice(0, 80),
+          taskKind: spec.taskKind,
+          scheduleType,
+          cronExpr,
+          timezone: "Asia/Shanghai",
+          nextRunAt,
+          isDefaultTime,
+          actionPayload: {
+            executor:
+              spec.taskKind === "digest"
+                ? "web_search_digest"
+                : "reminder_push",
+            prompt: promptFlag || effectiveText,
+            includeVaultNow: true,
+            includeRecentArticlesHours: 24,
+            archiveToVault: true,
+          },
+        });
+        const queuePath = syncScheduledTasksToVaultQueue(config, db);
+        if (isJson) {
+          console.log(
+            JSON.stringify({ ok: true, task: created, queuePath }, null, 2)
+          );
+        } else {
+          console.log(
+            `✅ 已创建定时任务 #${created.id}: ${created.title} (下次触发: ${
+              created.next_run_at
+                ? formatZonedDateTime(created.next_run_at, "Asia/Shanghai")
+                : "待定"
+            })`
+          );
+        }
+        break;
+      }
+
+      if (subCmd === "done" || subCmd === "complete") {
+        const id = Number(args[2]);
+        if (!Number.isFinite(id) || id <= 0) {
+          console.error("用法: bun run src/cli.ts schedule done <id>");
+          process.exit(1);
+        }
+        const updated = db.updateScheduledTask(id, {
+          status: "completed",
+          next_run_at: null,
+          last_run_at: new Date().toISOString(),
+        });
+        if (!updated) {
+          console.error(`未找到定时任务 #${id}`);
+          process.exit(1);
+        }
+        syncScheduledTasksToVaultQueue(config, db);
+        if (isJson) {
+          console.log(JSON.stringify({ ok: true, task: updated }, null, 2));
+        } else {
+          console.log(`✅ 已完成任务 #${updated.id}: ${updated.title}`);
+        }
+        break;
+      }
+
+      if (subCmd === "cancel" || subCmd === "delete") {
+        const id = Number(args[2]);
+        if (!Number.isFinite(id) || id <= 0) {
+          console.error("用法: bun run src/cli.ts schedule cancel <id>");
+          process.exit(1);
+        }
+        const updated = db.updateScheduledTask(id, {
+          status: "cancelled",
+          next_run_at: null,
+        });
+        if (!updated) {
+          console.error(`未找到定时任务 #${id}`);
+          process.exit(1);
+        }
+        syncScheduledTasksToVaultQueue(config, db);
+        if (isJson) {
+          console.log(JSON.stringify({ ok: true, task: updated }, null, 2));
+        } else {
+          console.log(`🗑️ 已取消任务 #${updated.id}: ${updated.title}`);
+        }
+        break;
+      }
+
+      if (subCmd === "run") {
+        const id = args[2] && !args[2].startsWith("--") ? Number(args[2]) : undefined;
+        const outcomes = await pipeline.drainScheduledTasks({
+          forceTaskId: id,
+        });
+        if (pipeline.clawbot.isConfigured()) {
+          await pipeline.flushReplies({ ignoreBusy: true });
+        }
+        if (isJson) {
+          console.log(JSON.stringify({ ok: true, outcomes }, null, 2));
+        } else {
+          console.log(
+            `⚡ 已执行定时任务调度 (触发 ${outcomes.length} 项)`
+          );
+          for (const o of outcomes) {
+            console.log(
+              `  - #${o.taskId} ${o.title} -> ${o.status}${
+                o.depositedPath ? ` (归档: ${o.depositedPath})` : ""
+              }`
+            );
+          }
+        }
+        break;
+      }
+
+      console.error(
+        "未知的 schedule 子命令。可用: list | add | run [<id>] | done <id> | cancel <id>"
+      );
+      process.exit(1);
+    }
+
     default: {
       console.log(`wechat-as-context (wx-ctx) — 微信公众号文章 -> 个人知识库 & AI Agent 桥接工具
 
@@ -938,6 +1120,7 @@ async function main() {
   bun run src/cli.ts reanalyze <id> [--force] [--send]     重新执行单篇文章的模型初筛（可将未完成模型分析的本地摘录升级为完整伴读）
   bun run src/cli.ts recent [--intent <i>] [--json]        查看最近的非文章类微信消息、收集箱速记 (inbox)、想法与 Agent 任务记录
   bun run src/cli.ts inbox [--limit <n>] [--json]          查看最近通过微信转发存入 01_inputs/inbox/ 的速记与备忘记录
+  bun run src/cli.ts schedule [list|add|run|done|cancel]   管理微信待办提醒与周期性信息收集定时任务 (同步 00_home/queue.md)
   bun run src/cli.ts ingest <url> [--note "关注点"]         手动/测试抓取一篇公众号文章并生成知识库初筛卡
   bun run src/cli.ts sync                                  主动从「微信ClawBot [AI]」拉取离线期间发送的文章
   bun run src/cli.ts push [text] [--file <path>] [--formats md,html,pdf] [--article <id>]

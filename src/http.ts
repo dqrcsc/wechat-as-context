@@ -1,7 +1,10 @@
-import { ContextDatabase } from "./db.ts";
+import { ContextDatabase, ScheduledTaskKind, ScheduledTaskStatus } from "./db.ts";
 import { WeChatContextPipeline, normalizeWeChatUrl } from "./pipeline.ts";
 import { scanLocalAgentClis } from "./agent/subagent_cli.ts";
 import { detectRequestedFormats } from "./agent/doc_exporter.ts";
+import { parseNaturalScheduleSpec } from "./scheduler/time_parser.ts";
+import { getNextCronRunMs, isValidCronExpression } from "./scheduler/cron.ts";
+import { syncScheduledTasksToVaultQueue } from "./scheduler/vault_sync.ts";
 import {
   buildConfigApiPayload,
   handleFetchProviderModels,
@@ -126,6 +129,116 @@ export function createHttpHandler(db: ContextDatabase, pipeline: WeChatContextPi
           queueOnly: Boolean(body?.queueOnly),
         });
         return Response.json(result, { status: result.ok ? 200 : 502 });
+      } catch (error: any) {
+        return Response.json(
+          { ok: false, error: error?.message || String(error) },
+          { status: 400 }
+        );
+      }
+    }
+    if (url.pathname === "/api/schedules" && req.method === "GET") {
+      const statusParam = url.searchParams.get("status") || undefined;
+      const tasks = db.listScheduledTasks({
+        status: statusParam as ScheduledTaskStatus | undefined,
+        limit: 100,
+      });
+      return Response.json({ ok: true, tasks });
+    }
+    if (url.pathname === "/api/schedules" && req.method === "POST") {
+      try {
+        if (!req.headers.get("content-type")?.startsWith("application/json")) {
+          return new Response("Expected application/json", { status: 415 });
+        }
+        const body = (await req.json()) as {
+          action?: "create" | "complete" | "cancel" | "run";
+          id?: number;
+          text?: string;
+          title?: string;
+          taskKind?: ScheduledTaskKind;
+          cronExpr?: string;
+          nextRunAt?: number;
+        };
+        const action = body?.action || "create";
+
+        if (action === "complete" || action === "cancel") {
+          const id = Number(body?.id);
+          if (!Number.isFinite(id) || id <= 0) {
+            throw new Error("Valid task id is required");
+          }
+          const existing = db.getScheduledTaskById(id);
+          if (!existing) {
+            return Response.json(
+              { ok: false, error: `Scheduled task #${id} not found` },
+              { status: 404 }
+            );
+          }
+          const updated = db.updateScheduledTask(id, {
+            status: action === "complete" ? "completed" : "cancelled",
+            next_run_at: null,
+            ...(action === "complete"
+              ? { last_run_at: new Date().toISOString() }
+              : {}),
+          });
+          syncScheduledTasksToVaultQueue(pipeline.config, db);
+          return Response.json({ ok: true, task: updated });
+        }
+
+        if (action === "run") {
+          const id = Number(body?.id);
+          if (!Number.isFinite(id) || id <= 0) {
+            throw new Error("Valid task id is required");
+          }
+          const outcomes = await pipeline.drainScheduledTasks({
+            forceTaskId: id,
+          });
+          if (pipeline.clawbot.isConfigured()) {
+            await pipeline.flushReplies({ ignoreBusy: true });
+          }
+          return Response.json({ ok: true, outcomes });
+        }
+
+        const rawText = String(body?.text || body?.title || "").trim();
+        if (!rawText) {
+          throw new Error("Schedule text or title is required");
+        }
+        const spec = parseNaturalScheduleSpec(rawText);
+        let scheduleType = spec.scheduleType;
+        let cronExpr = spec.cronExpr;
+        let nextRunAt = spec.nextRunAt;
+        let isDefaultTime = spec.isDefaultTime;
+
+        if (body?.cronExpr && isValidCronExpression(body.cronExpr)) {
+          scheduleType = "cron";
+          cronExpr = body.cronExpr.trim();
+          nextRunAt = getNextCronRunMs(cronExpr, Date.now(), "Asia/Shanghai");
+          isDefaultTime = false;
+        } else if (typeof body?.nextRunAt === "number" && body.nextRunAt > 0) {
+          scheduleType = "once";
+          nextRunAt = body.nextRunAt;
+          isDefaultTime = false;
+        }
+
+        const taskKind = body?.taskKind || spec.taskKind;
+        const created = db.createScheduledTask({
+          senderId: pipeline.clawbot.resolveDefaultRecipient() || "",
+          title: (body?.title || spec.cleanedTitle || rawText).slice(0, 80),
+          taskKind,
+          scheduleType,
+          cronExpr,
+          timezone: "Asia/Shanghai",
+          nextRunAt,
+          isDefaultTime,
+          actionPayload: {
+            executor:
+              taskKind === "digest" ? "web_search_digest" : "reminder_push",
+            prompt: rawText,
+            includeVaultNow: true,
+            includeRecentArticlesHours: 24,
+            archiveToVault: true,
+          },
+        });
+        syncScheduledTasksToVaultQueue(pipeline.config, db);
+        return Response.json({ ok: true, task: created });
       } catch (error: any) {
         return Response.json(
           { ok: false, error: error?.message || String(error) },

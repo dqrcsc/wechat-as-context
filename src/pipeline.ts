@@ -22,7 +22,8 @@ import { documentLevel } from "./storage.ts";
 import { WeChatAgentRuntime } from "./agent/runtime.ts";
 import { formatLiveTaskStatusReport, isTaskStatusQuery } from "./agent/progress.ts";
 import { DeliverableFormat, ensureMultiFormatDeliverables } from "./agent/doc_exporter.ts";
-import { detectExplicitCliBackend } from "./agent/router.ts";
+import { detectExplicitCliBackend, detectScheduleIntent } from "./agent/router.ts";
+import { ScheduledRunOutcome, TaskSchedulerEngine } from "./scheduler/engine.ts";
 
 export interface PushToWeChatOptions {
   text?: string;
@@ -62,12 +63,14 @@ export interface PushToWeChatResult {
 export class WeChatContextPipeline {
   public clawbot: WeChatClawBotClient;
   public agent: WeChatAgentRuntime;
+  public scheduler: TaskSchedulerEngine;
   private lastEnvMtimeMs = 0;
   private isDrainingArticles = false;
   private isDrainingAgents = false;
 
   constructor(public config: AppConfig, public db: ContextDatabase) {
     this.clawbot = new WeChatClawBotClient(db);
+    this.scheduler = new TaskSchedulerEngine(config, db, this.clawbot);
     this.agent = new WeChatAgentRuntime(
       config,
       db,
@@ -106,6 +109,7 @@ export class WeChatContextPipeline {
   public updateConfig(config: AppConfig): void {
     this.config = config;
     this.agent.updateConfig(config);
+    this.scheduler.config = config;
     this.lastEnvMtimeMs = this.getEnvFileMtimeMs();
   }
 
@@ -684,6 +688,7 @@ export class WeChatContextPipeline {
     if (unpacked.urls.some((u) => !isWeChatArticleUrl(u))) return true;
     const t = unpacked.userText.trim();
     if (detectExplicitCliBackend(t)) return true;
+    if (detectScheduleIntent(t)) return true;
     if (
       /^(?:\/help|help|帮助|功能|菜单|问|查询|检索|搜索|查一下|搜一下|找一下|ask|\?|待办|备忘|速记|提醒我|todo|inbox)/i.test(
         t
@@ -693,6 +698,14 @@ export class WeChatContextPipeline {
       return true;
     }
     return false;
+  }
+
+  public async drainScheduledTasks(options?: {
+    nowMs?: number;
+    forceTaskId?: number;
+  }): Promise<ScheduledRunOutcome[]> {
+    this.refreshConfigFromDiskIfChanged();
+    return this.scheduler.tick(options);
   }
 
   public async drainAgentQueue(): Promise<number> {
@@ -1154,13 +1167,15 @@ export class WeChatContextPipeline {
         void (async () => {
           const aCount = await this.drainAgentQueue();
           const rList = await this.drainReadyQueue();
-          if (aCount > 0 || rList.length > 0) {
+          const sList = await this.drainScheduledTasks();
+          if (aCount > 0 || rList.length > 0 || sList.length > 0) {
             await this.flushReplies({ ignoreBusy: true });
           }
         })().catch((e) => console.error("[BackgroundDrain]", e));
       } else {
         await this.drainAgentQueue();
         await this.drainReadyQueue();
+        await this.drainScheduledTasks();
         await this.flushReplies({ ignoreBusy: true });
       }
       return count;

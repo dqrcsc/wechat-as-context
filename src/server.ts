@@ -39,12 +39,13 @@ console.log(
   `   Agent Models:     Fast=${config.llm.fastModel || config.llm.model} | Pro=${config.llm.proModel || "gemini-2.5-pro"}`
 );
 
-// Background queue drainer (checks annotation wait windows, pending agent tasks & outbox retries every 5 seconds)
+// Background queue drainer (checks annotation wait windows, pending agent tasks, due scheduled tasks & outbox retries every 5 seconds)
 setInterval(async () => {
   try {
     rotateDaemonLogsIfOversized(config.dataDir);
     await pipeline.drainAgentQueue();
     await pipeline.drainReadyQueue();
+    await pipeline.drainScheduledTasks();
     if (pipeline.clawbot.isConfigured()) {
       await pipeline.flushReplies({ enforceRetryBackoff: true, ignoreBusy: true });
     }

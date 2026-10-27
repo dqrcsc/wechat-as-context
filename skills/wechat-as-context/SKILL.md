@@ -28,10 +28,12 @@ bun run {{PROJECT_ROOT}}/src/cli.ts show <id> --json
 当用户询问**非公众号链接的微信转发内容**（如转发的老师课堂笔记、备忘速记、灵感想法、近期问答或后台长任务状态）时，执行：
 
 ```bash
-# 查看最近的微信对话记录（含 capture_inbox、capture_idea、vault_query、delegate_subagent）与异步任务队列
+# 查看最近的微信对话记录（含 capture_inbox、capture_idea、manage_schedule、vault_query、delegate_subagent）与异步任务队列
 bun run {{PROJECT_ROOT}}/src/cli.ts recent --json
 # 仅查看最近存入 01_inputs/inbox/ 的微信收集箱速记/转发笔记（及其完整 user_text 与 deposited_path）
 bun run {{PROJECT_ROOT}}/src/cli.ts inbox --json
+# 查看和管理定时任务、周期早报与待办提醒（支持 list / add / run / done / cancel，自动同步 00_home/queue.md）
+bun run {{PROJECT_ROOT}}/src/cli.ts schedule list --json
 # 仅查看最近 Agent 异步任务状态
 bun run {{PROJECT_ROOT}}/src/cli.ts tasks --json
 ```

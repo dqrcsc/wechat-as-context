@@ -10,10 +10,12 @@ import {
   detectWantsFileDelivery,
   isDocumentGenerationTask,
 } from "./doc_exporter.ts";
+import { formatZonedDateTime } from "../scheduler/cron.ts";
 
 export type AgentIntentKind =
   | "capture_idea"
   | "capture_inbox"
+  | "manage_schedule"
   | "ingest_link"
   | "article_followup"
   | "vault_query"
@@ -50,6 +52,12 @@ export interface IntentDecision {
     isTaskRetryOrCorrection?: boolean;
     documentTitle?: string;
     documentSlug?: string;
+    scheduleSubAction?: "create" | "list" | "update" | "complete" | "cancel" | "run_now";
+    scheduleTaskKind?: "reminder" | "todo" | "digest" | "agent_task";
+    scheduleType?: "once" | "cron";
+    cronExpr?: string;
+    runAtIso?: string;
+    targetTaskId?: number;
   };
 }
 
@@ -167,6 +175,12 @@ export async function classifyMessageIntent(params: {
         triageHint: "process_now",
       },
     };
+  }
+
+  // 3.2 Deterministic fast-path for unambiguous schedule / reminder / todo / recurring digest management
+  const explicitSchedule = detectScheduleIntent(text, referencedArticle, recentArticle);
+  if (explicitSchedule) {
+    return explicitSchedule;
   }
 
   // 3.5 Deterministic fast-path for task correction / retry ("不是这个，是你帮我生成...你看看我之前的需求")
@@ -319,31 +333,37 @@ async function callLlmIntentRouter(params: {
     ? `引用标题: ${unpacked.refContext.title || "无"}\n引用正文: ${(unpacked.refContext.quotedText || "").slice(0, 300)}\n局部划词(partial_text): ${unpacked.refContext.partialText || "无"}`
     : "（用户未引用历史消息）";
 
+  const nowLocalStr = formatZonedDateTime(Date.now(), "Asia/Shanghai");
   const cliChain = config.llm.cliRoutingChain ?? ["agy", "codex"];
   const systemPrompt = `你是用户的随身个人助理兼第二大脑（Personal Knowledge Base: ${config.vaultRoot}）的「意图识别与模型复杂度调度器」。
+当前本地时间：${nowLocalStr} (Asia/Shanghai)。
 用户在手机微信上向你发送了一条消息（可能是打字、语音转文字或长按引用追问）。请精准判断用户的真实意图（intent）、任务复杂度（complexity）以及结构化交付槽位（slots）。
 
 ### 可选意图 (intent) 枚举与定义：
 1. "capture_idea"：用户表达了自己的**原创思考、个人判断、假说、灵感、洞见**（即使没有写“想法：”前缀，只要是用户有价值的个人观点/洞察，或者说“把刚才我们聊的这点存成想法”），应归入个人想法种子库 \`03_ideas/seeds/\`。
-2. "capture_inbox"：用户想随手记录一条**日常备忘、待办事项（Todo）、日程提醒、临时摘抄或未分类碎片**（例如“记一下明天下午开会”、“存一下这个备忘”），归入 \`01_inputs/inbox/\`。
-3. "article_followup"：用户正在针对**被引用的文章**或**刚刚发送的公众号/网页文章**进行互动。细分子动作 \`articleSubAction\`：
+2. "capture_inbox"：用户想随手记录一条**纯静态备忘、临时摘抄或未分类碎片**（不需要定时推送提醒，例如“备忘：某书推荐书单”、“存一下这段会议纪要”），归入 \`01_inputs/inbox/\`。
+3. "manage_schedule"：用户希望**创建、查看、修改、完成、取消或立即运行「待办事项 (Todo)、定时提醒 (Reminder) 或周期性信息收集/简报推送任务 (Digest)」**。包括但不限于：
+   - 创建单次或周期提醒/待办（如“提醒我今天下午4点半给招行回电话”、“20分钟后提醒我关火”、“待办：买咖啡豆”）；
+   - 创建每天/每周定时信息收集与简报推送（如“每天早上8点半帮我搜一下 AI Agent 最新动态整理早报发我”、“每天晚上9点汇总今天收藏的文章发我”）；
+   - 查看、修改时间、标记完成、取消或立即触发待办与定时任务（如“看看我的待办和定时任务”、“完成 #12”、“取消早报任务”、“把 #12 改到明早9点”）。
+4. "article_followup"：用户正在针对**被引用的文章**或**刚刚发送的公众号/网页文章**进行互动。细分子动作 \`articleSubAction\`：
    - "annotate"：对文章补充一句简短评价或关注点批注；
    - "triage"：调整文章分诊状态（如“这篇只留作参考”->reference，“加入优先精读”->process_now，“只存原文”->keep_raw）；
    - "qa"：针对那篇文章的具体内容提问、追问细节；
    - "deepen"：要求现在对那篇文章进行深度阅读拆解、批判性分析或升级伴读笔记。
-4. "vault_query"：用户正在**单纯查询、检索或提问他的个人知识库/历史收藏文章**（不需要生成新文档文件导出，只要求在微信里回答，例如“我之前关于本体论的大纲写到哪了？”、“查一下我知识库里关于上下文工程的观点”）。
-5. "web_search"：用户希望**单纯联网检索外部公开信息并在微信里回答**（不要求结合知识库撰写长篇指南或导出多格式文件，例如“帮我上网搜一下最近 Anthropic 发布了什么”、“查一下最新的 Bun 版本特性”）。
-6. "generate_image"：用户要求**画图、生成概念插图、生成文章配图或视觉海报**（将转交本机 AGY 或 Codex CLI 调用内置生图工具生成图片并发回微信）。
-7. "delegate_subagent"：需要执行**复合深度研究、撰写学习指南/报告/长文并导出文件（如 md/html/pdf）、或多文件知识库深度治理**。包括但不限于：
+5. "vault_query"：用户正在**单纯查询、检索或提问他的个人知识库/历史收藏文章**（不需要生成新文档文件导出，只要求在微信里回答，例如“我之前关于本体论的大纲写到哪了？”、“查一下我知识库里关于上下文工程的观点”）。
+6. "web_search"：用户希望**单纯立即联网检索外部公开信息并在微信里回答**（非周期性定时任务，也不要求结合知识库撰写长篇指南或导出多格式文件，例如“帮我上网搜一下最近 Anthropic 发布了什么”、“查一下最新的 Bun 版本特性”）。
+7. "generate_image"：用户要求**画图、生成概念插图、生成文章配图或视觉海报**（将转交本机 AGY 或 Codex CLI 调用内置生图工具生成图片并发回微信）。
+8. "delegate_subagent"：需要执行**单次立即执行的复合深度研究、撰写学习指南/报告/长文并导出文件（如 md/html/pdf）、或多文件知识库深度治理**。包括但不限于：
    - **复合检索+综合写作+多格式文件生成交付**：例如“帮我搜一下 Andrej Karpathy 的 LLM Wiki，结合我的知识库构建过程整理一份新手学习指南，生成 markdown/html/pdf 格式发给我”；
    - **对前序复杂任务的纠偏或重做要求**：例如用户说“不是这个，是你帮我生成中文版适合新手的指南啊，你看看我之前的需求”；
    - **知识库治理与研发任务**：把文章升级为第二阶段 deep 并更新主题页、同步读书笔记、巡检整理 inbox、深入调研 arXiv 论文、或修改本地项目代码。
-8. "send_file"：用户要求把**知识库里已有的某篇笔记、伴读卡或刚刚已生成好的文件**发送到微信上（例如“把伴读笔记发文件给我”、“把原文发我看看”、“把 now.md 发给我”）。
+9. "send_file"：用户要求把**知识库里已有的某篇笔记、伴读卡或刚刚已生成好的文件**发送到微信上（例如“把伴读笔记发文件给我”、“把原文发我看看”、“把 now.md 发给我”）。
    - ⚠️ 注意：如果用户要求**新生成/整理**一份指南或报告并发给他（如“整理一个指南，生成 md/html/pdf 发给我”），或者指出刚才发错了文件、要求按之前需求**生成**新指南（“不是这个，是你帮我生成中文版指南”），必须归类为 \`"delegate_subagent"\` 而不是 \`"send_file"\`！
-9. "general_assistant"：日常自由对话、技术方案探讨、头脑风暴、问题解答、翻译润色、或查看助手帮助说明。
+10. "general_assistant"：日常自由对话、技术方案探讨、头脑风暴、问题解答、翻译润色、或查看助手帮助说明。
 
 ### 复杂度 (complexity) 与结构化槽位 (slots) 评估准则：
-- "fast"：简单想法记录、备忘速记、文章批注/分诊修改、直接发送已有文件、简单事实查找、快速联网信息检索、日常轻量问答。
+- "fast"：简单想法记录、备忘速记、待办提醒与定时任务管理（manage_schedule）、文章批注/分诊修改、直接发送已有文件、简单事实查找、快速联网信息检索、日常轻量问答。
 - "deep"：
   1. 跨多篇知识库笔记的深度综合对比、理论体系推演、研究进度与规划建议；
   2. 复合型任务（外部检索 + 结合个人知识库 + 撰写指南/报告 + 生成多格式文件如 md/html/pdf 并推送微信）；
@@ -353,7 +373,7 @@ async function callLlmIntentRouter(params: {
 
 请严格输出合法的 JSON 对象（不要包含 Markdown 代码块包裹之外的多余文字）：
 {
-  "intent": "capture_idea | capture_inbox | article_followup | vault_query | web_search | generate_image | delegate_subagent | send_file | general_assistant",
+  "intent": "capture_idea | capture_inbox | manage_schedule | article_followup | vault_query | web_search | generate_image | delegate_subagent | send_file | general_assistant",
   "complexity": "fast | deep",
   "subagentTarget": "agy | codex | opencode | claude | gemini | aider（当 complexity=deep 或 intent 为 generate_image / delegate_subagent 时填写）",
   "reason": "简短说明意图与复杂度判断依据",
@@ -362,7 +382,7 @@ async function callLlmIntentRouter(params: {
     "articleSubAction": "annotate | triage | qa | deepen（仅 article_followup 时填写）",
     "triageHint": "keep_raw | reference | process_later | process_now（可选）",
     "searchQuery": "用于检索知识库或外部网页的核心关键词（空格分隔）",
-    "ideaTitle": "若为 capture_idea 或 capture_inbox，提炼一个简明标题",
+    "ideaTitle": "若为 capture_idea、capture_inbox 或 manage_schedule，提炼简明标题",
     "ideaSlug": "3到5个英文单词小写下划线短名，如 llm_wiki_beginner_guide",
     "coreContent": "整理后的用户核心任务指令（若是纠偏/继续前序任务，请合并前序对话中的完整原始需求！）",
     "fileTarget": "latest_note | latest_source | vault_file | recent_generated（仅 send_file 时填写）",
@@ -372,7 +392,13 @@ async function callLlmIntentRouter(params: {
     "needsWebSearch": true或false,
     "isTaskRetryOrCorrection": true或false,
     "documentTitle": "若用户要求撰写指南/报告/文档，提炼中文文档标题",
-    "documentSlug": "若用户要求撰写指南/报告/文档，提炼英文小写下划线文件名如 llm_wiki_beginner_guide"
+    "documentSlug": "若用户要求撰写指南/报告/文档，提炼英文小写下划线文件名如 llm_wiki_beginner_guide",
+    "scheduleSubAction": "create | list | update | complete | cancel | run_now（仅 manage_schedule 时填写）",
+    "scheduleTaskKind": "reminder | todo | digest | agent_task（仅 manage_schedule 时填写）",
+    "scheduleType": "once | cron（仅 manage_schedule 时填写）",
+    "cronExpr": "5段式Cron表达式如 30 8 * * *（可选）",
+    "runAtIso": "单次触发时间的ISO字符串（可选）",
+    "targetTaskId": 数字ID（当用户操作指定 #ID 定时任务时填写）
   }
 }`;
 
@@ -403,6 +429,7 @@ ${recentTurnsSummary}`;
   const validIntents: AgentIntentKind[] = [
     "capture_idea",
     "capture_inbox",
+    "manage_schedule",
     "ingest_link",
     "article_followup",
     "vault_query",
@@ -417,9 +444,13 @@ ${recentTurnsSummary}`;
     ? (parsed.intent as AgentIntentKind)
     : "general_assistant";
   const complexity: ModelTier =
-    parsed.complexity === "deep" || intent === "delegate_subagent" || intent === "generate_image"
-      ? "deep"
-      : "fast";
+    intent === "manage_schedule"
+      ? "fast"
+      : parsed.complexity === "deep" ||
+          intent === "delegate_subagent" ||
+          intent === "generate_image"
+        ? "deep"
+        : "fast";
   const explicitCli = detectExplicitCliBackend(unpacked.userText);
   const resolvedSubagent =
     explicitCli ||
@@ -489,8 +520,196 @@ ${recentTurnsSummary}`;
       isTaskRetryOrCorrection: parsed.slots?.isTaskRetryOrCorrection,
       documentTitle: parsed.slots?.documentTitle,
       documentSlug: parsed.slots?.documentSlug || parsed.slots?.ideaSlug,
+      scheduleSubAction: parsed.slots?.scheduleSubAction,
+      scheduleTaskKind: parsed.slots?.scheduleTaskKind,
+      scheduleType: parsed.slots?.scheduleType,
+      cronExpr: parsed.slots?.cronExpr,
+      runAtIso: parsed.slots?.runAtIso,
+      targetTaskId:
+        typeof parsed.slots?.targetTaskId === "number"
+          ? parsed.slots.targetTaskId
+          : undefined,
     },
   };
+}
+
+export function detectScheduleIntent(
+  text: string,
+  referencedArticle: ArticleRecord | null = null,
+  recentArticle: ArticleRecord | null = null
+): IntentDecision | null {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+
+  // 1. List schedules / todos / reminders
+  if (
+    /^(?:查看|看看|列出|显示|查询|我的)?\s*(?:所有|全部|当前)?\s*(?:待办事项|待办列表|待办清单|待办|提醒列表|我的提醒|定时任务|周期任务|早报任务|日报任务|日程列表|todo\s*list|todos|schedules)\s*(?:列表|清单)?[?？]?$/i.test(
+      trimmed
+    ) ||
+    /^(?:我有哪些|有什么|查看我的|看看我的)\s*(?:待办|提醒|定时任务|周期任务|早报|日报)/i.test(
+      trimmed
+    )
+  ) {
+    return {
+      intent: "manage_schedule",
+      complexity: "fast",
+      reason: "Explicit schedule/todo list query",
+      targetArticleId: null,
+      slots: {
+        coreContent: trimmed,
+        scheduleSubAction: "list",
+      },
+    };
+  }
+
+  // 2. Complete / mark done
+  if (
+    /^(?:完成|已完成|做完了|搞定了|勾掉|done|complete)\s*(?:待办|提醒|任务)?\s*(?:#\d+|\d+|.+)$/i.test(
+      trimmed
+    ) ||
+    /^(?:把|将)\s*(?:待办|提醒|定时任务|任务)?\s*(?:#\d+|.+?)\s*(?:标记为|设为)?(?:完成|已完成|做完了)$/i.test(
+      trimmed
+    )
+  ) {
+    const idMatch = trimmed.match(/#?(\d+)/);
+    return {
+      intent: "manage_schedule",
+      complexity: "fast",
+      reason: "Explicit schedule/todo completion command",
+      targetArticleId: null,
+      slots: {
+        coreContent: trimmed,
+        scheduleSubAction: "complete",
+        targetTaskId: idMatch ? Number.parseInt(idMatch[1], 10) : undefined,
+      },
+    };
+  }
+
+  // 3. Cancel / delete / pause
+  if (
+    /^(?:取消|删除|关掉|关闭|停用|暂停|cancel|delete)\s*(?:待办|提醒|定时任务|周期任务|早报任务|日报任务|早报|日报|任务)\s*(?:#\d+|\d+|.*)?$/i.test(
+      trimmed
+    ) ||
+    /^(?:取消|删除|关掉|暂停)\s*#\d+\b/i.test(trimmed)
+  ) {
+    const idMatch = trimmed.match(/#?(\d+)/);
+    return {
+      intent: "manage_schedule",
+      complexity: "fast",
+      reason: "Explicit schedule/todo cancellation command",
+      targetArticleId: null,
+      slots: {
+        coreContent: trimmed,
+        scheduleSubAction: "cancel",
+        targetTaskId: idMatch ? Number.parseInt(idMatch[1], 10) : undefined,
+      },
+    };
+  }
+
+  // 4. Run now / trigger immediately
+  if (
+    /^(?:立即执行|现在执行|现在跑一次|马上执行|立即触发|触发|测试执行|run)\s*(?:定时任务|周期任务|任务|早报|日报|简报)?\s*#?\d+/i.test(
+      trimmed
+    )
+  ) {
+    const idMatch = trimmed.match(/#?(\d+)/);
+    return {
+      intent: "manage_schedule",
+      complexity: "fast",
+      reason: "Explicit schedule immediate trigger command",
+      targetArticleId: null,
+      slots: {
+        coreContent: trimmed,
+        scheduleSubAction: "run_now",
+        targetTaskId: idMatch ? Number.parseInt(idMatch[1], 10) : undefined,
+      },
+    };
+  }
+
+  // 5. Reschedule / update existing task time
+  if (
+    /^(?:把|将)\s*(?:待办|提醒|定时任务|周期任务|任务|早报|日报)?\s*(?:#\d+|.+?)\s*(?:改到|推迟到|推迟|延后|提前到|调整到|改为|设为)\s*(.+)$/i.test(
+      trimmed
+    )
+  ) {
+    const idMatch = trimmed.match(/#(\d+)/);
+    return {
+      intent: "manage_schedule",
+      complexity: "fast",
+      reason: "Explicit schedule time update command",
+      targetArticleId: null,
+      slots: {
+        coreContent: trimmed,
+        scheduleSubAction: "update",
+        targetTaskId: idMatch ? Number.parseInt(idMatch[1], 10) : undefined,
+      },
+    };
+  }
+
+  // 6. Create recurring digest / info collection task or reminder
+  const isRecurring =
+    /(?:每天|每日|每晚|每早|每个?工作日|工作日每天|每周|每个?周末|每月)/i.test(
+      trimmed
+    );
+  const isDigestOrCollection =
+    /(?:搜一下|搜索|收集|整理|汇总|生成.*(?:早报|日报|晚报|简报|周报)|早报|日报|晚报|简报|动态|资讯)/i.test(
+      trimmed
+    );
+
+  if (
+    isRecurring &&
+    (isDigestOrCollection ||
+      /(?:提醒|通知|发给我|发我|推送|叫我|检查|巡检)/i.test(trimmed))
+  ) {
+    return {
+      intent: "manage_schedule",
+      complexity: "fast",
+      reason: "Recurring scheduled digest or reminder creation",
+      targetArticleId: referencedArticle?.id ?? null,
+      slots: {
+        coreContent: trimmed,
+        scheduleSubAction: "create",
+        scheduleTaskKind: isDigestOrCollection ? "digest" : "reminder",
+        scheduleType: "cron",
+        needsWebSearch: /(?:搜|检索|动态|最新|新闻|资讯|外部)/i.test(trimmed),
+      },
+    };
+  }
+
+  // 7. Create one-shot reminder or todo
+  const hasReminderKeyword =
+    /^(?:待办|提醒我|提醒|定时任务|定时|todo)\s*[:：]?\s*(.+)$/i.test(trimmed) ||
+    /(?:请|帮我|记得)?提醒我/i.test(trimmed) ||
+    /(?:(?:\d+|[一二两三四五六七八九十半]+)\s*(?:分钟|小时|个小时|天)后).*(?:提醒|叫我|通知|发消息|看|处理)/i.test(
+      trimmed
+    ) ||
+    /(?:定个?闹钟|设个?提醒|加个?待办|添加待办|创建待办|新建待办|创建定时任务)/i.test(
+      trimmed
+    );
+
+  if (hasReminderKeyword) {
+    const isTodoPrefix = /^(?:待办|todo|(?:加个?|添加|创建|新建)待办)/i.test(
+      trimmed
+    );
+    const mentionsArticle = /(?:这篇|这篇文章|刚才那篇)/i.test(trimmed);
+    const linkedArticleId =
+      referencedArticle?.id ??
+      (mentionsArticle ? recentArticle?.id ?? null : null);
+
+    return {
+      intent: "manage_schedule",
+      complexity: "fast",
+      reason: "Natural language reminder or todo creation",
+      targetArticleId: linkedArticleId,
+      slots: {
+        coreContent: trimmed,
+        scheduleSubAction: "create",
+        scheduleTaskKind: isTodoPrefix ? "todo" : "reminder",
+      },
+    };
+  }
+
+  return null;
 }
 
 export function buildHeuristicIntentDecision(params: {
@@ -504,7 +723,13 @@ export function buildHeuristicIntentDecision(params: {
   const text = unpacked.userText.trim();
   const targetArticle = referencedArticle ?? recentArticle;
 
-  // 0. Check generate_image intent first (before send_file, since user may say "画一张图发给我")
+  // 0. Check schedule / reminder / todo / recurring digest management first
+  const scheduleDecision = detectScheduleIntent(text, referencedArticle, recentArticle);
+  if (scheduleDecision) {
+    return scheduleDecision;
+  }
+
+  // 0.1 Check generate_image intent first (before send_file, since user may say "画一张图发给我")
   if (
     /(?:画一张|画一幅|画一只|画一个|画个.*图|生成一张.*图|生成一幅.*图|生成.*图片|生成.*配图|生成.*插图|生图|文生图|generate.*image)/i.test(
       text

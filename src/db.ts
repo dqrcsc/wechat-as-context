@@ -72,6 +72,63 @@ export interface AgentTaskRecord {
   updated_at: string;
 }
 
+export type ScheduledTaskKind = "reminder" | "todo" | "digest" | "agent_task";
+
+export type ScheduledTaskStatus =
+  | "active"
+  | "running"
+  | "completed"
+  | "paused"
+  | "cancelled";
+
+export interface ScheduledActionPayload {
+  executor:
+    | "reminder_push"
+    | "web_search_digest"
+    | "vault_digest"
+    | "agent_delegate";
+  prompt: string;
+  searchQueries?: string[];
+  includeVaultNow?: boolean;
+  includeRecentArticlesHours?: number;
+  archiveToVault?: boolean;
+  relatedArticleId?: number;
+  deliverables?: Array<"markdown" | "docx" | "pptx">;
+}
+
+export interface ScheduledTaskRecord {
+  id: number;
+  sender_id: string;
+  title: string;
+  task_kind: ScheduledTaskKind;
+  schedule_type: "once" | "cron";
+  cron_expr: string;
+  timezone: string;
+  next_run_at: number | null;
+  is_default_time: number;
+  action_payload: string; // JSON string of ScheduledActionPayload
+  status: ScheduledTaskStatus;
+  run_count: number;
+  last_run_at: string;
+  last_result_summary: string;
+  last_error: string;
+  related_article_id: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduledTaskRunRecord {
+  id: number;
+  task_id: number;
+  scheduled_for_ms: number;
+  started_at: string;
+  finished_at: string;
+  status: "running" | "succeeded" | "failed" | "skipped_misfire";
+  output_summary: string;
+  deposited_path: string;
+  error: string;
+}
+
 export class ContextDatabase {
   public db: Database;
 
@@ -169,6 +226,44 @@ export class ContextDatabase {
         updated_at TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status, id ASC);
+
+      CREATE TABLE IF NOT EXISTS scheduled_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender_id TEXT NOT NULL DEFAULT '',
+        title TEXT NOT NULL,
+        task_kind TEXT NOT NULL DEFAULT 'reminder',
+        schedule_type TEXT NOT NULL DEFAULT 'once',
+        cron_expr TEXT NOT NULL DEFAULT '',
+        timezone TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+        next_run_at INTEGER,
+        is_default_time INTEGER NOT NULL DEFAULT 0,
+        action_payload TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL DEFAULT 'active',
+        run_count INTEGER NOT NULL DEFAULT 0,
+        last_run_at TEXT NOT NULL DEFAULT '',
+        last_result_summary TEXT NOT NULL DEFAULT '',
+        last_error TEXT NOT NULL DEFAULT '',
+        related_article_id INTEGER,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_due
+        ON scheduled_tasks(status, next_run_at ASC);
+
+      CREATE TABLE IF NOT EXISTS scheduled_task_runs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        scheduled_for_ms INTEGER NOT NULL,
+        started_at TEXT NOT NULL,
+        finished_at TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'running',
+        output_summary TEXT NOT NULL DEFAULT '',
+        deposited_path TEXT NOT NULL DEFAULT '',
+        error TEXT NOT NULL DEFAULT '',
+        UNIQUE(task_id, scheduled_for_ms)
+      );
+      CREATE INDEX IF NOT EXISTS idx_scheduled_task_runs_task
+        ON scheduled_task_runs(task_id, id DESC);
     `);
 
     try {
@@ -354,11 +449,20 @@ export class ContextDatabase {
       .query(
         `DELETE FROM reply_outbox
          WHERE status = 'sent'
-           AND rowid NOT IN (
-             SELECT rowid FROM reply_outbox ORDER BY rowid DESC LIMIT ?
-           )`
+          AND rowid NOT IN (
+            SELECT rowid FROM reply_outbox ORDER BY rowid DESC LIMIT ?
+          )`
       )
       .run(keepRecentOutbox);
+
+    this.db
+      .query(
+        `DELETE FROM scheduled_task_runs
+         WHERE status IN ('succeeded', 'failed', 'skipped_misfire')
+           AND started_at != ''
+           AND started_at <= ?`
+      )
+      .run(cutoffIso);
 
     return {
       agentTasksPruned: Number(taskRes.changes || 0),
@@ -883,5 +987,315 @@ export class ContextDatabase {
       .run(...values);
 
     return this.getArticleById(id);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Scheduled Tasks & Reminders
+  // ---------------------------------------------------------------------------
+
+  public createScheduledTask(params: {
+    senderId?: string;
+    title: string;
+    taskKind?: ScheduledTaskKind;
+    scheduleType?: "once" | "cron";
+    cronExpr?: string;
+    timezone?: string;
+    nextRunAt?: number | null;
+    isDefaultTime?: boolean | number;
+    actionPayload?: ScheduledActionPayload | string;
+    status?: ScheduledTaskStatus;
+    relatedArticleId?: number | null;
+    createdAt?: string;
+  }): ScheduledTaskRecord {
+    const nowIso = params.createdAt ?? new Date().toISOString();
+    const payloadStr =
+      typeof params.actionPayload === "string"
+        ? params.actionPayload
+        : JSON.stringify(
+            params.actionPayload ?? {
+              executor: "reminder_push",
+              prompt: params.title,
+            }
+          );
+    const isDefaultTimeInt = params.isDefaultTime ? 1 : 0;
+
+    const res = this.db
+      .query(
+        `INSERT INTO scheduled_tasks (
+          sender_id, title, task_kind, schedule_type, cron_expr, timezone,
+          next_run_at, is_default_time, action_payload, status,
+          related_article_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        params.senderId ?? "",
+        params.title.trim() || "未命名提醒",
+        params.taskKind ?? "reminder",
+        params.scheduleType ?? "once",
+        params.cronExpr ?? "",
+        params.timezone ?? "Asia/Shanghai",
+        params.nextRunAt === undefined ? null : params.nextRunAt,
+        isDefaultTimeInt,
+        payloadStr,
+        params.status ?? "active",
+        params.relatedArticleId ?? null,
+        nowIso,
+        nowIso
+      );
+
+    return this.getScheduledTaskById(Number(res.lastInsertRowid))!;
+  }
+
+  public getScheduledTaskById(id: number): ScheduledTaskRecord | null {
+    return this.db
+      .query("SELECT * FROM scheduled_tasks WHERE id = ?")
+      .get(id) as ScheduledTaskRecord | null;
+  }
+
+  public listScheduledTasks(options?: {
+    status?: ScheduledTaskStatus | ScheduledTaskStatus[];
+    senderId?: string;
+    taskKind?: ScheduledTaskKind | ScheduledTaskKind[];
+    scheduleType?: "once" | "cron";
+    limit?: number;
+  }): ScheduledTaskRecord[] {
+    const clauses: string[] = [];
+    const params: (string | number)[] = [];
+
+    if (options?.status) {
+      if (Array.isArray(options.status)) {
+        if (options.status.length > 0) {
+          clauses.push(
+            `status IN (${options.status.map(() => "?").join(", ")})`
+          );
+          params.push(...options.status);
+        }
+      } else {
+        clauses.push("status = ?");
+        params.push(options.status);
+      }
+    }
+
+    if (options?.senderId) {
+      clauses.push("(sender_id = ? OR sender_id = '')");
+      params.push(options.senderId);
+    }
+
+    if (options?.taskKind) {
+      if (Array.isArray(options.taskKind)) {
+        if (options.taskKind.length > 0) {
+          clauses.push(
+            `task_kind IN (${options.taskKind.map(() => "?").join(", ")})`
+          );
+          params.push(...options.taskKind);
+        }
+      } else {
+        clauses.push("task_kind = ?");
+        params.push(options.taskKind);
+      }
+    }
+
+    if (options?.scheduleType) {
+      clauses.push("schedule_type = ?");
+      params.push(options.scheduleType);
+    }
+
+    const whereSql =
+      clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const limit = options?.limit ?? 100;
+    params.push(limit);
+
+    return this.db
+      .query(
+        `SELECT * FROM scheduled_tasks ${whereSql}
+         ORDER BY
+           CASE WHEN status = 'active' THEN 0 WHEN status = 'running' THEN 1 WHEN status = 'paused' THEN 2 ELSE 3 END ASC,
+           CASE WHEN next_run_at IS NULL THEN 1 ELSE 0 END ASC,
+           next_run_at ASC,
+           id DESC
+         LIMIT ?`
+      )
+      .all(...params) as ScheduledTaskRecord[];
+  }
+
+  public getDueScheduledTasks(
+    nowMs = Date.now(),
+    limit = 20
+  ): ScheduledTaskRecord[] {
+    return this.db
+      .query(
+        `SELECT * FROM scheduled_tasks
+         WHERE status = 'active'
+           AND next_run_at IS NOT NULL
+           AND next_run_at <= ?
+         ORDER BY next_run_at ASC, id ASC
+         LIMIT ?`
+      )
+      .all(nowMs, limit) as ScheduledTaskRecord[];
+  }
+
+  public updateScheduledTask(
+    id: number,
+    fields: Partial<
+      Pick<
+        ScheduledTaskRecord,
+        | "title"
+        | "task_kind"
+        | "schedule_type"
+        | "cron_expr"
+        | "timezone"
+        | "next_run_at"
+        | "is_default_time"
+        | "action_payload"
+        | "status"
+        | "run_count"
+        | "last_run_at"
+        | "last_result_summary"
+        | "last_error"
+        | "related_article_id"
+      >
+    >
+  ): ScheduledTaskRecord | null {
+    const sets: string[] = ["updated_at = ?"];
+    const values: (string | number | null)[] = [new Date().toISOString()];
+
+    for (const [k, v] of Object.entries(fields)) {
+      if (v !== undefined) {
+        sets.push(`${k} = ?`);
+        values.push(v);
+      }
+    }
+    values.push(id);
+
+    this.db
+      .query(`UPDATE scheduled_tasks SET ${sets.join(", ")} WHERE id = ?`)
+      .run(...values);
+
+    return this.getScheduledTaskById(id);
+  }
+
+  public findScheduledTaskByQuery(
+    query: string,
+    options?: {
+      senderId?: string;
+      activeOnly?: boolean;
+    }
+  ): ScheduledTaskRecord | null {
+    const trimmed = String(query || "").trim();
+    const idMatch = trimmed.match(/(?:^|#|(?:任务|提醒|待办|日程)\s*#?)(\d+)\b/i);
+    if (idMatch?.[1]) {
+      const byId = this.getScheduledTaskById(Number.parseInt(idMatch[1], 10));
+      if (byId) return byId;
+    }
+
+    const statuses: ScheduledTaskStatus[] =
+      options?.activeOnly === false
+        ? ["active", "running", "paused", "completed", "cancelled"]
+        : ["active", "running", "paused"];
+
+    const candidates = this.listScheduledTasks({
+      status: statuses,
+      senderId: options?.senderId,
+      limit: 100,
+    });
+
+    if (candidates.length === 0) return null;
+
+    const cleanKeyword = trimmed
+      .replace(
+        /^(?:把|将|完成|已完成|做完了|取消|删除|关掉|停用|暂停|恢复|修改|调整|推迟|改期|立即执行|执行|运行)\s*/g,
+        ""
+      )
+      .replace(/(?:的)?(?:待办|提醒|定时任务|周期任务|早报|日报|任务)/g, "")
+      .trim()
+      .toLowerCase();
+
+    if (cleanKeyword) {
+      const exactOrSub = candidates.find(
+        (c) =>
+          c.title.toLowerCase().includes(cleanKeyword) ||
+          cleanKeyword.includes(c.title.toLowerCase())
+      );
+      if (exactOrSub) return exactOrSub;
+    }
+
+    // If user didn't give a keyword (e.g. "把刚才的提醒推迟1小时"), return the most recently created active task
+    const sortedByCreated = [...candidates].sort((a, b) => b.id - a.id);
+    return sortedByCreated[0] ?? null;
+  }
+
+  public recordScheduledTaskRun(params: {
+    taskId: number;
+    scheduledForMs: number;
+    startedAt?: string;
+    finishedAt?: string;
+    status?: "running" | "succeeded" | "failed" | "skipped_misfire";
+    outputSummary?: string;
+    depositedPath?: string;
+    error?: string;
+  }): ScheduledTaskRunRecord | null {
+    const startedAt = params.startedAt ?? new Date().toISOString();
+    this.db
+      .query(
+        `INSERT OR IGNORE INTO scheduled_task_runs (
+          task_id, scheduled_for_ms, started_at, finished_at,
+          status, output_summary, deposited_path, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        params.taskId,
+        params.scheduledForMs,
+        startedAt,
+        params.finishedAt ?? "",
+        params.status ?? "running",
+        params.outputSummary ?? "",
+        params.depositedPath ?? "",
+        params.error ?? ""
+      );
+
+    return this.db
+      .query(
+        `SELECT * FROM scheduled_task_runs
+         WHERE task_id = ? AND scheduled_for_ms = ?`
+      )
+      .get(params.taskId, params.scheduledForMs) as ScheduledTaskRunRecord | null;
+  }
+
+  public updateScheduledTaskRun(
+    id: number,
+    fields: Partial<
+      Pick<
+        ScheduledTaskRunRecord,
+        "finished_at" | "status" | "output_summary" | "deposited_path" | "error"
+      >
+    >
+  ): void {
+    const sets: string[] = [];
+    const values: (string | number)[] = [];
+    for (const [k, v] of Object.entries(fields)) {
+      if (v !== undefined) {
+        sets.push(`${k} = ?`);
+        values.push(v);
+      }
+    }
+    if (sets.length === 0) return;
+    values.push(id);
+    this.db
+      .query(`UPDATE scheduled_task_runs SET ${sets.join(", ")} WHERE id = ?`)
+      .run(...values);
+  }
+
+  public getScheduledTaskRuns(
+    taskId: number,
+    limit = 20
+  ): ScheduledTaskRunRecord[] {
+    return this.db
+      .query(
+        `SELECT * FROM scheduled_task_runs
+         WHERE task_id = ?
+         ORDER BY id DESC
+         LIMIT ?`
+      )
+      .all(taskId, limit) as ScheduledTaskRunRecord[];
   }
 }

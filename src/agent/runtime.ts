@@ -45,6 +45,17 @@ import {
   isTaskStatusQuery,
   TaskProgressReporter,
 } from "./progress.ts";
+import {
+  describeCronExpression,
+  formatZonedDateTime,
+  getNextCronRunMs,
+  isValidCronExpression,
+} from "../scheduler/cron.ts";
+import { parseNaturalScheduleSpec } from "../scheduler/time_parser.ts";
+import { syncScheduledTasksToVaultQueue } from "../scheduler/vault_sync.ts";
+import { TaskSchedulerEngine } from "../scheduler/engine.ts";
+import { WeChatClawBotClient } from "../clawbot/client.ts";
+import type { ScheduledActionPayload, ScheduledTaskKind } from "../db.ts";
 
 export interface IntentExecutionContext {
   config: AppConfig;
@@ -112,6 +123,7 @@ export class WeChatAgentRuntime {
   private registerDefaultHandlers(): void {
     this.handlers.set("capture_idea", (ctx) => this.handleCaptureIdea(ctx));
     this.handlers.set("capture_inbox", (ctx) => this.handleCaptureInbox(ctx));
+    this.handlers.set("manage_schedule", (ctx) => this.handleManageSchedule(ctx));
     this.handlers.set("ingest_link", (ctx) => this.handleIngestLink(ctx));
     this.handlers.set("article_followup", (ctx) => this.handleArticleFollowup(ctx));
     this.handlers.set("vault_query", (ctx) => this.handleVaultQuery(ctx));
@@ -1568,6 +1580,7 @@ ${effectiveRequirement}`,
           `6️⃣ 画图生成：说“画一张...架构图发给我” -> AGY 生成图片并加密直发微信`,
           `7️⃣ 唤起子智能体：说“让 codex / agy / opencode / claude 帮我...”`,
           `8️⃣ 要文件：说“把刚才那篇伴读笔记发文件给我” -> 原生文件直达微信`,
+          `9️⃣ 定时任务与待办提醒：说“提醒我下午4点半回电话”、“待办：买咖啡豆（默认20:00提醒）”、“每天早上8点半搜AI动态发早报”、“查看我的待办”`,
         ].join("\n"),
         modelUsed: "system_help",
       };
@@ -1628,6 +1641,446 @@ ${text}`,
     return {
       replyText: llmRes.text,
       modelUsed: llmRes.modelUsed,
+    };
+  }
+
+  // ============================================================================
+  // 9. Intent: manage_schedule (Scheduled Tasks, Digests & Todo Reminders)
+  // ============================================================================
+  private async handleManageSchedule(
+    ctx: IntentExecutionContext
+  ): Promise<IntentExecutionResult> {
+    const rawText = (
+      ctx.decision.slots.coreContent ||
+      ctx.unpacked.userText ||
+      ""
+    ).trim();
+    const tz = "Asia/Shanghai";
+    const nowMs = Date.now();
+
+    let subAction = ctx.decision.slots.scheduleSubAction;
+    if (!subAction) {
+      if (
+        /^(?:查看|看看|列出|显示|查询|我的)?\s*(?:所有|全部|当前)?\s*(?:待办|提醒|定时任务|周期任务|早报|日报|日程)/i.test(
+          rawText
+        )
+      ) {
+        subAction = "list";
+      } else if (
+        /^(?:完成|已完成|做完了|搞定了|勾掉|done|complete)/i.test(rawText) ||
+        /(?:标记为|设为)?(?:完成|已完成|做完了)$/i.test(rawText)
+      ) {
+        subAction = "complete";
+      } else if (
+        /^(?:取消|删除|关掉|关闭|停用|暂停|cancel|delete)/i.test(rawText)
+      ) {
+        subAction = "cancel";
+      } else if (
+        /^(?:立即执行|现在执行|现在跑一次|马上执行|立即触发|触发|测试执行|run)/i.test(
+          rawText
+        )
+      ) {
+        subAction = "run_now";
+      } else if (
+        /^(?:把|将).*(?:改到|推迟到|推迟|延后|提前到|调整到|改为|设为)/i.test(
+          rawText
+        )
+      ) {
+        subAction = "update";
+      } else {
+        subAction = "create";
+      }
+    }
+
+    // 1. LIST
+    if (subAction === "list") {
+      const queuePath = syncScheduledTasksToVaultQueue(this.config, this.db);
+      const activeOnce = this.db.listScheduledTasks({
+        status: ["active", "running"],
+        scheduleType: "once",
+        limit: 30,
+      });
+      const activeCron = this.db.listScheduledTasks({
+        status: ["active", "running", "paused"],
+        scheduleType: "cron",
+        limit: 30,
+      });
+      const recentCompleted = this.db
+        .listScheduledTasks({
+          status: ["completed"],
+          limit: 5,
+        })
+        .slice(0, 5);
+
+      const lines: string[] = [
+        `⏰ 【我的待办与定时任务】`,
+        "",
+        `📌 待处理事项与单次提醒 (${activeOnce.length} 项)：`,
+      ];
+
+      if (activeOnce.length === 0) {
+        lines.push("  • 暂无待处理单次提醒");
+      } else {
+        for (const item of activeOnce) {
+          const dueStr = item.next_run_at
+            ? formatZonedDateTime(item.next_run_at, item.timezone || tz)
+            : "待定";
+          const fallbackTag = item.is_default_time ? " [默认20:00]" : "";
+          lines.push(`  • #${item.id} ${item.title} — ⏰ ${dueStr}${fallbackTag}`);
+        }
+      }
+
+      lines.push("", `🔄 周期性信息收集与定时任务 (${activeCron.length} 项)：`);
+      if (activeCron.length === 0) {
+        lines.push("  • 暂无周期性定时任务");
+      } else {
+        for (const item of activeCron) {
+          const desc = item.cron_expr
+            ? describeCronExpression(item.cron_expr)
+            : "周期任务";
+          const nextStr = item.next_run_at
+            ? formatZonedDateTime(item.next_run_at, item.timezone || tz)
+            : "已暂停";
+          lines.push(
+            `  • #${item.id} ${item.title} — ${desc} (下次: ${nextStr})`
+          );
+        }
+      }
+
+      if (recentCompleted.length > 0) {
+        lines.push("", `✅ 最近已完成 (${recentCompleted.length} 项)：`);
+        for (const item of recentCompleted) {
+          lines.push(`  • #${item.id} ${item.title}`);
+        }
+      }
+
+      if (queuePath) {
+        lines.push(
+          "",
+          `🗂️ 已同步至知识库：\`${relative(this.config.vaultRoot, queuePath)}\``
+        );
+      }
+      lines.push(
+        `💡 发送「完成 #ID」、「把 #ID 改到明早9点」或「取消 #ID」即可管理。`
+      );
+
+      return {
+        replyText: lines.join("\n"),
+        modelUsed: "schedule_manager",
+        depositedPath: queuePath || undefined,
+      };
+    }
+
+    // 2. COMPLETE
+    if (subAction === "complete") {
+      const target = ctx.decision.slots.targetTaskId
+        ? this.db.getScheduledTaskById(ctx.decision.slots.targetTaskId)
+        : this.db.findScheduledTaskByQuery(rawText, {
+            senderId: ctx.senderId,
+            activeOnly: true,
+          });
+
+      if (!target) {
+        return {
+          replyText: `未找到匹配的待处理事项或提醒。你可以发送「查看我的待办」确认编号 #ID。`,
+          modelUsed: "schedule_manager",
+        };
+      }
+
+      const nowIso = new Date(nowMs).toISOString();
+      const updated = this.db.updateScheduledTask(target.id, {
+        status: "completed",
+        next_run_at: null,
+        last_run_at: nowIso,
+      })!;
+      const queuePath = syncScheduledTasksToVaultQueue(this.config, this.db);
+
+      return {
+        replyText: [
+          `✅ 已标记完成：#${updated.id}「${updated.title}」`,
+          queuePath
+            ? `🗂️ 已同步更新至 \`${relative(this.config.vaultRoot, queuePath)}\``
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        modelUsed: "schedule_manager",
+        depositedPath: queuePath || undefined,
+      };
+    }
+
+    // 3. CANCEL / PAUSE
+    if (subAction === "cancel") {
+      const target = ctx.decision.slots.targetTaskId
+        ? this.db.getScheduledTaskById(ctx.decision.slots.targetTaskId)
+        : this.db.findScheduledTaskByQuery(rawText, {
+            senderId: ctx.senderId,
+            activeOnly: true,
+          });
+
+      if (!target) {
+        return {
+          replyText: `未找到可取消的待办或定时任务。请发送「查看我的待办」查看当前有效编号 #ID。`,
+          modelUsed: "schedule_manager",
+        };
+      }
+
+      const isPause = /暂停/.test(rawText);
+      const updated = this.db.updateScheduledTask(target.id, {
+        status: isPause ? "paused" : "cancelled",
+        next_run_at: null,
+      })!;
+      const queuePath = syncScheduledTasksToVaultQueue(this.config, this.db);
+
+      return {
+        replyText: [
+          `🗑️ 已${isPause ? "暂停" : "取消"}任务：#${updated.id}「${updated.title}」`,
+          queuePath
+            ? `🗂️ 已同步更新至 \`${relative(this.config.vaultRoot, queuePath)}\``
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        modelUsed: "schedule_manager",
+        depositedPath: queuePath || undefined,
+      };
+    }
+
+    // 4. UPDATE (Reschedule)
+    if (subAction === "update") {
+      const target = ctx.decision.slots.targetTaskId
+        ? this.db.getScheduledTaskById(ctx.decision.slots.targetTaskId)
+        : this.db.findScheduledTaskByQuery(rawText, {
+            senderId: ctx.senderId,
+            activeOnly: false,
+          });
+
+      if (!target) {
+        return {
+          replyText: `未找到要修改的待办或定时任务。请使用「把 #ID 改到明天上午10点」指定任务。`,
+          modelUsed: "schedule_manager",
+        };
+      }
+
+      const afterClause =
+        rawText.match(
+          /(?:改到|推迟到|推迟|延后|提前到|调整到|改为|设为)\s*(.+)$/i
+        )?.[1] || rawText;
+      const spec = parseNaturalScheduleSpec(afterClause, {
+        nowMs,
+        timezone: target.timezone || tz,
+      });
+
+      const newScheduleType =
+        spec.scheduleType === "cron" ? "cron" : target.schedule_type === "cron" && spec.cronExpr ? "cron" : "once";
+      const newCronExpr =
+        newScheduleType === "cron" ? spec.cronExpr || target.cron_expr : "";
+      const newNextRunAt = spec.nextRunAt;
+
+      const updated = this.db.updateScheduledTask(target.id, {
+        schedule_type: newScheduleType,
+        cron_expr: newCronExpr,
+        next_run_at: newNextRunAt,
+        is_default_time: 0,
+        status: "active",
+      })!;
+      const queuePath = syncScheduledTasksToVaultQueue(this.config, this.db);
+
+      return {
+        replyText: [
+          `🔄 已更新任务 #${updated.id}「${updated.title}」`,
+          newScheduleType === "cron"
+            ? `⏱️ 新周期：${describeCronExpression(newCronExpr)} (\`${newCronExpr}\`)`
+            : "",
+          `⏰ 下次触发时间：${formatZonedDateTime(newNextRunAt, updated.timezone || tz)}`,
+          queuePath
+            ? `🗂️ 已同步更新至 \`${relative(this.config.vaultRoot, queuePath)}\``
+            : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+        modelUsed: "schedule_manager",
+        depositedPath: queuePath || undefined,
+      };
+    }
+
+    // 5. RUN NOW
+    if (subAction === "run_now") {
+      const target = ctx.decision.slots.targetTaskId
+        ? this.db.getScheduledTaskById(ctx.decision.slots.targetTaskId)
+        : this.db.findScheduledTaskByQuery(rawText, {
+            senderId: ctx.senderId,
+            activeOnly: false,
+          });
+
+      if (!target) {
+        return {
+          replyText: `未找到指定的定时任务。请发送「查看我的定时任务」确认 #ID。`,
+          modelUsed: "schedule_manager",
+        };
+      }
+
+      const engine = new TaskSchedulerEngine(
+        this.config,
+        this.db,
+        new WeChatClawBotClient(this.db)
+      );
+      const outcomes = await engine.tick({ nowMs, forceTaskId: target.id });
+      const first = outcomes[0];
+
+      return {
+        replyText: first
+          ? `⚡ 已立即执行任务 #${target.id}「${target.title}」（状态：${first.status}）`
+          : `⚡ 已触发任务 #${target.id}「${target.title}」`,
+        modelUsed: "schedule_manager",
+        depositedPath: first?.depositedPath,
+      };
+    }
+
+    // 6. CREATE (Default)
+    const spec = parseNaturalScheduleSpec(rawText, { nowMs, timezone: tz });
+
+    let scheduleType: "once" | "cron" = spec.scheduleType;
+    let cronExpr = spec.cronExpr;
+    let nextRunAt = spec.nextRunAt;
+    let isDefaultTime = spec.isDefaultTime;
+
+    // Allow LLM router slot overrides when natural parser fell back to default 20:00
+    if (
+      isDefaultTime &&
+      ctx.decision.slots.cronExpr &&
+      isValidCronExpression(ctx.decision.slots.cronExpr)
+    ) {
+      scheduleType = "cron";
+      cronExpr = ctx.decision.slots.cronExpr.trim();
+      nextRunAt = getNextCronRunMs(cronExpr, nowMs, tz);
+      isDefaultTime = false;
+    } else if (isDefaultTime && ctx.decision.slots.runAtIso) {
+      const parsedIsoMs = Date.parse(ctx.decision.slots.runAtIso);
+      if (Number.isFinite(parsedIsoMs) && parsedIsoMs > nowMs) {
+        scheduleType = "once";
+        nextRunAt = parsedIsoMs;
+        isDefaultTime = false;
+      }
+    }
+
+    let taskKind: ScheduledTaskKind = spec.taskKind;
+    if (ctx.decision.slots.scheduleTaskKind === "digest") {
+      taskKind = "digest";
+    } else if (
+      ctx.decision.slots.scheduleTaskKind === "todo" &&
+      taskKind !== "digest"
+    ) {
+      taskKind = "todo";
+    }
+
+    const linkedArticleId = ctx.decision.targetArticleId ?? null;
+    const linkedArticle = linkedArticleId
+      ? this.db.getArticleById(linkedArticleId)
+      : null;
+
+    let title = spec.cleanedTitle || ctx.decision.slots.ideaTitle || rawText;
+    if (
+      linkedArticle &&
+      linkedArticle.title &&
+      /(?:这篇|这篇文章|刚才那篇)/.test(title)
+    ) {
+      title = `${title.replace(/(?:这篇|这篇文章|刚才那篇)/g, `《${linkedArticle.title}》`)}`;
+    }
+    title = title.slice(0, 80);
+
+    const needsWebSearch =
+      ctx.decision.slots.needsWebSearch === true ||
+      /(?:搜|检索|动态|最新|资讯|新闻|外部|arxiv|web)/i.test(rawText);
+
+    const actionPayload: ScheduledActionPayload =
+      taskKind === "digest"
+        ? {
+            executor: needsWebSearch ? "web_search_digest" : "vault_digest",
+            prompt: rawText,
+            searchQueries: ctx.decision.slots.searchQuery
+              ? [ctx.decision.slots.searchQuery]
+              : undefined,
+            includeVaultNow: true,
+            includeRecentArticlesHours: 24,
+            archiveToVault: true,
+            relatedArticleId: linkedArticleId ?? undefined,
+          }
+        : {
+            executor: "reminder_push",
+            prompt: rawText,
+            relatedArticleId: linkedArticleId ?? undefined,
+          };
+
+    const created = this.db.createScheduledTask({
+      senderId: ctx.senderId,
+      title,
+      taskKind,
+      scheduleType,
+      cronExpr,
+      timezone: tz,
+      nextRunAt,
+      isDefaultTime,
+      actionPayload,
+      status: "active",
+      relatedArticleId: linkedArticleId,
+    });
+
+    const queuePath = syncScheduledTasksToVaultQueue(this.config, this.db);
+    const nextRunFormatted = created.next_run_at
+      ? formatZonedDateTime(created.next_run_at, tz)
+      : "待定";
+
+    const replyLines: string[] = [];
+    if (created.schedule_type === "cron") {
+      replyLines.push(
+        `🔄 【周期性定时任务已创建】#${created.id}`,
+        `📌 标题：${created.title}`,
+        `⏱️ 周期规则：${describeCronExpression(created.cron_expr)} (\`${created.cron_expr}\`)`,
+        `📅 首次触发：${nextRunFormatted}`,
+        `📂 默认归档：每次执行将自动归档完整 Markdown 笔记至 \`${
+          this.config.vaultEnabled !== false &&
+          this.config.vaultMode !== "standalone" &&
+          this.config.vaultMode !== "generic_folder"
+            ? "05_outputs/digests/"
+            : "digests/"
+        }\``
+      );
+    } else {
+      const kindHeader =
+        created.task_kind === "todo"
+          ? `📌 【待办事项已创建】#${created.id}`
+          : `⏰ 【定时提醒已创建】#${created.id}`;
+      replyLines.push(kindHeader, `📝 事项：${created.title}`);
+      if (created.is_default_time) {
+        replyLines.push(
+          `🔔 提醒时间：${nextRunFormatted}（未指定具体时间，已默认分配 20:00 晚间兜底提醒）`
+        );
+      } else {
+        replyLines.push(`🔔 提醒时间：${nextRunFormatted}`);
+      }
+      if (linkedArticle) {
+        replyLines.push(
+          `📄 关联文章：#${linkedArticle.id}《${linkedArticle.title || linkedArticle.url}》`
+        );
+      }
+    }
+
+    if (queuePath) {
+      replyLines.push(
+        `🗂️ 队列同步：已写入 \`${relative(this.config.vaultRoot, queuePath)}\``
+      );
+    }
+    replyLines.push(
+      "",
+      `💡 可随时发送「完成 #${created.id}」、「把 #${created.id} 改到明早9点」或「取消 #${created.id}」。`
+    );
+
+    return {
+      replyText: replyLines.join("\n"),
+      modelUsed: "schedule_manager",
+      relatedArticleId: linkedArticleId,
+      depositedPath: queuePath || undefined,
     };
   }
 }
