@@ -11,6 +11,7 @@ import {
   isDocumentGenerationTask,
 } from "./doc_exporter.ts";
 import { formatZonedDateTime } from "../scheduler/cron.ts";
+import { sanitizeSharedLinkMessage } from "../extractor/sanitizer.ts";
 
 export type AgentIntentKind =
   | "capture_idea"
@@ -104,9 +105,11 @@ export async function classifyMessageIntent(params: {
   const { config, unpacked, recentTurns, recentArticle, referencedArticle } = params;
   const text = unpacked.userText.trim();
 
-  // 1. If message has media items (image / file), route to multimodal_ingest (delegated to CLI routing chain)
+  // 1. If message has media items (image / file / video), route to multimodal_ingest (delegated to CLI routing chain or ASR)
   if (
-    unpacked.mediaItems.some((m) => m.kind === "image" || m.kind === "file")
+    unpacked.mediaItems.some(
+      (m) => m.kind === "image" || m.kind === "file" || m.kind === "video"
+    )
   ) {
     const wantsIdea = /(?:想法|灵感|观点|seed|03_ideas)/i.test(text);
     const wantsDeep = /(?:深度|详细拆解|架构分析|推导|批判|对比)/i.test(text);
@@ -118,7 +121,7 @@ export async function classifyMessageIntent(params: {
       intent: "multimodal_ingest",
       complexity: wantsDeep ? "deep" : "fast",
       subagentTarget: targetSubagent,
-      reason: "Message contains image or file attachment from WeChat (delegated to CLI subagent)",
+      reason: "Message contains image, file, or video attachment from WeChat",
       targetArticleId: referencedArticle?.id ?? recentArticle?.id ?? null,
       slots: {
         coreContent: text,
@@ -128,21 +131,20 @@ export async function classifyMessageIntent(params: {
     };
   }
 
-  // 2. If message contains an HTTP(S) URL (WeChat MP or external web article)
+  // 2. If message contains an HTTP(S) URL (WeChat MP, Medium, YouTube, Xiaohongshu, Douyin, or external web article)
   if (unpacked.urls.length > 0) {
-    const targetUrl = unpacked.urls[0];
-    const inlineNote = text
-      .replace(targetUrl, "")
-      .replace(/https?:\/\/[^\s"'<>\\]+/gi, "")
-      .trim();
+    const sanitized = sanitizeSharedLinkMessage(text, unpacked.urls[0]);
+    const targetUrl = sanitized.url || unpacked.urls[0];
+    const inlineNote = sanitized.userNotes;
     const triageHint = detectTriageHint(inlineNote);
     return {
       intent: "ingest_link",
       complexity: "fast",
-      reason: "Message contains an article or web URL",
+      reason: `Message contains a ${sanitized.platform} URL`,
       slots: {
         url: targetUrl,
         userNotes: inlineNote,
+        ideaTitle: sanitized.extractedTitle || undefined,
         triageHint,
       },
     };

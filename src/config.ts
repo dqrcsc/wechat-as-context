@@ -242,6 +242,7 @@ export interface AppConfig {
   vaultMode?: VaultMode;
   wechatArticlesDir: string;
   webArticlesDir?: string;
+  videoDir?: string;
   inboxDir?: string;
   papersDir?: string;
   ideasSeedsDir: string;
@@ -785,6 +786,11 @@ export function loadConfig(
       "VAULT_WEB_DIR",
       join("01_inputs", "articles", "web"),
       "web"
+    ),
+    videoDir: resolveInVault(
+      "VAULT_VIDEO_DIR",
+      join("01_inputs", "video"),
+      "video"
     ),
     inboxDir: resolveInVault("VAULT_INBOX_DIR", join("01_inputs", "inbox"), "inbox"),
     papersDir: resolveInVault("VAULT_PAPERS_DIR", join("01_inputs", "papers"), "papers"),

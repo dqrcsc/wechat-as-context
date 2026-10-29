@@ -1,12 +1,21 @@
 import { decodeArtifactPaths } from "../storage.ts";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { AppConfig, notifyExternalWebhookIfConfigured } from "../config.ts";
 import { ArticleRecord, ContextDatabase, ConversationTurnRecord, TriageLevel } from "../db.ts";
 import { ClawBotMessage, unpackClawBotMessage, UnpackedClawBotMessage } from "../clawbot/client.ts";
 import { downloadAndDecryptCdnMedia } from "../clawbot/media.ts";
-import { isWeChatArticleUrl, normalizeExternalWebUrl } from "../extractor/web.ts";
+import { transcribeAudioFromMedia } from "../extractor/asr.ts";
+import {
+  getPlatformDisplayLabel,
+  sanitizeSharedLinkMessage,
+} from "../extractor/sanitizer.ts";
+import {
+  isWeChatArticleUrl,
+  normalizeExternalWebUrl,
+  saveRawWebArticleToVault,
+} from "../extractor/web.ts";
 import { sanitizeSlug } from "../extractor/wechat.ts";
 import { normalizeWeChatUrl } from "../pipeline.ts";
 import { ANALYSIS_CONTEXT_POLICY, formatAnalysisContext, loadAnalysisContext } from "../vault/analysis_context.ts";
@@ -421,15 +430,16 @@ export class WeChatAgentRuntime {
   }
 
   // ============================================================================
-  // 3. Intent: ingest_link (WeChat MP + External Web URLs)
+  // 3. Intent: ingest_link (WeChat MP + Medium + YouTube + XHS + Douyin + Web URLs)
   // ============================================================================
   private async handleIngestLink(
     ctx: IntentExecutionContext
   ): Promise<IntentExecutionResult> {
-    const rawUrl =
-      ctx.decision.slots.url ||
-      ctx.unpacked.urls[0] ||
-      ctx.unpacked.userText.match(/https?:\/\/[^\s<>"]+/i)?.[0];
+    const sanitized = sanitizeSharedLinkMessage(
+      ctx.unpacked.userText,
+      ctx.decision.slots.url || ctx.unpacked.urls[0]
+    );
+    const rawUrl = sanitized.url;
 
     if (!rawUrl) {
       return this.handleGeneralAssistant(ctx);
@@ -440,13 +450,19 @@ export class WeChatAgentRuntime {
       ? normalizeWeChatUrl(rawUrl)
       : normalizeExternalWebUrl(rawUrl);
 
-    const inlineNote =
-      ctx.decision.slots.userNotes ??
-      ctx.unpacked.userText.replace(rawUrl, "").trim();
+    const inlineNote = sanitized.wasShareBoilerplateStripped
+      ? sanitized.userNotes
+      : ctx.decision.slots.userNotes ?? sanitized.userNotes;
+
+    const fallbackTitle =
+      ctx.decision.slots.ideaTitle?.trim() ||
+      sanitized.extractedTitle ||
+      undefined;
 
     const { record, isNew } = this.db.enqueueArticle({
       msgid: ctx.messageKey,
       url: normalizedUrl,
+      title: fallbackTitle,
       user_notes: inlineNote,
       sender_id: ctx.senderId,
       channel: "clawbot",
@@ -457,7 +473,7 @@ export class WeChatAgentRuntime {
       this.db.updateArticle(record.id, { triage: ctx.decision.slots.triageHint });
     }
 
-    const kindLabel = isWeChat ? "公众号文章" : "网页链接";
+    const kindLabel = getPlatformDisplayLabel(sanitized.platform);
     return {
       replyText: isNew
         ? `⏳ 已收到${kindLabel} #${record.id}，将抓取并生成初筛笔记；可继续补充批注。`
@@ -789,9 +805,55 @@ ${vaultCtx.nowSummary}`,
     const imageInputs: MultimodalImageInput[] = [];
     const textSnippets: string[] = [];
     const unreadableApiFiles: string[] = [];
+    const tempVideoPathsToClean: string[] = [];
+    let hasVideoTranscript = false;
+    let lastVideoTranscriptEngine = "";
 
     for (const item of ctx.unpacked.mediaItems) {
-      if (item.kind !== "image" && item.kind !== "file") continue;
+      if (
+        item.kind !== "image" &&
+        item.kind !== "file" &&
+        item.kind !== "video"
+      ) {
+        continue;
+      }
+
+      if (item.kind === "video") {
+        const tmpVideoDir = join(this.config.dataDir, "tmp_video");
+        const downloadedVideo = await downloadAndDecryptCdnMedia({
+          media: item.media,
+          hexAesKeyFallback: item.hexAesKeyFallback,
+          saveDir: tmpVideoDir,
+          suggestedFileName: item.fileName || "wechat_video.mp4",
+        });
+        tempVideoPathsToClean.push(downloadedVideo.filePath);
+        try {
+          const asrRes = await transcribeAudioFromMedia({
+            mediaPath: downloadedVideo.filePath,
+            config: this.config,
+            hintTitle: ctx.unpacked.userText,
+          });
+          if (asrRes.transcript.trim()) {
+            hasVideoTranscript = true;
+            lastVideoTranscriptEngine = asrRes.engineUsed;
+            textSnippets.push(
+              `【微信视频口播转写稿（${asrRes.engineUsed}）】\n${asrRes.transcript.trim()}`
+            );
+          }
+        } catch (err: any) {
+          unreadableApiFiles.push(
+            `视频(${err?.message || "转写未完成"})`
+          );
+        } finally {
+          try {
+            if (existsSync(downloadedVideo.filePath)) {
+              unlinkSync(downloadedVideo.filePath);
+            }
+          } catch {}
+        }
+        continue;
+      }
+
       const targetSaveDir =
         item.kind === "file" && item.fileName?.toLowerCase().endsWith(".pdf")
           ? papersDir
@@ -825,7 +887,7 @@ ${vaultCtx.nowSummary}`,
       }
     }
 
-    if (downloadedPaths.length === 0) {
+    if (downloadedPaths.length === 0 && !hasVideoTranscript && unreadableApiFiles.length === 0) {
       return this.handleGeneralAssistant(ctx);
     }
 
@@ -877,18 +939,51 @@ ${textSnippets.join("\n\n")}`,
       modelUsed = "local_archive";
     }
 
-    const firstAssetRel = relative(inboxDir, downloadedPaths[0]);
+    const firstAssetRel = downloadedPaths[0]
+      ? relative(inboxDir, downloadedPaths[0])
+      : undefined;
     const targetMode = ctx.decision.slots.multimodalTarget || "inbox";
-    let depositedPath = downloadedPaths[0];
+    let depositedPath = downloadedPaths[0] || "";
 
-    if (targetMode === "idea") {
+    if (hasVideoTranscript && downloadedPaths.length === 0 && targetMode !== "idea") {
+      const videoDir =
+        this.config.videoDir || join(this.config.vaultRoot, "01_inputs", "video");
+      const videoTitle =
+        ctx.unpacked.userText.trim().slice(0, 48) || "微信视频语音转写记录";
+      depositedPath = await saveRawWebArticleToVault({
+        articlesDir: videoDir,
+        article: {
+          url: `https://wx.qq.com/video/${encodeURIComponent(ctx.messageKey)}`,
+          title: videoTitle,
+          author: "微信视频",
+          publishDate: new Date().toISOString().slice(0, 10),
+          digest: textSnippets.join(" ").slice(0, 180),
+          markdownBody: [
+            textSnippets.join("\n\n"),
+            extractedAnalysis ? `## 初步提炼\n\n${extractedAnalysis}` : "",
+          ]
+            .filter(Boolean)
+            .join("\n\n"),
+          imageUrls: [],
+          extractorUsed: "native_http",
+          mediaKind: "video",
+          sourceType: "wechat_video",
+          transcriptEngine: lastVideoTranscriptEngine || "local_asr_sensevoice",
+        },
+        slug: "wechat_video_transcript",
+        userNotes: ctx.unpacked.userText,
+      });
+    } else if (targetMode === "idea") {
       depositedPath = createIdeaSeedInVault({
         ideasSeedsDir: this.config.ideasSeedsDir,
         thoughtText: [
           ctx.unpacked.userText,
           extractedAnalysis,
+          textSnippets.join("\n\n"),
           analysisWarning,
-          `\n关联媒体文件：\`${relative(this.config.vaultRoot, downloadedPaths[0])}\``,
+          ...(downloadedPaths[0]
+            ? [`\n关联媒体文件：\`${relative(this.config.vaultRoot, downloadedPaths[0])}\``]
+            : []),
         ]
           .filter(Boolean)
           .join("\n\n"),
@@ -900,12 +995,18 @@ ${textSnippets.join("\n\n")}`,
         inboxDir,
         title:
           ctx.unpacked.userText.slice(0, 36) ||
-          `微信多媒体采集 (${basename(downloadedPaths[0])})`,
+          (downloadedPaths[0]
+            ? `微信多媒体采集 (${basename(downloadedPaths[0])})`
+            : "微信视频采集"),
         bodyText:
           extractedAnalysis ||
-          [analysisWarning, ctx.unpacked.userText].filter(Boolean).join("\n\n") ||
+          [analysisWarning, textSnippets.join("\n\n"), ctx.unpacked.userText]
+            .filter(Boolean)
+            .join("\n\n") ||
           ctx.unpacked.userText ||
-          `已解密保存附件：${basename(downloadedPaths[0])}`,
+          (downloadedPaths[0]
+            ? `已解密保存附件：${basename(downloadedPaths[0])}`
+            : "已接收媒体附件"),
         slug: "wechat_media_capture",
         captureId: ctx.messageKey,
         attachedAssetRelPath: firstAssetRel,
@@ -915,7 +1016,9 @@ ${textSnippets.join("\n\n")}`,
     const relSaved = relative(this.config.vaultRoot, depositedPath);
     return {
       replyText: [
-        `🖼️ 已解密并归档媒体文件：\`${relSaved}\``,
+        hasVideoTranscript && downloadedPaths.length === 0
+          ? `🎬 已完成视频语音转写并归档至知识库：\`${relSaved}\`（原始视频临时文件已自动清理）`
+          : `🖼️ 已解密并归档媒体文件：\`${relSaved}\``,
         extractedAnalysis ? `\n📋 内容提炼（${modelUsed}）：\n${extractedAnalysis}` : "",
         analysisWarning ? `\n⚠️ ${analysisWarning}` : "",
       ]

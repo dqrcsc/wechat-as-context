@@ -5,6 +5,17 @@ import { basename, join } from "node:path";
 import { writeNewFile } from "../storage.ts";
 import { fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
 
+export type ExtractedSourceType =
+  | "wechat_article"
+  | "web_article"
+  | "medium_article"
+  | "xiaohongshu_note"
+  | "douyin_note"
+  | "youtube_video"
+  | "douyin_video"
+  | "xiaohongshu_video"
+  | "wechat_video";
+
 export interface ExtractedWeChatArticle {
   url: string;
   title: string;
@@ -14,6 +25,11 @@ export interface ExtractedWeChatArticle {
   markdownBody: string;
   imageUrls: string[];
   extractorUsed: "native_http" | "native_chrome_cdp" | "jina_reader";
+  mediaKind?: "article" | "video";
+  sourceType?: ExtractedSourceType;
+  durationSeconds?: number;
+  durationText?: string;
+  transcriptEngine?: string;
 }
 
 const WECHAT_USER_AGENT =

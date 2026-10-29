@@ -425,6 +425,7 @@ async function main() {
         vaultRoot: config.vaultRoot,
         wechatArticlesDir: config.wechatArticlesDir,
         webArticlesDir: config.webArticlesDir,
+        videoDir: config.videoDir,
         ideasSeedsDir: config.ideasSeedsDir,
         analysisContextFile: config.analysisContextFile || null,
         analysisContext,

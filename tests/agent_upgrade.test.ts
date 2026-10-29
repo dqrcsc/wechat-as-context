@@ -34,6 +34,13 @@ import {
   SubagentRunRequest,
 } from "../src/agent/subagent_cli.ts";
 import { createHttpHandler } from "../src/http.ts";
+import { setAsrTestRunner } from "../src/extractor/asr.ts";
+import {
+  detectSourcePlatform,
+  extractUrlsFromMixedText,
+  sanitizeSharedLinkMessage,
+} from "../src/extractor/sanitizer.ts";
+import { findVaultFilesByQuery } from "../src/vault/context.ts";
 
 const originalFetch = globalThis.fetch;
 const databases: ContextDatabase[] = [];
@@ -42,6 +49,7 @@ const CLI_ENV_KEYS = ["AGY_BIN", "CODEX_BIN", "OPENCODE_BIN", "CLAUDE_BIN", "GEM
 afterEach(() => {
   globalThis.fetch = originalFetch;
   setSubagentTestRunner(null);
+  setAsrTestRunner(null);
   for (const key of CLI_ENV_KEYS) {
     delete process.env[key];
   }
@@ -59,6 +67,7 @@ function createAgentFixture(withLlmKey = true) {
   mkdirSync(join(root, "01_inputs", "inbox"), { recursive: true });
   mkdirSync(join(root, "01_inputs", "articles", "wechat"), { recursive: true });
   mkdirSync(join(root, "01_inputs", "articles", "web"), { recursive: true });
+  mkdirSync(join(root, "01_inputs", "video"), { recursive: true });
   mkdirSync(join(root, "03_ideas", "seeds"), { recursive: true });
   mkdirSync(join(root, "04_topics", "ai"), { recursive: true });
 
@@ -78,6 +87,7 @@ function createAgentFixture(withLlmKey = true) {
     vaultRoot: root,
     wechatArticlesDir: join(root, "01_inputs", "articles", "wechat"),
     webArticlesDir: join(root, "01_inputs", "articles", "web"),
+    videoDir: join(root, "01_inputs", "video"),
     inboxDir: join(root, "01_inputs", "inbox"),
     papersDir: join(root, "01_inputs", "papers"),
     ideasSeedsDir: join(root, "03_ideas", "seeds"),
@@ -1474,5 +1484,545 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
     });
     expect(genericCfg.vaultEnabled).toBe(true);
     expect(genericCfg.vaultMode).toBe("generic_folder");
+  });
+
+  test("Multi-Platform Share Sanitizer & 10-Second Annotation Window: strips Xiaohongshu/Douyin boilerplate without breaking 10s voice follow-up", async () => {
+    // 1. Unit assertions on URL boundary & share boilerplate stripping
+    const xhsRaw =
+      "67 架构师老王发布了一篇小红书笔记，快来看吧！ 😆 A1b2C3 😆 http://xhslink.com/a/abc123xyz，复制本条信息，打开【小红书】App查看精彩内容！";
+    expect(extractUrlsFromMixedText(xhsRaw)).toEqual(["http://xhslink.com/a/abc123xyz"]);
+    const xhsSanitized = sanitizeSharedLinkMessage(xhsRaw);
+    expect(xhsSanitized.url).toBe("http://xhslink.com/a/abc123xyz");
+    expect(xhsSanitized.platform).toBe("xiaohongshu");
+    expect(xhsSanitized.userNotes).toBe("");
+
+    const dyRaw =
+      "4.89 复制打开抖音，看看【AI前沿的作品】大模型Agent架构演进 # AI # 深度学习 https://v.douyin.com/iYabc123/ 05/18 Q@K.ca :8pm";
+    const dySanitized = sanitizeSharedLinkMessage(dyRaw);
+    expect(dySanitized.url).toBe("https://v.douyin.com/iYabc123/");
+    expect(dySanitized.platform).toBe("douyin");
+    expect(dySanitized.extractedTitle).toBe("大模型Agent架构演进");
+    expect(dySanitized.userNotes).toBe("");
+
+    const dyWithComment =
+      "4.89 复制打开抖音，看看【AI前沿的作品】大模型Agent架构演进 https://v.douyin.com/iYabc123/ 这个视频讲的状态机拆解非常值得借鉴";
+    const dyCommentSanitized = sanitizeSharedLinkMessage(dyWithComment);
+    expect(dyCommentSanitized.userNotes).toBe("这个视频讲的状态机拆解非常值得借鉴");
+
+    // 2. End-to-end 10-second annotationWaitSeconds preservation when pasting Xiaohongshu share text followed by voice
+    const f = createAgentFixture(false);
+    f.config.annotationWaitSeconds = 10;
+
+    globalThis.fetch = (async () => Response.json({ ret: 0 })) as any;
+
+    // Message 1: Paste Xiaohongshu share link with boilerplate
+    await f.pipeline.agent.processClawBotMessage({
+      messageKey: "msg_xhs_share_1",
+      senderId: "user@im.wechat",
+      rawMessage: {
+        message_id: "msg_xhs_share_1",
+        from_user_id: "user@im.wechat",
+        context_token: "ctx_xhs_wait",
+        message_type: 1,
+        item_list: [
+          {
+            type: 1,
+            text_item: { text: xhsRaw },
+          },
+        ],
+      },
+    });
+    const pendingAfterShare = f.db.listArticles({ limit: 5 })[0];
+    expect(pendingAfterShare).toBeDefined();
+    expect(pendingAfterShare.url).toBe("http://xhslink.com/a/abc123xyz");
+    // Crucial: boilerplate must NOT pollute user_notes, so 10s wait window stays open!
+    expect(pendingAfterShare.user_notes).toBe("");
+    const processedBeforeWindow = await f.pipeline.drainReadyQueue();
+    expect(processedBeforeWindow.length).toBe(0);
+
+    // Message 2: Send follow-up voice message within the 10s window
+    await f.pipeline.agent.processClawBotMessage({
+      messageKey: "msg_xhs_voice_2",
+      senderId: "user@im.wechat",
+      rawMessage: {
+        message_id: "msg_xhs_voice_2",
+        from_user_id: "user@im.wechat",
+        context_token: "ctx_xhs_wait",
+        message_type: 1,
+        item_list: [
+          {
+            type: 3,
+            voice_item: {
+              text: "这篇小红书笔记里的多智能体对比图很清晰，重点记入我的本体论主题",
+            },
+          },
+        ],
+      },
+    });
+    const pendingAfterVoice = f.db.getArticleById(pendingAfterShare.id)!;
+    expect(pendingAfterVoice.user_notes).toContain("这篇小红书笔记里的多智能体对比图很清晰");
+  });
+
+  test("Medium Article Ingestion: detects Member-Only paywall truncation and falls back to Freedium mirror", async () => {
+    const f = createAgentFixture(false);
+    const mediumUrl = "https://medium.com/@karpathy/software-3-0-context-engineering-abcdef123456";
+    const replies: string[] = [];
+
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/ilink/bot/sendmessage")) {
+        const body = JSON.parse(String(init?.body || "{}"));
+        replies.push(body?.msg?.item_list?.[0]?.text_item?.text || "");
+        return Response.json({ ret: 0 });
+      }
+      if (u.startsWith("https://freedium.cfd/")) {
+        return new Response(
+          `<!DOCTYPE html><html><head><title>Software 3.0 & Context Engineering</title><meta name="author" content="Andrej Karpathy"></head>
+          <body><article>
+            <h1>Software 3.0 & Context Engineering</h1>
+            <p>In the era of autonomous LLM agents, context engineering replaces manual boilerplate coding as the primary architectural discipline.</p>
+            <p>${"Ontology and structured memory graphs provide deterministic semantic constraints over long-horizon agent workflows. ".repeat(12)}</p>
+          </article></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
+        );
+      }
+      if (u === mediumUrl) {
+        return new Response(
+          `<!DOCTYPE html><html><head><title>Software 3.0 & Context Engineering | Medium</title></head>
+          <body><article><h1>Software 3.0 & Context Engineering</h1><p>Short preview paragraph...</p>
+          <div>Member-only story. Read the rest of this story with a free account.</div></article></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
+        );
+      }
+      return Response.json({ ret: 0 });
+    }) as any;
+
+    const ingestRes = await f.pipeline.agent.processClawBotMessage({
+      messageKey: "msg_medium_1",
+      senderId: "user@im.wechat",
+      rawMessage: {
+        message_id: "msg_medium_1",
+        from_user_id: "user@im.wechat",
+        context_token: "ctx_medium",
+        message_type: 1,
+        item_list: [
+          {
+            type: 1,
+            text_item: {
+              text: `${mediumUrl} 这篇关于 Context Engineering 的深度思考值得沉淀`,
+            },
+          },
+        ],
+      },
+    });
+    expect(ingestRes.replyText).toContain("Medium 深度文章");
+
+    const processed = await f.pipeline.drainReadyQueue();
+    expect(processed.length).toBe(1);
+    const article = processed[0];
+    expect(article.status).toBe("light_done");
+    expect(article.title).toContain("Software 3.0 & Context Engineering");
+    expect(article.source_md_path.startsWith(f.config.webArticlesDir!)).toBe(true);
+
+    const mdContent = readFileSync(article.source_md_path, "utf-8");
+    expect(mdContent).toContain("source_type: medium_article");
+    expect(mdContent).toContain("Ontology and structured memory graphs provide deterministic semantic constraints");
+  });
+
+  test("YouTube Video Ingestion: extracts watch page, InnerTube captions, and chapter timestamps into 01_inputs/video/", async () => {
+    const f = createAgentFixture(false);
+    const ytUrl = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+
+    const playerResponse = {
+      videoDetails: {
+        videoId: "dQw4w9WgXcQ",
+        title: "Building Effective Agents with Ontology & Context",
+        author: "Anthropic Research",
+        lengthSeconds: "750",
+        shortDescription: "00:00 Introduction to Agent Loops\n03:00 Ontology & Context Engineering\n\nDeep dive into reliable agent architectures.",
+      },
+      microformat: {
+        playerMicroformatRenderer: {
+          publishDate: "2026-05-20",
+        },
+      },
+      captions: {
+        playerCaptionsTracklistRenderer: {
+          captionTracks: [
+            {
+              baseUrl: "https://www.youtube.com/api/timedtext?v=dQw4w9WgXcQ&lang=en",
+              languageCode: "en",
+              name: { simpleText: "English" },
+            },
+          ],
+        },
+      },
+    };
+
+    globalThis.fetch = (async (url: string | URL) => {
+      const u = String(url);
+      if (u.includes("youtube.com/watch")) {
+        return new Response(
+          `<!DOCTYPE html><html><head><title>Building Effective Agents</title></head><body>
+          <script>var ytInitialPlayerResponse = ${JSON.stringify(playerResponse)};</script>
+          </body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
+        );
+      }
+      if (u.includes("youtube.com/api/timedtext")) {
+        return Response.json({
+          events: [
+            {
+              tStartMs: 10000,
+              dDurationMs: 5000,
+              segs: [{ utf8: "Welcome to our talk on autonomous agent loops and context curation." }],
+            },
+            {
+              tStartMs: 195000,
+              dDurationMs: 6000,
+              segs: [{ utf8: "Now let us examine how ontology constrains agent state transitions." }],
+            },
+          ],
+        });
+      }
+      return Response.json({ ret: 0 });
+    }) as any;
+
+    const ingestRes = await f.pipeline.agent.processClawBotMessage({
+      messageKey: "msg_yt_1",
+      senderId: "user@im.wechat",
+      rawMessage: {
+        message_id: "msg_yt_1",
+        from_user_id: "user@im.wechat",
+        context_token: "ctx_yt",
+        message_type: 1,
+        item_list: [
+          {
+            type: 1,
+            text_item: { text: ytUrl },
+          },
+        ],
+      },
+    });
+    expect(ingestRes.replyText).toContain("YouTube 视频");
+
+    const processed = await f.pipeline.drainReadyQueue();
+    expect(processed.length).toBe(1);
+    const videoRecord = processed[0];
+    expect(videoRecord.status).toBe("light_done");
+    // Must be stored in 01_inputs/video/, NOT 01_inputs/articles/web/
+    expect(videoRecord.source_md_path.startsWith(f.config.videoDir!)).toBe(true);
+    expect(videoRecord.note_md_path.startsWith(f.config.videoDir!)).toBe(true);
+    expect(existsSync(videoRecord.source_md_path)).toBe(true);
+    expect(existsSync(videoRecord.note_md_path)).toBe(true);
+
+    const videoMd = readFileSync(videoRecord.source_md_path, "utf-8");
+    expect(videoMd).toContain("type: source");
+    expect(videoMd).toContain("source_type: youtube_video");
+    expect(videoMd).toContain('duration: "12:30"');
+    expect(videoMd).toContain("### 00:00 Introduction to Agent Loops");
+    expect(videoMd).toContain("### 03:00 Ontology & Context Engineering");
+    expect(videoMd).toContain("Now let us examine how ontology constrains agent state transitions.");
+
+    // Verify vault search finds the video note inside 01_inputs/video/
+    const searchHits = findVaultFilesByQuery(f.root, "Anthropic Research");
+    expect(searchHits.some((h) => h.relativePath.startsWith("01_inputs/video/"))).toBe(true);
+  });
+
+  test("Xiaohongshu Dual-Modality Ingestion: routes Image-Carousel Note (Vision OCR) to articles/web/ and Spoken Video (ASR) to video/", async () => {
+    const f = createAgentFixture(true);
+    const asrCalls: string[] = [];
+    setAsrTestRunner(async ({ mediaUrl }) => {
+      asrCalls.push(mediaUrl || "");
+      return {
+        transcript: "大家好，今天用三分钟讲透如何把小红书和抖音的口播干货自动沉淀进个人知识库与微信AI上下文。",
+        engineUsed: "local_funasr",
+      };
+    });
+
+    const xhsImageShare =
+      "67 极客笔记发布了一篇小红书笔记 😆 http://xhslink.com/a/xhs_img_card，复制本条信息，打开【小红书】App查看精彩内容！";
+    const xhsVideoShare =
+      "89 AI口播君发布了一篇小红书笔记 😆 http://xhslink.com/a/xhs_spoken_vid，复制本条信息，打开【小红书】App查看精彩内容！";
+
+    const imageNoteState = {
+      note: {
+        firstNoteId: "66aabbcc1122",
+        noteDetailMap: {
+          "66aabbcc1122": {
+            note: {
+              noteId: "66aabbcc1122",
+              type: "normal",
+              title: "Agent架构设计5张核心神图",
+              desc: "建议收藏慢慢看 #AI架构 #Agent",
+              user: { nickname: "极客笔记" },
+              imageList: [
+                { urlDefault: "https://sns-webpic.xhscdn.com/slide1.jpg" },
+                { urlDefault: "https://sns-webpic.xhscdn.com/slide2.jpg" },
+              ],
+            },
+          },
+        },
+      },
+    };
+
+    const videoNoteState = {
+      note: {
+        firstNoteId: "66ddeeff3344",
+        noteDetailMap: {
+          "66ddeeff3344": {
+            note: {
+              noteId: "66ddeeff3344",
+              type: "video",
+              title: "3分钟讲透个人知识库与微信上下文打通",
+              desc: "口播干货分享 #知识库 #AI",
+              user: { nickname: "AI口播君" },
+              video: {
+                capa: { duration: 185 },
+                media: {
+                  stream: {
+                    h264: [{ masterUrl: "https://sns-video.xhscdn.com/stream_spoken.mp4" }],
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    globalThis.fetch = (async (url: string | URL, init?: RequestInit) => {
+      const u = String(url);
+      if (u === "http://xhslink.com/a/xhs_img_card") {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: "https://www.xiaohongshu.com/explore/66aabbcc1122?xsec_token=tok_img" },
+        });
+      }
+      if (u.includes("xiaohongshu.com/explore/66aabbcc1122")) {
+        return new Response(
+          `<!DOCTYPE html><html><body><script>window.__INITIAL_STATE__=${JSON.stringify(imageNoteState)}</script></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
+        );
+      }
+      if (u === "http://xhslink.com/a/xhs_spoken_vid") {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: "https://www.xiaohongshu.com/explore/66ddeeff3344?xsec_token=tok_vid" },
+        });
+      }
+      if (u.includes("xiaohongshu.com/explore/66ddeeff3344")) {
+        return new Response(
+          `<!DOCTYPE html><html><body><script>window.__INITIAL_STATE__=${JSON.stringify(videoNoteState)}</script></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
+        );
+      }
+      if (u.includes("sns-webpic.xhscdn.com/slide")) {
+        return new Response(new Uint8Array(Buffer.alloc(256, 0xff)), {
+          status: 200,
+          headers: { "Content-Type": "image/jpeg" },
+        });
+      }
+      if (u.includes("llm.example.test")) {
+        const body = JSON.parse(String(init?.body || "{}"));
+        const promptStr = JSON.stringify(body);
+        if (promptStr.includes("图文卡片解析器") || promptStr.includes("image_url")) {
+          return Response.json({
+            choices: [
+              {
+                message: {
+                  content:
+                    "### [图 1]\n- **核心架构**：ReAct 循环与 Plan-and-Execute 树状状态机对比\n\n### [图 2]\n- **关键结论**：Ontology 显式约束能将长链路幻觉率降低 60%",
+                },
+              },
+            ],
+          });
+        }
+        return Response.json({
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  triage: "deep",
+                  wechatCardReply: "已提炼小红书核心信号",
+                  noteMarkdownBody: "## 核心信号\n小红书多模态提取完成",
+                  relatedVaultNodes: ["[[ontology_notes]]"],
+                }),
+              },
+            },
+          ],
+        });
+      }
+      return Response.json({ ret: 0 });
+    }) as any;
+
+    // 1. Process Xiaohongshu Image-Carousel Note
+    await f.pipeline.agent.processClawBotMessage({
+      messageKey: "msg_xhs_img",
+      senderId: "user@im.wechat",
+      rawMessage: {
+        message_id: "msg_xhs_img",
+        from_user_id: "user@im.wechat",
+        context_token: "ctx_xhs_dual",
+        message_type: 1,
+        item_list: [{ type: 1, text_item: { text: xhsImageShare } }],
+      },
+    });
+    const processedImg = await f.pipeline.drainReadyQueue();
+    expect(processedImg.length).toBe(1);
+    const imgArticle = processedImg[0];
+    expect(imgArticle.status).toBe("light_done");
+    expect(imgArticle.source_md_path.startsWith(f.config.webArticlesDir!)).toBe(true);
+    const imgMd = readFileSync(imgArticle.source_md_path, "utf-8");
+    expect(imgMd).toContain("source_type: xiaohongshu_note");
+    expect(imgMd).toContain("## 笔记配图（共 2 张）");
+    expect(imgMd).toContain("## 图集卡片内容提取（Vision OCR）");
+    expect(imgMd).toContain("ReAct 循环与 Plan-and-Execute 树状状态机对比");
+
+    // 2. Process Xiaohongshu Spoken Video Note
+    await f.pipeline.agent.processClawBotMessage({
+      messageKey: "msg_xhs_vid",
+      senderId: "user@im.wechat",
+      rawMessage: {
+        message_id: "msg_xhs_vid",
+        from_user_id: "user@im.wechat",
+        context_token: "ctx_xhs_dual",
+        message_type: 1,
+        item_list: [{ type: 1, text_item: { text: xhsVideoShare } }],
+      },
+    });
+    const processedVid = await f.pipeline.drainReadyQueue();
+    expect(processedVid.length).toBe(1);
+    const vidArticle = processedVid[0];
+    expect(vidArticle.status).toBe("light_done");
+    expect(vidArticle.source_md_path.startsWith(f.config.videoDir!)).toBe(true);
+    expect(asrCalls).toEqual(["https://sns-video.xhscdn.com/stream_spoken.mp4"]);
+    const vidMd = readFileSync(vidArticle.source_md_path, "utf-8");
+    expect(vidMd).toContain("type: source");
+    expect(vidMd).toContain("source_type: xiaohongshu_video");
+    expect(vidMd).toContain("大家好，今天用三分钟讲透如何把小红书和抖音的口播干货自动沉淀进个人知识库");
+  });
+
+  test("Douyin Spoken Video & WeChat Native Video (type=5): transcribes audio into 01_inputs/video/ and cleans up temporary video files", async () => {
+    const f = createAgentFixture(false);
+    const asrMediaUrls: string[] = [];
+    const asrLocalFilesExistDuringRun: boolean[] = [];
+
+    setAsrTestRunner(async ({ mediaUrl, mediaPath }) => {
+      if (mediaUrl) asrMediaUrls.push(mediaUrl);
+      if (mediaPath) asrLocalFilesExistDuringRun.push(existsSync(mediaPath));
+      return {
+        transcript: "这段口播视频详细拆解了为什么大模型长周期记忆必须引入知识图谱与本体论约束。",
+        engineUsed: "local_funasr",
+      };
+    });
+
+    const douyinShareText =
+      "4.89 复制打开抖音，看看【AI架构师的作品】为什么RAG需要知识图谱与本体 https://v.douyin.com/iYdouyin99/";
+    const douyinRouterData = {
+      loaderData: {
+        "video_(id)/page": {
+          videoInfoRes: {
+            item_list: [
+              {
+                aweme_id: "7399887766554433221",
+                desc: "为什么RAG需要知识图谱与本体 #AI #知识工程",
+                create_time: 1747700000,
+                author: { nickname: "AI架构师" },
+                video: {
+                  duration: 95000,
+                  play_addr: {
+                    url_list: ["https://aweme.snssdk.com/aweme/v1/playwm/?video_id=v0200fg10000"],
+                  },
+                },
+              },
+            ],
+          },
+        },
+      },
+    };
+
+    const rawAesKey = randomBytes(16);
+    const encryptedVideoBytes = encryptAes128Ecb(Buffer.from("FAKE_MP4_BINARY_STREAM"), rawAesKey);
+
+    globalThis.fetch = (async (url: string | URL) => {
+      const u = String(url);
+      if (u === "https://v.douyin.com/iYdouyin99/") {
+        return new Response(null, {
+          status: 302,
+          headers: { Location: "https://www.iesdouyin.com/share/video/7399887766554433221/" },
+        });
+      }
+      if (u.includes("iesdouyin.com/share/video/7399887766554433221")) {
+        return new Response(
+          `<!DOCTYPE html><html><body><script>window._ROUTER_DATA = ${JSON.stringify(douyinRouterData)}</script></body></html>`,
+          { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
+        );
+      }
+      if (u.includes("wx_video_cdn_param_1")) {
+        return new Response(new Uint8Array(encryptedVideoBytes), { status: 200 });
+      }
+      return Response.json({ ret: 0, typing_ticket: "tk" });
+    }) as any;
+
+    // 1. Douyin spoken video ingestion
+    await f.pipeline.agent.processClawBotMessage({
+      messageKey: "msg_dy_1",
+      senderId: "user@im.wechat",
+      rawMessage: {
+        message_id: "msg_dy_1",
+        from_user_id: "user@im.wechat",
+        context_token: "ctx_dy",
+        message_type: 1,
+        item_list: [{ type: 1, text_item: { text: douyinShareText } }],
+      },
+    });
+    const processedDy = await f.pipeline.drainReadyQueue();
+    expect(processedDy.length).toBe(1);
+    const dyRecord = processedDy[0];
+    expect(dyRecord.status).toBe("light_done");
+    expect(dyRecord.source_md_path.startsWith(f.config.videoDir!)).toBe(true);
+    // Watermark URL playwm/ must be converted to play/
+    expect(asrMediaUrls).toEqual(["https://aweme.snssdk.com/aweme/v1/play/?video_id=v0200fg10000"]);
+    const dyMd = readFileSync(dyRecord.source_md_path, "utf-8");
+    expect(dyMd).toContain("type: source");
+    expect(dyMd).toContain("source_type: douyin_video");
+    expect(dyMd).toContain("这段口播视频详细拆解了为什么大模型长周期记忆必须引入知识图谱与本体论约束");
+
+    // 2. Native WeChat video message (type=5) ingestion + temporary .mp4 deletion
+    const wxVidRes = await f.pipeline.agent.processClawBotMessage({
+      messageKey: "msg_wxvid_2",
+      senderId: "user@im.wechat",
+      rawMessage: {
+        message_id: "msg_wxvid_2",
+        from_user_id: "user@im.wechat",
+        context_token: "ctx_wxvid",
+        message_type: 1,
+        item_list: [
+          {
+            type: 1,
+            text_item: { text: "这段视频号讨论帮我转写归档" },
+          },
+          {
+            type: 5,
+            video_item: {
+              media: {
+                encrypt_query_param: "wx_video_cdn_param_1",
+                aes_key: rawAesKey.toString("base64"),
+              },
+            },
+          },
+        ],
+      },
+    });
+    expect(wxVidRes.replyText).toContain("已完成视频语音转写并归档至知识库");
+    expect(asrLocalFilesExistDuringRun).toEqual([true]);
+    const videoFilesInDir = readdirSync(f.config.videoDir!);
+    expect(videoFilesInDir.some((name) => name.endsWith(".mp4"))).toBe(false);
+    expect(videoFilesInDir.filter((name) => name.endsWith(".md")).length).toBeGreaterThanOrEqual(3);
+    const inboxAssetsDir = join(f.config.inboxDir!, "assets");
+    if (existsSync(inboxAssetsDir)) {
+      expect(readdirSync(inboxAssetsDir).some((name) => name.endsWith(".mp4"))).toBe(false);
+    }
   });
 });

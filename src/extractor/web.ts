@@ -1,8 +1,18 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
+import type { AppConfig } from "../config.ts";
 import { writeNewFile } from "../storage.ts";
 import { assertPublicUrl, fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
+import {
+  detectSourcePlatform,
+  extractUrlsFromMixedText,
+} from "./sanitizer.ts";
+import {
+  extractDouyinWork,
+  extractMediumArticle,
+  extractXiaohongshuNote,
+} from "./social_media.ts";
 import {
   ExtractedWeChatArticle,
   htmlToCleanMarkdownWithImages,
@@ -11,6 +21,7 @@ import {
   sanitizeSlug,
   yamlQuote,
 } from "./wechat.ts";
+import { extractYouTubeVideo } from "./youtube.ts";
 
 const BROWSER_USER_AGENT =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36";
@@ -29,26 +40,76 @@ export function isWeChatArticleUrl(rawUrl: string): boolean {
 }
 
 export function normalizeExternalWebUrl(rawUrl: string): string {
-  const normalized = rawUrl.trim().replace(/&amp;/g, "&").replace(/[),.;，。；！!]+$/, "");
+  const extracted = extractUrlsFromMixedText(rawUrl)[0] || rawUrl.trim();
+  const normalized = extracted
+    .replace(/&amp;/g, "&")
+    .replace(/[),.;，。；！!]+$/, "");
   const url = assertPublicUrl(normalized);
   url.hash = "";
   return url.toString();
 }
 
 /**
- * Extract any general web article (ArXiv, blogs, Substack, news, X/Twitter via Jina fallback, etc.).
+ * Extract any general web article or multi-platform content
+ * (Medium, YouTube, Xiaohongshu, Douyin, ArXiv, Substack, blogs, X/Twitter via Jina fallback, etc.).
  */
 export async function extractGeneralWebArticle(
   url: string,
   fallbackTitle = "",
   fallbackAuthor = "",
   fallbackDigest = "",
-  options: { allowJinaFallback?: boolean } = {}
+  options: { allowJinaFallback?: boolean; config?: AppConfig } = {}
 ): Promise<ExtractedWeChatArticle> {
   url = normalizeExternalWebUrl(url);
   if (isWeChatArticleUrl(url)) {
     const { extractWeChatArticle } = await import("./wechat.ts");
     return extractWeChatArticle(url, fallbackTitle, fallbackAuthor, fallbackDigest);
+  }
+
+  const platform = detectSourcePlatform(url);
+
+  if (platform === "youtube") {
+    return extractYouTubeVideo(
+      url,
+      fallbackTitle,
+      fallbackAuthor,
+      fallbackDigest,
+      { config: options.config }
+    );
+  }
+
+  if (platform === "xiaohongshu") {
+    return extractXiaohongshuNote(
+      url,
+      fallbackTitle,
+      fallbackAuthor,
+      fallbackDigest,
+      { config: options.config }
+    );
+  }
+
+  if (platform === "douyin") {
+    return extractDouyinWork(
+      url,
+      fallbackTitle,
+      fallbackAuthor,
+      fallbackDigest,
+      { config: options.config }
+    );
+  }
+
+  if (platform === "medium") {
+    return extractMediumArticle(
+      url,
+      fallbackTitle,
+      fallbackAuthor,
+      fallbackDigest,
+      {
+        config: options.config,
+        allowJinaFallback: options.allowJinaFallback,
+        parseHtmlFn: parseGeneralHtmlToArticle,
+      }
+    );
   }
 
   // Mode 1: Direct HTML fetch & semantic container extraction
@@ -64,6 +125,34 @@ export async function extractGeneralWebArticle(
     });
     if (resp.ok) {
       const html = await resp.text();
+      // If custom domain turns out to be a Medium publication, delegate if paywalled
+      if (detectSourcePlatform(url, html) === "medium") {
+        const parsedMed = parseGeneralHtmlToArticle(
+          html,
+          url,
+          fallbackTitle,
+          fallbackAuthor,
+          fallbackDigest
+        );
+        if (parsedMed) {
+          parsedMed.sourceType = "medium_article";
+          if (parsedMed.markdownBody.trim().length >= 800) {
+            return parsedMed;
+          }
+        }
+        return extractMediumArticle(
+          url,
+          fallbackTitle,
+          fallbackAuthor,
+          fallbackDigest,
+          {
+            config: options.config,
+            allowJinaFallback: options.allowJinaFallback,
+            parseHtmlFn: parseGeneralHtmlToArticle,
+          }
+        );
+      }
+
       const parsed = parseGeneralHtmlToArticle(
         html,
         url,
@@ -128,15 +217,17 @@ export function parseGeneralHtmlToArticle(
   fallbackAuthor = "",
   fallbackDigest = ""
 ): ExtractedWeChatArticle | null {
-  // If it happens to have WeChat structure, delegate
-  const wechatParsed = parseWeChatHtmlToArticle(
-    html,
-    url,
-    fallbackTitle,
-    fallbackAuthor,
-    fallbackDigest
-  );
-  if (wechatParsed) return wechatParsed;
+  // Only delegate to WeChat parser if it actually has WeChat URL or #js_content container
+  if (isWeChatArticleUrl(url) || /\bid=["']js_content["']/i.test(html)) {
+    const wechatParsed = parseWeChatHtmlToArticle(
+      html,
+      url,
+      fallbackTitle,
+      fallbackAuthor,
+      fallbackDigest
+    );
+    if (wechatParsed) return wechatParsed;
+  }
 
   const title =
     matchMeta(html, [
@@ -213,21 +304,37 @@ export async function saveRawWebArticleToVault(params: {
 
   const nowDate = new Date().toISOString().slice(0, 10);
   const isWeChat = isWeChatArticleUrl(params.article.url);
-  const sourceType = isWeChat ? "wechat_article" : "web_article";
+  const isVideo = params.article.mediaKind === "video";
+  const sourceType =
+    params.article.sourceType ||
+    (isWeChat ? "wechat_article" : isVideo ? "youtube_video" : "web_article");
 
   const lines = [
     "---",
     "type: source",
     `source_type: ${sourceType}`,
     `title: ${yamlQuote(params.article.title)}`,
+    ...(isVideo
+      ? [`channel_name: ${yamlQuote(params.article.author)}`]
+      : []),
     `account_name: ${yamlQuote(params.article.author)}`,
     `source_url: ${yamlQuote(params.article.url)}`,
     `published_date: ${params.article.publishDate}`,
     `captured_date: ${nowDate}`,
+    ...(params.article.durationSeconds
+      ? [`duration_seconds: ${params.article.durationSeconds}`]
+      : []),
+    ...(params.article.durationText
+      ? [`duration: ${yamlQuote(params.article.durationText)}`]
+      : []),
+    ...(params.article.transcriptEngine
+      ? [`transcript_engine: ${yamlQuote(params.article.transcriptEngine)}`]
+      : []),
     "process_level: raw",
     "triage: process_later",
     "tags:",
     `  - ${sourceType}`,
+    ...(isVideo ? ["  - video"] : []),
     "  - input",
     "---",
     "",
@@ -236,6 +343,9 @@ export async function saveRawWebArticleToVault(params: {
     `- **来源 / 作者**：${params.article.author}`,
     `- **发布时间**：${params.article.publishDate}`,
     `- **捕获时间**：${nowDate}`,
+    ...(params.article.durationText
+      ? [`- **视频时长**：${params.article.durationText}`]
+      : []),
     `- **原始链接**：[原文链接](${params.article.url})`,
     ...(params.userNotes?.trim() ? [`- **转发时批注**：${params.userNotes.trim()}`] : []),
     "",

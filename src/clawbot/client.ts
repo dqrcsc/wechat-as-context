@@ -1,5 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { ContextDatabase } from "../db.ts";
+import { extractUrlsFromMixedText } from "../extractor/sanitizer.ts";
 import { CDN_BASE_URL, CdnMediaRef, prepareMediaForUpload } from "./media.ts";
 
 const FIXED_BASE_URL = "https://ilinkai.weixin.qq.com";
@@ -791,15 +792,8 @@ export function unpackClawBotMessage(msg: ClawBotMessage): UnpackedClawBotMessag
 
     // Extract URLs from user text or card XML (excluding internal C2C CDN urls)
     const rawItemWithoutRef = JSON.stringify({ ...item, ref_msg: undefined });
-    const urlMatches = rawItemWithoutRef.match(/https?:\/\/[^\s"'<>\\]+/gi) ?? [];
-    for (const u of urlMatches) {
-      if (
-        !u.includes("novac2c.cdn.weixin.qq.com") &&
-        !u.includes("wxapp.tc.qq.com") &&
-        !u.includes("mmbiz.qpic.cn")
-      ) {
-        urlSet.add(u.replace(/&amp;/g, "&"));
-      }
+    for (const u of extractUrlsFromMixedText(rawItemWithoutRef)) {
+      urlSet.add(u);
     }
   }
 

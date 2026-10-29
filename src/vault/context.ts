@@ -936,6 +936,7 @@ export function ensureStarterVaultInitialized(config: AppConfig): {
     join(config.vaultRoot, "00_home"),
     config.wechatArticlesDir,
     config.webArticlesDir || join(config.vaultRoot, "01_inputs", "articles", "web"),
+    config.videoDir || join(config.vaultRoot, "01_inputs", "video"),
     config.inboxDir || join(config.vaultRoot, "01_inputs", "inbox"),
     config.papersDir || join(config.vaultRoot, "01_inputs", "papers"),
     config.ideasSeedsDir,

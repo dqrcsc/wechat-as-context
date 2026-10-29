@@ -162,7 +162,10 @@ export class WeChatContextPipeline {
                       record.title,
                       record.author,
                       record.digest,
-                      { allowJinaFallback: this.config.allowJinaFallback }
+                      {
+                        allowJinaFallback: this.config.allowJinaFallback,
+                        config: this.config,
+                      }
                     );
 
             this.db.updateArticle(id, {
@@ -191,9 +194,15 @@ export class WeChatContextPipeline {
               vaultContext,
             });
 
-            const webArticlesDir =
-              this.config.webArticlesDir ||
-              join(this.config.vaultRoot, "01_inputs", "articles", "web");
+            const isVideoSource = extracted.mediaKind === "video";
+            const targetExternalDir = isVideoSource
+              ? this.config.videoDir ||
+                join(this.config.vaultRoot, "01_inputs", "video")
+              : this.config.webArticlesDir ||
+                join(this.config.vaultRoot, "01_inputs", "articles", "web");
+            const externalFilePrefix = isVideoSource
+              ? "video_source"
+              : "web_article";
 
             const sourceMdPath = isWeChat
               ? await saveRawArticleToVault({
@@ -212,15 +221,15 @@ export class WeChatContextPipeline {
                     ),
                 })
               : await saveRawWebArticleToVault({
-                  articlesDir: webArticlesDir,
+                  articlesDir: targetExternalDir,
                   article: extracted,
                   slug: analysis.english_slug,
                   userNotes: record.user_notes,
                   existingPath:
                     record.source_md_path ||
                     join(
-                      webArticlesDir,
-                      `web_article_${createHash("sha256")
+                      targetExternalDir,
+                      `${externalFilePrefix}_${createHash("sha256")
                         .update(record.url)
                         .digest("hex")
                         .slice(0, 24)}.md`
@@ -374,7 +383,10 @@ export class WeChatContextPipeline {
                 record.title,
                 record.author,
                 record.digest,
-                { allowJinaFallback: this.config.allowJinaFallback }
+                {
+                  allowJinaFallback: this.config.allowJinaFallback,
+                  config: this.config,
+                }
               );
 
       const vaultContext = gatherVaultContext(
@@ -408,9 +420,12 @@ export class WeChatContextPipeline {
         };
       }
 
-      const webArticlesDir =
-        this.config.webArticlesDir ||
-        join(this.config.vaultRoot, "01_inputs", "articles", "web");
+      const targetExternalDir =
+        extracted.mediaKind === "video"
+          ? this.config.videoDir ||
+            join(this.config.vaultRoot, "01_inputs", "video")
+          : this.config.webArticlesDir ||
+            join(this.config.vaultRoot, "01_inputs", "articles", "web");
       const sourceMdPath =
         record.source_md_path && existsSync(record.source_md_path)
           ? record.source_md_path
@@ -423,7 +438,7 @@ export class WeChatContextPipeline {
                 existingPath: record.source_md_path || undefined,
               })
             : await saveRawWebArticleToVault({
-                articlesDir: webArticlesDir,
+                articlesDir: targetExternalDir,
                 article: extracted,
                 slug: analysis.english_slug,
                 userNotes: record.user_notes,
@@ -681,7 +696,11 @@ export class WeChatContextPipeline {
     unpacked: ReturnType<typeof unpackClawBotMessage>
   ): boolean {
     if (this.config.llm.apiKey) return true;
-    if (unpacked.mediaItems.some((i) => i.kind === "image" || i.kind === "file")) {
+    if (
+      unpacked.mediaItems.some(
+        (i) => i.kind === "image" || i.kind === "file" || i.kind === "video"
+      )
+    ) {
       return true;
     }
     if (unpacked.refContext) return true;
