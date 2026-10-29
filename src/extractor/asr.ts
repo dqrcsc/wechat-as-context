@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -12,10 +13,11 @@ import { homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import type { AppConfig } from "../config.ts";
 import { fetchWithTransientRetry, resolveModelEndpoint } from "../agent/llm.ts";
-import { fetchPublicResource } from "../public_url.ts";
+import { assertPublicUrl, fetchPublicResource } from "../public_url.ts";
 
 export interface AsrTranscriptionRequest {
   mediaUrl?: string;
+  mediaUrls?: string[];
   mediaPath?: string;
   headers?: Record<string, string>;
   config?: AppConfig;
@@ -100,25 +102,80 @@ export async function transcribeAudioFromMedia(
 
   try {
     let localMediaPath = req.mediaPath;
-    if (!localMediaPath && req.mediaUrl) {
-      const resp = await fetchPublicResource(req.mediaUrl, {
-        headers: {
-          "User-Agent":
-            "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-          ...(req.headers || {}),
-        },
-        redirect: "follow",
-        signal: AbortSignal.timeout(60_000),
-      });
-      if (!resp.ok) {
-        throw new Error(`Failed to download media stream HTTP ${resp.status}`);
+    const candidateUrls = Array.from(
+      new Set([...(req.mediaUrls || []), ...(req.mediaUrl ? [req.mediaUrl] : [])].filter(Boolean))
+    );
+
+    if (!localMediaPath && candidateUrls.length > 0) {
+      const targetOut = join(workDir, "downloaded_stream.mp4");
+      const defaultUa =
+        req.headers?.["User-Agent"] ||
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
+      const referer = req.headers?.Referer || "";
+
+      // In production (non-test), prefer curl -4 direct-to-disk download so 50-100MB HD video streams
+      // don't stall on IPv6 or buffer entirely in JS memory, and partial files (>200KB) are still usable by ffmpeg.
+      if (!process.env.WXCTX_TEST_ROOT && existsSync("/usr/bin/curl")) {
+        for (const candidateUrl of candidateUrls) {
+          try {
+            assertPublicUrl(candidateUrl);
+            const curlArgs = [
+              "-4",
+              "-sS",
+              "-L",
+              "--max-time",
+              "75",
+              "-A",
+              defaultUa,
+              ...(referer ? ["-H", `Referer: ${referer}`] : []),
+              "-o",
+              targetOut,
+              candidateUrl,
+            ];
+            spawnSync("/usr/bin/curl", curlArgs, {
+              encoding: "utf-8",
+              timeout: 80_000,
+            });
+            if (existsSync(targetOut) && statSync(targetOut).size >= 100_000) {
+              localMediaPath = targetOut;
+              break;
+            }
+          } catch {}
+        }
       }
-      const buf = Buffer.from(await resp.arrayBuffer());
-      if (buf.length < 256) {
-        throw new Error("Downloaded media stream is empty or invalid");
+
+      if (!localMediaPath) {
+        let lastErr: Error | null = null;
+        for (const candidateUrl of candidateUrls) {
+          try {
+            const resp = await fetchPublicResource(candidateUrl, {
+              headers: {
+                "User-Agent": defaultUa,
+                ...(req.headers || {}),
+              },
+              redirect: "follow",
+              signal: AbortSignal.timeout(60_000),
+            });
+            if (!resp.ok) {
+              lastErr = new Error(`Failed to download media stream HTTP ${resp.status}`);
+              continue;
+            }
+            const buf = Buffer.from(await resp.arrayBuffer());
+            if (buf.length < 256) {
+              lastErr = new Error("Downloaded media stream is empty or invalid");
+              continue;
+            }
+            writeFileSync(targetOut, buf);
+            localMediaPath = targetOut;
+            break;
+          } catch (err: any) {
+            lastErr = err instanceof Error ? err : new Error(String(err));
+          }
+        }
+        if (!localMediaPath && lastErr) {
+          throw lastErr;
+        }
       }
-      localMediaPath = join(workDir, "downloaded_stream.mp4");
-      writeFileSync(localMediaPath, buf);
     }
 
     if (!localMediaPath || !existsSync(localMediaPath)) {
@@ -149,8 +206,8 @@ export async function transcribeAudioFromMedia(
         ],
         {
           encoding: "utf-8",
-          timeout: 90_000,
-          maxBuffer: 10 * 1024 * 1024,
+          timeout: 120_000,
+          maxBuffer: 25 * 1024 * 1024,
         }
       );
       if (ffRes.stderr) {
@@ -165,7 +222,7 @@ export async function transcribeAudioFromMedia(
           );
         }
       }
-      if (ffRes.status === 0 && existsSync(wavOut)) {
+      if (existsSync(wavOut) && statSync(wavOut).size > 4096) {
         audioPathForAsr = wavOut;
       }
     }

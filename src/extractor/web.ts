@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import type { AppConfig } from "../config.ts";
-import { writeNewFile } from "../storage.ts";
+import { replaceFileAtomically, writeNewFile } from "../storage.ts";
 import { assertPublicUrl, fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
 import {
   detectSourcePlatform,
@@ -284,6 +284,7 @@ export async function saveRawWebArticleToVault(params: {
   slug: string;
   userNotes?: string;
   existingPath?: string;
+  overwriteExisting?: boolean;
 }): Promise<string> {
   mkdirSync(params.articlesDir, { recursive: true });
   const datePrefix = new Date().toISOString().slice(0, 10).replace(/-/g, "_");
@@ -291,7 +292,7 @@ export async function saveRawWebArticleToVault(params: {
   const identity = createHash("sha256").update(params.article.url).digest("hex").slice(0, 16);
   const baseFolderSlug = `${datePrefix}_${cleanSlug}_${identity}`;
   const fullPath = params.existingPath || join(params.articlesDir, `${baseFolderSlug}.md`);
-  if (existsSync(fullPath)) return fullPath;
+  if (existsSync(fullPath) && !params.overwriteExisting) return fullPath;
 
   const assetsDir = join(params.articlesDir, "assets", baseFolderSlug);
   const relativeAssetsPrefix = `assets/${baseFolderSlug}`;
@@ -355,7 +356,11 @@ export async function saveRawWebArticleToVault(params: {
     "",
   ];
 
-  writeNewFile(fullPath, lines.join("\n"));
+  if (existsSync(fullPath) && params.overwriteExisting) {
+    replaceFileAtomically(fullPath, lines.join("\n"));
+  } else {
+    writeNewFile(fullPath, lines.join("\n"));
+  }
   return fullPath;
 }
 

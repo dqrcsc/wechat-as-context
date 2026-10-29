@@ -356,15 +356,29 @@ export class WeChatContextPipeline {
       }
 
       const isWeChat = isWeChatArticleUrl(record.url);
-      const extracted =
+      const existingSourceContent =
         record.source_md_path && existsSync(record.source_md_path)
+          ? readFileSync(record.source_md_path, "utf8")
+          : "";
+      const shouldReextractSource =
+        Boolean(options?.force) &&
+        (!existingSourceContent ||
+          /transcript_engine:\s*["']?metadata_only["']?/i.test(
+            existingSourceContent
+          ) ||
+          existingSourceContent.includes("暂未获取到视频音频流或转写结果"));
+
+      const extracted =
+        existingSourceContent && !shouldReextractSource
           ? {
               url: record.url,
               title: record.title,
               author: record.author,
               digest: record.digest,
-              publishDate: record.created_at?.slice(0, 10) || new Date().toISOString().slice(0, 10),
-              markdownBody: readFileSync(record.source_md_path, "utf8").replace(
+              publishDate:
+                record.created_at?.slice(0, 10) ||
+                new Date().toISOString().slice(0, 10),
+              markdownBody: existingSourceContent.replace(
                 /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
                 ""
               ),
@@ -427,7 +441,9 @@ export class WeChatContextPipeline {
           : this.config.webArticlesDir ||
             join(this.config.vaultRoot, "01_inputs", "articles", "web");
       const sourceMdPath =
-        record.source_md_path && existsSync(record.source_md_path)
+        record.source_md_path &&
+        existsSync(record.source_md_path) &&
+        !shouldReextractSource
           ? record.source_md_path
           : isWeChat
             ? await saveRawArticleToVault({
@@ -443,6 +459,7 @@ export class WeChatContextPipeline {
                 slug: analysis.english_slug,
                 userNotes: record.user_notes,
                 existingPath: record.source_md_path || undefined,
+                overwriteExisting: shouldReextractSource,
               });
 
       const noteMdPath =

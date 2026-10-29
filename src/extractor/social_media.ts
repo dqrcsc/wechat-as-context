@@ -1,6 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  unlinkSync,
+} from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AppConfig } from "../config.ts";
 import { fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
@@ -452,22 +459,49 @@ export async function extractDouyinWork(
     } catch {}
   }
 
-  // Step 3: Fallback to local Chrome session if still missing
-  if (!itemInfo && !process.env.WXCTX_TEST_ROOT) {
-    const domHtml = renderDomWithLocalChromeSession(finalUrl, options?.config);
-    if (domHtml) {
-      html = domHtml;
-      itemInfo = parseDouyinRouterData(domHtml);
+  // Step 3: Fetch rich SEO JSON-LD metadata (creator, duration, uploadDate, creator/top comments)
+  const seoMeta =
+    !process.env.WXCTX_TEST_ROOT && awemeId
+      ? await fetchDouyinSeoVideoObject(awemeId)
+      : null;
+
+  // Step 4: Use local headless Chrome CDP to intercept /aweme/v1/web/aweme/detail when SSR _ROUTER_DATA is empty
+  const domStreamUrls: string[] = [];
+  if (
+    !itemInfo?.video?.play_addr?.url_list?.length &&
+    !Array.isArray(itemInfo?.images) &&
+    !process.env.WXCTX_TEST_ROOT &&
+    awemeId
+  ) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const cdpRes = await fetchDouyinAwemeDetailViaCdp(awemeId);
+      if (cdpRes?.awemeDetail) {
+        itemInfo = cdpRes.awemeDetail;
+      }
+      if (cdpRes?.streamUrls?.length) {
+        for (const u of cdpRes.streamUrls) {
+          if (!domStreamUrls.includes(u)) domStreamUrls.push(u);
+        }
+      }
+      if (itemInfo?.video?.play_addr?.url_list?.length || domStreamUrls.length > 0) {
+        break;
+      }
     }
   }
 
-  const rawDesc =
+  const rawDescUnstripped =
     itemInfo?.desc ||
+    seoMeta?.name ||
     matchMeta(html, "og:title") ||
     matchMeta(html, "description") ||
     fallbackTitle ||
     fallbackDigest ||
     "";
+  const rawDesc = rawDescUnstripped
+    .replace(/\s*-\s*[^-]+于\d{8}发布在抖音，已经收获了[\s\S]*$/, "")
+    .replace(/\s*-\s*抖音$/, "")
+    .trim();
+
   const title =
     rawDesc
       .split(/\r?\n/)[0]
@@ -478,32 +512,75 @@ export async function extractDouyinWork(
     (awemeId ? `抖音视频 (${awemeId})` : "抖音作品");
   const author =
     itemInfo?.author?.nickname ||
+    seoMeta?.creatorName ||
     matchMeta(html, "author") ||
     fallbackAuthor ||
     "抖音创作者";
   const publishDate = itemInfo?.create_time
     ? new Date(Number(itemInfo.create_time) * 1000).toISOString().slice(0, 10)
-    : new Date().toISOString().slice(0, 10);
+    : seoMeta?.uploadDate || new Date().toISOString().slice(0, 10);
 
   const coverUrl =
     itemInfo?.video?.cover?.url_list?.[0] ||
     itemInfo?.video?.origin_cover?.url_list?.[0] ||
+    seoMeta?.coverUrl ||
     matchMeta(html, "og:image") ||
     "";
 
-  // Extract watermark-free video stream URL (replace playwm with play)
-  const rawPlayUrl =
-    itemInfo?.video?.play_addr?.url_list?.[0] ||
-    matchMeta(html, "og:video") ||
-    "";
-  const playUrl = rawPlayUrl
-    ? rawPlayUrl.replace("/playwm/", "/play/")
-    : "";
+  // Extract watermark-free audio/video stream URLs (prioritize lightweight demuxed audio & low-bitrate gears)
+  const candidateStreamUrls: string[] = [];
+  const pushStreamCandidate = (u: unknown) => {
+    if (typeof u !== "string" || !u.startsWith("http")) return;
+    const clean = u.replace("/playwm/", "/play/");
+    if (!candidateStreamUrls.includes(clean)) {
+      candidateStreamUrls.push(clean);
+    }
+  };
+
+  if (Array.isArray(itemInfo?.video?.bit_rate_audio)) {
+    for (const audioGear of itemInfo.video.bit_rate_audio) {
+      pushStreamCandidate(audioGear?.audio_meta?.url_list?.main_url);
+      pushStreamCandidate(audioGear?.audio_meta?.url_list?.backup_url);
+    }
+  }
+  if (
+    itemInfo?.music?.play_url?.url_list?.[0] &&
+    (itemInfo?.music?.is_original_sound ||
+      itemInfo?.music?. is_original ||
+      String(itemInfo?.music?.title || "").includes("原声") ||
+      (itemInfo?.author?.uid &&
+        itemInfo?.music?.owner_id === itemInfo?.author?.uid))
+  ) {
+    pushStreamCandidate(itemInfo.music.play_url.url_list[0]);
+  }
+  if (Array.isArray(itemInfo?.video?.bit_rate)) {
+    const sortedGears = [...itemInfo.video.bit_rate].sort(
+      (a, b) =>
+        Number(a?.play_addr?.data_size || Infinity) -
+        Number(b?.play_addr?.data_size || Infinity)
+    );
+    for (const gear of sortedGears) {
+      if (Array.isArray(gear?.play_addr?.url_list)) {
+        for (const u of gear.play_addr.url_list) pushStreamCandidate(u);
+      }
+    }
+  }
+  if (Array.isArray(itemInfo?.video?.play_addr?.url_list)) {
+    for (const u of itemInfo.video.play_addr.url_list) {
+      pushStreamCandidate(u);
+    }
+  }
+  const ogVideo = matchMeta(html, "og:video");
+  if (ogVideo) pushStreamCandidate(ogVideo);
+  for (const u of domStreamUrls) {
+    pushStreamCandidate(u);
+  }
+  const playUrl = candidateStreamUrls[0] || "";
 
   const durationSeconds = itemInfo?.video?.duration
     ? Math.round(Number(itemInfo.video.duration) / 1000) ||
       Number(itemInfo.video.duration)
-    : undefined;
+    : seoMeta?.durationSeconds;
 
   // Check if it is a Douyin Image Album (图集)
   const albumImages: string[] = [];
@@ -552,9 +629,10 @@ export async function extractDouyinWork(
     try {
       const asrRes = await transcribeAudioFromMedia({
         mediaUrl: playUrl,
+        mediaUrls: candidateStreamUrls,
         headers: {
           Referer: "https://www.douyin.com/",
-          "User-Agent": MOBILE_IOS_UA,
+          "User-Agent": DESKTOP_CHROME_UA,
         },
         config: options?.config,
         hintTitle: title,
@@ -584,6 +662,12 @@ export async function extractDouyinWork(
       `> ⚠️ 暂未获取到视频音频流或转写结果，以上为视频标题与文案。`
     );
   }
+  if (seoMeta?.comments && seoMeta.comments.length > 0) {
+    sections.push(
+      `## 创作者补充与高赞评论\n\n` +
+        seoMeta.comments.map((c) => `- ${c}`).join("\n")
+    );
+  }
 
   return {
     url: canonicalVideoUrl,
@@ -600,6 +684,313 @@ export async function extractDouyinWork(
     durationText: durationSeconds ? formatDurationHms(durationSeconds) : undefined,
     transcriptEngine: engineUsed,
   };
+}
+
+interface DouyinSeoVideoMeta {
+  name?: string;
+  creatorName?: string;
+  uploadDate?: string;
+  durationSeconds?: number;
+  coverUrl?: string;
+  comments: string[];
+}
+
+async function fetchDouyinSeoVideoObject(
+  awemeId: string
+): Promise<DouyinSeoVideoMeta | null> {
+  try {
+    const seoUrl = `https://www.douyin.com/video/${awemeId}`;
+    const resp = await fetchPublicResource(seoUrl, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (compatible; Bytespider; https://zhanzhang.toutiao.com/)",
+        Accept: "text/html,application/xhtml+xml",
+        "Accept-Language": "zh-CN,zh;q=0.9",
+      },
+      redirect: "follow",
+      signal: AbortSignal.timeout(15_000),
+    });
+    if (!resp.ok) return null;
+    const html = await resp.text();
+    const ldMatches = [
+      ...html.matchAll(
+        /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+      ),
+    ];
+    for (const m of ldMatches) {
+      try {
+        const data = JSON.parse(m[1].trim());
+        if (data?.["@type"] === "VideoObject") {
+          const name =
+            typeof data.name === "string"
+              ? data.name.replace(/\s*-\s*抖音$/, "").trim()
+              : undefined;
+          const creatorName =
+            typeof data.creator?.name === "string"
+              ? data.creator.name.trim()
+              : undefined;
+          const uploadDate =
+            typeof data.uploadDate === "string"
+              ? data.uploadDate.slice(0, 10)
+              : undefined;
+          let durationSeconds: number | undefined;
+          if (typeof data.duration === "string") {
+            const dm = data.duration.match(
+              /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/i
+            );
+            if (dm) {
+              const h = Number(dm[1] || 0);
+              const min = Number(dm[2] || 0);
+              const s = Number(dm[3] || 0);
+              const total = h * 3600 + min * 60 + s;
+              if (total > 0) durationSeconds = total;
+            }
+          }
+          const coverUrl = Array.isArray(data.thumbnailUrl)
+            ? data.thumbnailUrl.find(
+                (u: unknown) => typeof u === "string" && u.startsWith("http")
+              )
+            : undefined;
+          const comments: string[] = [];
+          if (Array.isArray(data.comment)) {
+            for (const c of data.comment.slice(0, 6)) {
+              const cAuthor = c?.creator?.name?.trim() || "网友";
+              const cText = c?.text?.trim();
+              const likes = Number(
+                c?.interactionStatistic?.userInteractionCount || 0
+              );
+              if (cText) {
+                const roleTag =
+                  creatorName && cAuthor === creatorName
+                    ? `**${cAuthor}（作者补充）**`
+                    : `**${cAuthor}**${likes > 0 ? `（👍 ${likes}）` : ""}`;
+                comments.push(`${roleTag}：${cText}`);
+              }
+            }
+          }
+          return {
+            name,
+            creatorName,
+            uploadDate,
+            durationSeconds,
+            coverUrl,
+            comments,
+          };
+        }
+      } catch {}
+    }
+  } catch {}
+  return null;
+}
+
+async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
+  awemeDetail: any | null;
+  streamUrls: string[];
+} | null> {
+  if (process.env.WXCTX_TEST_ROOT) return null;
+  const chromePaths = [
+    process.env.CHROME_BIN || "",
+    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+    "/Applications/Chromium.app/Contents/MacOS/Chromium",
+    "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+  ].filter(Boolean);
+  const chromeBin = chromePaths.find((p) => existsSync(p));
+  if (!chromeBin) return null;
+
+  const profileDir = mkdtempSync(join(tmpdir(), "wxctx-dy-cdp-"));
+  let proc: ReturnType<typeof Bun.spawn> | null = null;
+  let ws: WebSocket | null = null;
+
+  try {
+    proc = Bun.spawn(
+      [
+        chromeBin,
+        "--headless=new",
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--mute-audio",
+        `--user-agent=${DESKTOP_CHROME_UA}`,
+        `--user-data-dir=${profileDir}`,
+        "--remote-debugging-port=0",
+        "about:blank",
+      ],
+      { stderr: "pipe", stdout: "ignore" }
+    );
+
+    const reader = (proc.stderr as ReadableStream<Uint8Array>).getReader();
+    const dec = new TextDecoder();
+    let stderrText = "";
+    let browserWsUrl = "";
+
+    const wsDeadline = Date.now() + 12_000;
+    while (!browserWsUrl && Date.now() < wsDeadline) {
+      const readRes = await Promise.race([
+        reader.read(),
+        Bun.sleep(2000).then(() => ({ done: true, value: undefined })),
+      ]);
+      if (readRes.value) {
+        stderrText += dec.decode(readRes.value, { stream: true });
+        const m = stderrText.match(/DevTools listening on (ws:\/\/[^\s]+)/);
+        if (m) browserWsUrl = m[1];
+      }
+      if (readRes.done && !readRes.value) break;
+    }
+    if (!browserWsUrl) return null;
+
+    const baseHttp = browserWsUrl
+      .replace(/^ws:\/\//, "http://")
+      .replace(/\/devtools\/browser\/.*$/, "");
+    let pageWsUrl = "";
+    for (let i = 0; i < 15; i++) {
+      try {
+        const list = (await (await fetch(`${baseHttp}/json/list`)).json()) as any[];
+        const page = list.find(
+          (t) => t.type === "page" && typeof t.webSocketDebuggerUrl === "string"
+        );
+        if (page) {
+          pageWsUrl = page.webSocketDebuggerUrl;
+          break;
+        }
+      } catch {}
+      await Bun.sleep(200);
+    }
+    if (!pageWsUrl) return null;
+
+    ws = new WebSocket(pageWsUrl);
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("CDP WS open timeout")), 5000);
+      ws!.addEventListener(
+        "open",
+        () => {
+          clearTimeout(timer);
+          resolve();
+        },
+        { once: true }
+      );
+      ws!.addEventListener(
+        "error",
+        (err) => {
+          clearTimeout(timer);
+          reject(err);
+        },
+        { once: true }
+      );
+    });
+
+    let msgId = 1;
+    const pending = new Map<number, (res: any) => void>();
+    const call = (method: string, params: Record<string, unknown> = {}) =>
+      new Promise<any>((resolve) => {
+        const id = msgId++;
+        pending.set(id, resolve);
+        ws!.send(JSON.stringify({ id, method, params }));
+      });
+
+    const streamUrls: string[] = [];
+    const detailReqIds = new Set<string>();
+    let awemeDetail: any = null;
+
+    ws.addEventListener("message", async (ev) => {
+      try {
+        const data = JSON.parse(String(ev.data));
+        if (data.id && pending.has(data.id)) {
+          pending.get(data.id)!(data.result);
+          pending.delete(data.id);
+          return;
+        }
+        if (data.method === "Network.requestWillBeSent") {
+          const u = String(data.params?.request?.url || "");
+          if (u.includes("douyinvod.com") || u.includes("aweme/v1/play")) {
+            if (!streamUrls.includes(u)) streamUrls.push(u);
+          }
+          if (
+            u.includes("/aweme/v1/web/aweme/detail") &&
+            data.params?.requestId
+          ) {
+            detailReqIds.add(String(data.params.requestId));
+          }
+        }
+        if (data.method === "Network.responseReceived") {
+          const u = String(data.params?.response?.url || "");
+          if (u.includes("douyinvod.com") || u.includes("aweme/v1/play")) {
+            if (!streamUrls.includes(u)) streamUrls.push(u);
+          }
+          if (
+            u.includes("/aweme/v1/web/aweme/detail") &&
+            data.params?.requestId
+          ) {
+            detailReqIds.add(String(data.params.requestId));
+          }
+        }
+        if (
+          data.method === "Network.loadingFinished" &&
+          data.params?.requestId &&
+          detailReqIds.has(String(data.params.requestId))
+        ) {
+          const bodyRes = await call("Network.getResponseBody", {
+            requestId: data.params.requestId,
+          });
+          if (bodyRes?.body) {
+            const rawBody = bodyRes.base64Encoded
+              ? Buffer.from(bodyRes.body, "base64").toString("utf-8")
+              : String(bodyRes.body);
+            const parsed = JSON.parse(rawBody);
+            if (parsed?.aweme_detail) {
+              awemeDetail = parsed.aweme_detail;
+            }
+          }
+        }
+      } catch {}
+    });
+
+    await call("Network.enable");
+    await call("Page.enable");
+    await call("Page.navigate", {
+      url: `https://www.douyin.com/video/${awemeId}`,
+    });
+
+    for (let i = 0; i < 50; i++) {
+      await Bun.sleep(500);
+      if (awemeDetail) break;
+      if (i === 24 && detailReqIds.size === 0) {
+        await call("Page.navigate", {
+          url: `https://www.douyin.com/video/${awemeId}`,
+        });
+      }
+    }
+
+    if (!awemeDetail) {
+      try {
+        const evalRes = await call("Runtime.evaluate", {
+          expression: `JSON.stringify([...document.querySelectorAll("video source, video")].map(e => e.getAttribute("src")).filter(s => s && s.startsWith("http") && (s.includes("douyinvod.com") || s.includes("aweme/v1/play"))))`,
+          returnByValue: true,
+        });
+        const domSrcs = JSON.parse(evalRes?.result?.value || "[]");
+        for (const s of domSrcs) {
+          if (typeof s === "string" && !streamUrls.includes(s)) {
+            streamUrls.push(s);
+          }
+        }
+      } catch {}
+    }
+
+    return { awemeDetail, streamUrls };
+  } catch (err) {
+    console.warn(`[DouyinExtractor] CDP extraction warning for ${awemeId}:`, err);
+    return null;
+  } finally {
+    try {
+      ws?.close();
+    } catch {}
+    try {
+      proc?.kill();
+    } catch {}
+    try {
+      rmSync(profileDir, { recursive: true, force: true });
+    } catch {}
+  }
 }
 
 function parseDouyinRouterData(html: string): any | null {
@@ -651,7 +1042,9 @@ function parseDouyinRouterData(html: string): any | null {
 
 function renderDomWithLocalChromeSession(
   url: string,
-  config?: AppConfig
+  config?: AppConfig,
+  virtualTimeBudgetMs = 6000,
+  ephemeralProfile = false
 ): string | null {
   if (process.env.WXCTX_TEST_ROOT) return null;
   const chromePaths = [
@@ -664,16 +1057,27 @@ function renderDomWithLocalChromeSession(
   const chromeBin = chromePaths.find((p) => existsSync(p));
   if (!chromeBin) return null;
 
-  // Prepare an isolated shadow profile directory that syncs Cookies from the user's macOS Chrome Default profile
-  // so it never collides with a running Chrome instance's SingletonLock.
-  const shadowProfileDir = config?.dataDir
-    ? join(config.dataDir, "browser_profile")
-    : undefined;
+  // For Douyin video stream extraction, an ephemeral profile prevents xgplayer from caching MSE support
+  // in Local Storage and switching from direct <source src="https://...douyinvod.com/..."> to blob: URLs.
+  const profileDir = ephemeralProfile
+    ? mkdtempSync(join(tmpdir(), "wxctx-chrome-dom-"))
+    : config?.dataDir
+      ? join(config.dataDir, "browser_profile")
+      : join(homedir(), ".cache", "wechat_as_context_browser_profile");
 
-  if (shadowProfileDir) {
-    try {
-      const shadowDefault = join(shadowProfileDir, "Default");
+  try {
+    if (!ephemeralProfile) {
+      const shadowDefault = join(profileDir, "Default");
       mkdirSync(shadowDefault, { recursive: true });
+      for (const lockName of [
+        "SingletonLock",
+        "SingletonCookie",
+        "SingletonSocket",
+      ]) {
+        try {
+          unlinkSync(join(profileDir, lockName));
+        } catch {}
+      }
       const macChromeRoot = join(
         homedir(),
         "Library",
@@ -686,31 +1090,37 @@ function renderDomWithLocalChromeSession(
       if (existsSync(cookiesSrc) && !existsSync(cookiesDest)) {
         cpSync(cookiesSrc, cookiesDest);
       }
-    } catch {}
+    }
+
+    const args = [
+      "--headless=new",
+      "--disable-gpu",
+      "--no-first-run",
+      "--no-default-browser-check",
+      `--user-agent=${DESKTOP_CHROME_UA}`,
+      `--user-data-dir=${profileDir}`,
+      `--virtual-time-budget=${virtualTimeBudgetMs}`,
+      "--dump-dom",
+      url,
+    ];
+
+    const res = spawnSync(chromeBin, args, {
+      encoding: "utf-8",
+      timeout: Math.max(45_000, virtualTimeBudgetMs + 35_000),
+      maxBuffer: 25 * 1024 * 1024,
+    });
+
+    if (res.stdout && res.stdout.length > 200) {
+      return res.stdout;
+    }
+    return null;
+  } finally {
+    if (ephemeralProfile) {
+      try {
+        rmSync(profileDir, { recursive: true, force: true });
+      } catch {}
+    }
   }
-
-  const args = [
-    "--headless=new",
-    "--disable-gpu",
-    "--no-first-run",
-    "--no-default-browser-check",
-    `--user-agent=${DESKTOP_CHROME_UA}`,
-    ...(shadowProfileDir ? [`--user-data-dir=${shadowProfileDir}`] : []),
-    "--virtual-time-budget=6000",
-    "--dump-dom",
-    url,
-  ];
-
-  const res = spawnSync(chromeBin, args, {
-    encoding: "utf-8",
-    timeout: 25_000,
-    maxBuffer: 25 * 1024 * 1024,
-  });
-
-  if (res.stdout && res.stdout.length > 200) {
-    return res.stdout;
-  }
-  return null;
 }
 
 function matchMeta(html: string, nameOrProp: string): string {

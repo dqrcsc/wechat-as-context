@@ -220,8 +220,14 @@ export function sanitizeSharedLinkMessage(
         extractedTitle = caption.slice(0, 80);
       }
       remaining = afterUrl
-        .replace(/^\s*\b\d{2}\/\d{2}\b\s*[A-Za-z0-9@._:]+\s*(?::\d+[a-zA-Z]+)?\s*/g, "")
-        .replace(/\b\d{2}\/\d{2}\b\s*[A-Za-z0-9@._:]+\s*(?::\d+[a-zA-Z]+)?\s*$/g, "")
+        .replace(
+          /^\s*\b\d{2}\/\d{2}\b(?:\s+[A-Za-z0-9@._:/-]+){1,4}\s*/g,
+          ""
+        )
+        .replace(
+          /\b\d{2}\/\d{2}\b(?:\s+[A-Za-z0-9@._:/-]+){1,4}\s*$/g,
+          ""
+        )
         .trim();
     } else {
       const beforeStrip = remaining;
@@ -230,7 +236,10 @@ export function sanitizeSharedLinkMessage(
         .replace(/复制打开抖音[^。！!]*[。！!]?/g, "")
         .replace(/复制此链接，打开抖音[^。！!]*[。！!]?/g, "")
         .replace(/看看【[^】]+】/g, "")
-        .replace(/\b\d{2}\/\d{2}\b\s*[A-Za-z0-9@._:]+\s*(?::\d+[a-zA-Z]+)?\s*/g, "")
+        .replace(
+          /\b\d{2}\/\d{2}\b(?:\s+[A-Za-z0-9@._:/-]+){1,4}\s*/g,
+          ""
+        )
         .trim();
       if (remaining !== beforeStrip) wasBoilerplate = true;
     }

@@ -1504,6 +1504,13 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
     expect(dySanitized.extractedTitle).toBe("大模型Agent架构演进");
     expect(dySanitized.userNotes).toBe("");
 
+    const dyRealWorldRaw =
+      "6.12 复制打开抖音，看看【许哈哈😄的作品】用ai学ai，才是唯一正确路径 # ai# 如何用... https://v.douyin.com/xRQ5FCRDsTI/ 05/21 sRx:/ :2pm e@B.gb";
+    const dyRealWorldSanitized = sanitizeSharedLinkMessage(dyRealWorldRaw);
+    expect(dyRealWorldSanitized.url).toBe("https://v.douyin.com/xRQ5FCRDsTI/");
+    expect(dyRealWorldSanitized.extractedTitle).toBe("用ai学ai，才是唯一正确路径");
+    expect(dyRealWorldSanitized.userNotes).toBe("");
+
     const dyWithComment =
       "4.89 复制打开抖音，看看【AI前沿的作品】大模型Agent架构演进 https://v.douyin.com/iYabc123/ 这个视频讲的状态机拆解非常值得借鉴";
     const dyCommentSanitized = sanitizeSharedLinkMessage(dyWithComment);
