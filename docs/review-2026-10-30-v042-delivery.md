@@ -14,7 +14,7 @@
 | 无令牌补发也失败时仍把原令牌当作无效清理 | 原令牌保留；仅无令牌补发成功后尝试清理，而且必须匹配原值和 revision。清理失败不得把已接受的发送变成再次重试。 |
 | 重复消息或迟到旧消息会覆盖新令牌 | 只为首次持久入库的消息更新令牌；有有效 create_time_ms 时拒绝较旧时间。清理保留时间高水位；未知时间按接收顺序处理，不宣称能恢复服务端完整顺序。 |
 | 多段正文整次发送只读取一次令牌 | 每个实际发送分段重新读取；保留原有分段检查点、稳定 client_id。 |
-| 常规 flush 不强制 next_retry_at，多个触发者可能快速耗尽次数 | 默认检查持久截止时间；仍最多 3 次队列尝试，第一次失败后至少5秒、第二次失败后至少15秒。只有内部显式 enforceRetryBackoff:false 才绕过等待；正常 CLI/轮询不使用此选项。 |
+| 常规 flush 不强制 next_retry_at，多个触发者可能快速耗尽次数 | 默认检查持久截止时间，间隔从失败完成时刻计算，慢请求不吞掉等待；仍最多 3 次队列尝试，第一次失败后至少5秒、第二次失败后至少15秒。只有内部显式 enforceRetryBackoff:false 才绕过等待；正常 CLI/轮询不使用此选项。 |
 | 只有最终 error，无法区分上传、最终发送及恢复分支 | 增加独立 delivery_events 表和 doctor 输出；错误消息只保留受控分类和数字码。 |
 
 每个文本分段或媒体消息在一次队列尝试中最多两次 sendmessage 请求（初始请求 + 一次恢复）。有新令牌时优先尝试新令牌；否则保留原有无令牌兼容回退。无令牌请求被拒绝时不再补发，其他 HTTP、网络或业务错误不走 ret=-2 专属恢复。媒体同次恢复复用已上传内容，不重新上传。不同队列条目各自记录结果；并未假设账号发送配额，也没有加入未经证实的固定令牌 TTL。
@@ -27,7 +27,7 @@
 - 阶段：outbox、media_prepare、getuploadurl、cdn_upload、sendmessage、sendmessage_media、context。
 - 请求：started/succeeded/failed、耗时、HTTP状态、数字 ret/errcode、chunk；外层失败另有 failureStage。
 - 令牌：仅保存 SHA-256 截短指纹、revision 指纹、是否存在，以及本地最后观察时间到发送时的毫秒差 tokenAgeMs。该年龄不是服务端有效期。
-- 恢复：retry_new_context、retry_without_context、context_cleared、context_preserved。失败分类区分 network、timeout、http、api_prepare_failed、api_rejected、invalid_response、local_validation。
+- 恢复：retry_new_context、retry_without_context、context_cleared、context_preserved。失败分类区分 network、timeout、http、api_prepare_failed、api_rejected、invalid_response、local_validation、interrupted（最后一次尝试中断，结果未知）。
 - 不保存 bot_token、context_token 原文、正文、附件内容/路径、请求 URL 或任意服务端 errmsg。旧 reply_outbox.error 不回写脱敏；doctor 原有字段仍可能包含历史内容，分享报告前需检查。
 - 全库保留最近3000个事件，独立于业务队列保留策略；超量时旧诊断会被淘汰。诊断写入失败仅固定提示，不把已成功发送变成失败。该日志是排障线索，不是完整审计。
 
@@ -51,8 +51,10 @@ doctor 不发送网络请求、不消费队列，但启动 ContextDatabase 会�
 - 失败无令牌回退保留令牌；成功清理、清理后的迟到消息、用户隔离。
 - 重复入站不回滚、分段读取新快照、恢复最多两次请求。
 - 批量首条失败与后续成功并存、默认退避、17条模拟历史失败逐字段不变且不生成虚假历史事件。
-- HTTP/网络/超时/JSON/数字码/接口拒绝分类、敏感错误正文脱敏。
+- HTTP/网络/超时/JSON/数字码/接口拒绝分类（含响应头已到达后的正文断流/超时）、敏感错误正文脱敏。
 - 媒体准备、上传 URL、CDN、最终发送分别定位；诊断存储和清理故障不重发已接受消息。
-- 诊断保留上限、重复入队时间、doctor 输出、原有分段恢复和媒体快照保护。
+- 诊断保留上限、跨连接并发重复媒体入队不新增时间、doctor 输出、原有分段恢复和媒体快照保护。
 
-验证结果在发布前填写。
+验证结果：新增31项回归；全量 **365通过、0失败、1760断言**，隔离审计 **7通过、0失败、40断言**。缓存 TypeScript 5.9.3 类型检查和 git diff --check 通过。隔离审计确认模拟部署数据库及 sidecar、项目/home 环境文件未变，直接测试入口和 ATTACH 绕过均被拒绝。
+
+Standards 与 Spec 双轴复核各报告相同的2项 P2（响应正文读取分类、并发媒体入队事件），均通过先失败再通过的回归完成修复，复核未发现遗留问题。另以慢请求反例修正退避起点。未对真实微信做发送验收，因此没有真实发送恢复成功率的结论。

@@ -69,7 +69,10 @@ export async function deliveryRequest(stage: DeliveryStage, request: () => Promi
     }
     let data: any = response;
     if (json) {
-      try { data = await response.json(); } catch { throw new DeliveryError(stage, 'invalid_response'); }
+      try { data = await response.json(); } catch (error) {
+        if (error instanceof SyntaxError) throw new DeliveryError(stage, 'invalid_response');
+        throw safeDeliveryError(error, stage);
+      }
       const error = apiDeliveryError(data, stage); if (error) throw error;
     }
     reportDelivery(report, { ...metadata, stage, result: 'succeeded', httpStatus: status, elapsedMs: Date.now() - started });

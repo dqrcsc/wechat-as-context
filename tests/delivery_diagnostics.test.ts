@@ -223,3 +223,40 @@ test('failed diagnostic persistence does not turn a delivered outbox row into pe
   await f.pipeline.flushReplies(); await f.pipeline.flushReplies(); expect(calls).toBe(1);
   expect(f.db.db.query("SELECT status,attempts FROM reply_outbox WHERE id='storage-failure'").get()).toEqual({status:'sent',attempts:1});
 });
+
+test('retry delay starts after a slow failed request, not at the beginning of the drain', async () => {
+  const f = fixture(); f.db.queueReply('slow','user','body');
+  const realNow = Date.now; let clock = 1000;
+  Date.now = () => clock;
+  globalThis.fetch = (async () => {clock=9000;return new Response('',{status:503});}) as unknown as typeof fetch;
+  try {
+    await f.pipeline.flushReplies();
+    expect(f.db.db.query("SELECT next_retry_at FROM reply_outbox WHERE id='slow'").get()).toEqual({next_retry_at:14000});
+  } finally { Date.now = realNow; }
+});
+
+for (const mode of ['timeout', 'network'] as const) {
+  test(`HTTP 200 headers followed by ${mode} while reading the body retain the transport category`, async () => {
+    const f=fixture(); f.db.queueReply('body-read','user','body');
+    globalThis.fetch=(async()=>new Response(new ReadableStream({start(controller){controller.error(mode==='timeout'?new DOMException('PRIVATE_BODY_ERROR','TimeoutError'):new TypeError('PRIVATE_BODY_ERROR'));}}))) as unknown as typeof fetch;
+    await f.pipeline.flushReplies({nowMs:1000});
+    const events=f.db.recentDeliveryEvents('body-read') as any[];
+    expect(events).toContainEqual(expect.objectContaining({stage:'sendmessage',result:'failed',category:mode,httpStatus:200}));
+    expect(JSON.stringify(events)).not.toContain('PRIVATE_BODY_ERROR');
+  });
+}
+
+test('concurrent media enqueue records queued only for the insert winner', () => {
+  const f=fixture(), file=join(f.root,'race.txt'); writeFileSync(file,'fixture');
+  const other=new ContextDatabase(f.config.dbPath); dbs.push(other);
+  const query=f.db.db.query.bind(f.db.db); let raced=false;
+  f.db.db.query=((sql:string,...args:any[])=>{
+    if(!raced && sql.includes('INSERT OR IGNORE INTO reply_outbox')) {
+      raced=true; other.queueMediaReply('race','user','file',file);
+    }
+    return (query as any)(sql,...args);
+  }) as typeof f.db.db.query;
+  f.db.queueMediaReply('race','user','file',file);
+  expect(raced).toBe(true); expect(f.db.recentDeliveryEvents('race')).toHaveLength(1);
+  expect(f.db.db.query('SELECT count(*) AS n FROM reply_outbox').get()).toEqual({n:1});
+});

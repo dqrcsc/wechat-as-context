@@ -882,7 +882,8 @@ export class WeChatContextPipeline {
             report({ stage: "outbox", result: "failed", failureStage: safe.stage, category: safe.category, ...safe.codes });
             const backoffMs =
               nextAttempts === 1 ? 5_000 : nextAttempts === 2 ? 15_000 : 45_000;
-            const nextRetryAt = nextAttempts >= 3 ? 0 : nowMs + backoffMs;
+            const failedAt = options?.nowMs ?? Date.now();
+            const nextRetryAt = nextAttempts >= 3 ? 0 : failedAt + backoffMs;
             this.db.db
               .query(
                 "UPDATE reply_outbox SET status = ?, error = ?, next_retry_at = ? WHERE id = ?"

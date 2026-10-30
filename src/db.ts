@@ -404,12 +404,12 @@ export class ContextDatabase {
     if (createHash("sha256").update(readFileSync(snapshot)).digest("hex") !== digest) {
       throw new Error("Outbox media snapshot checksum mismatch");
     }
-    this.db
+    const result = this.db
       .query(
         "INSERT OR IGNORE INTO reply_outbox (id, recipient, text, media_type, media_path, media_sha256) VALUES (?, ?, ?, ?, ?, ?)"
       )
       .run(id, recipient, captionText, mediaType, snapshot, digest);
-    this.recordDeliveryEvent(id, 0, { stage: "queue", result: "queued" });
+    if (result.changes) this.recordDeliveryEvent(id, 0, { stage: "queue", result: "queued" });
   }
 
   /**
