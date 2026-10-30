@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { AppConfig } from "../config.ts";
 import { replaceFileAtomically, writeNewFile } from "../storage.ts";
 import { assertPublicUrl, fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
@@ -294,7 +294,7 @@ export async function saveRawWebArticleToVault(params: {
   const fullPath = params.existingPath || join(params.articlesDir, `${baseFolderSlug}.md`);
   if (existsSync(fullPath) && !params.overwriteExisting) return fullPath;
 
-  const assetsDir = join(params.articlesDir, "assets", baseFolderSlug);
+  const assetsDir = join(dirname(fullPath), "assets", baseFolderSlug);
   const relativeAssetsPrefix = `assets/${baseFolderSlug}`;
   const { localizedMarkdown } = await localizeWeChatImages({
     markdownBody: params.article.markdownBody,

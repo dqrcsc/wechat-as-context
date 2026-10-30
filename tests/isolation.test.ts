@@ -1,7 +1,7 @@
 import "./support/isolation.ts";
 import { expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync, truncateSync, writeSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { ContextDatabase } from "../src/db.ts";
@@ -113,4 +113,10 @@ test("test workspace environment has no inherited model keys or injection option
     expect(JSON.stringify(env)).not.toContain("host-key-canary");
     expect(env.HOME).not.toBe(process.env.HOME);
   } finally { if (saved === undefined) delete process.env.OPENAI_API_KEY; else process.env.OPENAI_API_KEY = saved; }
+});
+
+// New production streaming/rotation operations must retain the same test boundary.
+test("stream writes and log truncation reject unowned descriptors and external paths", () => {
+  expect(() => truncateSync(outside, 0)).toThrow("outside workspace");
+  expect(() => writeSync(1, Buffer.from("must not write"))).toThrow("owned descriptor required");
 });

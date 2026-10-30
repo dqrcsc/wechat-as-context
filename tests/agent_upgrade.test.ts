@@ -1807,10 +1807,12 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
         });
       }
       if (u.includes("xiaohongshu.com/explore/66aabbcc1122")) {
-        return new Response(
+        const response = new Response(
           `<!DOCTYPE html><html><body><script>window.__INITIAL_STATE__=${JSON.stringify(imageNoteState)}</script></body></html>`,
           { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
         );
+        Object.defineProperty(response, "url", { value: u });
+        return response;
       }
       if (u === "http://xhslink.com/a/xhs_spoken_vid") {
         return new Response(null, {
@@ -1819,10 +1821,12 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
         });
       }
       if (u.includes("xiaohongshu.com/explore/66ddeeff3344")) {
-        return new Response(
+        const response = new Response(
           `<!DOCTYPE html><html><body><script>window.__INITIAL_STATE__=${JSON.stringify(videoNoteState)}</script></body></html>`,
           { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
         );
+        Object.defineProperty(response, "url", { value: u });
+        return response;
       }
       if (u.includes("sns-webpic.xhscdn.com/slide")) {
         return new Response(new Uint8Array(Buffer.alloc(256, 0xff)), {

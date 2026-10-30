@@ -1,3 +1,4 @@
+import { CdpSession } from "./cdp.ts";
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
@@ -213,35 +214,35 @@ export async function extractXiaohongshuNote(
     console.warn(`[XHSExtractor] Direct HTTP warning for ${rawUrl}:`, err);
   }
 
-  let noteObj = parseXiaohongshuInitialState(html);
+  let noteObj = parseXiaohongshuInitialState(html, finalUrl);
 
   // Fallback to local Chrome session if SSR state was blocked or empty
   if (!noteObj && !process.env.WXCTX_TEST_ROOT) {
     const domHtml = renderDomWithLocalChromeSession(finalUrl, options?.config);
     if (domHtml) {
       html = domHtml;
-      noteObj = parseXiaohongshuInitialState(domHtml);
+      noteObj = parseXiaohongshuInitialState(domHtml, finalUrl);
     }
   }
 
   const rawTitle =
     noteObj?.title ||
-    matchMeta(html, "og:title")?.replace(/\s*-\s*小红书$/, "") ||
+    (!noteObj ? matchMeta(html, "og:title")?.replace(/\s*-\s*小红书$/, "") : "") ||
     fallbackTitle ||
     "小红书笔记";
   const title = rawTitle.replace(/#([^#\[]+)\[话题\]#/g, "#$1").trim();
 
   const rawDesc =
     noteObj?.desc ||
-    matchMeta(html, "og:description") ||
-    matchMeta(html, "description") ||
+    (!noteObj ? matchMeta(html, "og:description") : "") ||
+    (!noteObj ? matchMeta(html, "description") : "") ||
     fallbackDigest ||
     "";
   const desc = rawDesc.replace(/#([^#\[]+)\[话题\]#/g, "#$1").trim();
 
   const author =
     noteObj?.user?.nickname ||
-    matchMeta(html, "author") ||
+    (!noteObj ? matchMeta(html, "author") : "") ||
     fallbackAuthor ||
     "小红书博主";
 
@@ -263,7 +264,7 @@ export async function extractXiaohongshuNote(
       }
     }
   }
-  if (imageUrls.length === 0) {
+  if (!noteObj && imageUrls.length === 0) {
     const ogImgs = matchAllMeta(html, "og:image");
     for (const u of ogImgs) {
       if (u.startsWith("http")) imageUrls.push(u);
@@ -290,6 +291,7 @@ export async function extractXiaohongshuNote(
       }
     }
   }
+  if (!noteObj) {
   pushXhsVideoUrl(matchMeta(html, "og:video"));
   for (const m of html.matchAll(
     /<video[^>]+src=["'](https?:\/\/[^"']+)["']/gi
@@ -297,11 +299,13 @@ export async function extractXiaohongshuNote(
     pushXhsVideoUrl(m[1]?.replace(/&amp;/g, "&"));
   }
 
+  }
+
   const videoStreamUrl = candidateVideoUrls[0] || "";
   const isVideoNote =
     noteObj?.type === "video" ||
     Boolean(noteObj?.video?.media?.stream) ||
-    matchMeta(html, "og:type") === "video" ||
+    (!noteObj && matchMeta(html, "og:type") === "video") ||
     Boolean(videoStreamUrl);
 
   const durationSeconds =
@@ -396,7 +400,7 @@ export async function extractXiaohongshuNote(
   };
 }
 
-function parseXiaohongshuInitialState(html: string): any | null {
+function parseXiaohongshuInitialState(html: string, url: string): any | null {
   if (!html) return null;
   const marker = "window.__INITIAL_STATE__=";
   const idx = html.indexOf(marker);
@@ -408,20 +412,23 @@ function parseXiaohongshuInitialState(html: string): any | null {
     .trim()
     .replace(/;$/, "")
     .replace(/:\s*undefined\b/g, ":null");
-  try {
-    const state = JSON.parse(rawJs);
-    const detailMap = state?.note?.noteDetailMap;
-    if (detailMap && typeof detailMap === "object") {
-      for (const key of Object.keys(detailMap)) {
-        const note = detailMap[key]?.note;
-        if (note && (note.title || note.desc || note.imageList || note.video)) {
-          return note;
-        }
-      }
+  let state: any;
+  try { state = JSON.parse(rawJs); } catch { return null; }
+  const noteId = new URL(url).pathname.match(/\/(?:explore|discovery\/item)\/([a-zA-Z0-9]+)/)?.[1];
+  const detailMap = state?.note?.noteDetailMap;
+  if (detailMap && typeof detailMap === "object" && Object.keys(detailMap).length) {
+    for (const [key, value] of Object.entries(detailMap)) {
+      const note = (value as any)?.note;
+      // A map key may identify a note lacking an embedded ID; conflicting IDs never match.
+      if (noteId && note && (note.noteId || note.note_id || key) === noteId) return note;
     }
-    const mobileNote = state?.noteData?.data?.noteData;
-    if (mobileNote) return mobileNote;
-  } catch {}
+    throw new Error("Xiaohongshu note identity mismatch: requested note absent from page state");
+  }
+  const mobileNote = state?.noteData?.data?.noteData;
+  if (mobileNote) {
+    if (noteId && (mobileNote.noteId || mobileNote.note_id || mobileNote.id) === noteId) return mobileNote;
+    throw new Error("Xiaohongshu mobile note identity could not be verified");
+  }
   return null;
 }
 
@@ -830,6 +837,8 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
   const profileDir = mkdtempSync(join(tmpdir(), "wxctx-dy-cdp-"));
   let proc: ReturnType<typeof Bun.spawn> | null = null;
   let ws: WebSocket | null = null;
+  let cdp: CdpSession | null = null;
+  const deadline = AbortSignal.timeout(60_000);
 
   try {
     proc = Bun.spawn(
@@ -874,7 +883,7 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
     let pageWsUrl = "";
     for (let i = 0; i < 15; i++) {
       try {
-        const list = (await (await fetch(`${baseHttp}/json/list`)).json()) as any[];
+        const list = (await (await fetch(`${baseHttp}/json/list`, { signal: deadline })).json()) as any[];
         const page = list.find(
           (t) => t.type === "page" && typeof t.webSocketDebuggerUrl === "string"
         );
@@ -888,34 +897,9 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
     if (!pageWsUrl) return null;
 
     ws = new WebSocket(pageWsUrl);
-    await new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("CDP WS open timeout")), 5000);
-      ws!.addEventListener(
-        "open",
-        () => {
-          clearTimeout(timer);
-          resolve();
-        },
-        { once: true }
-      );
-      ws!.addEventListener(
-        "error",
-        (err) => {
-          clearTimeout(timer);
-          reject(err);
-        },
-        { once: true }
-      );
-    });
-
-    let msgId = 1;
-    const pending = new Map<number, (res: any) => void>();
-    const call = (method: string, params: Record<string, unknown> = {}) =>
-      new Promise<any>((resolve) => {
-        const id = msgId++;
-        pending.set(id, resolve);
-        ws!.send(JSON.stringify({ id, method, params }));
-      });
+    cdp = new CdpSession(ws, { signal: deadline });
+    await cdp.ready;
+    const call = (method: string, params: Record<string, unknown> = {}) => cdp!.call(method, params);
 
     const streamUrls: string[] = [];
     const detailReqIds = new Set<string>();
@@ -924,11 +908,6 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
     ws.addEventListener("message", async (ev) => {
       try {
         const data = JSON.parse(String(ev.data));
-        if (data.id && pending.has(data.id)) {
-          pending.get(data.id)!(data.result);
-          pending.delete(data.id);
-          return;
-        }
         if (data.method === "Network.requestWillBeSent") {
           const u = String(data.params?.request?.url || "");
           if (u.includes("douyinvod.com") || u.includes("aweme/v1/play")) {
@@ -981,6 +960,7 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
     });
 
     for (let i = 0; i < 50; i++) {
+      deadline.throwIfAborted();
       await Bun.sleep(500);
       if (awemeDetail) break;
       if (i === 24 && detailReqIds.size === 0) {
@@ -1010,6 +990,7 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
     console.warn(`[DouyinExtractor] CDP extraction warning for ${awemeId}:`, err);
     return null;
   } finally {
+    cdp?.dispose();
     try {
       ws?.close();
     } catch {}

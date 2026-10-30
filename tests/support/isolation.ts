@@ -77,7 +77,7 @@ guardedFs.openSync = (path: string, ...args: any[]) => {
   return fd;
 };
 guardedFs.closeSync = (fd: number) => { safeDescriptors.delete(fd); return closeSync(fd); };
-for (const name of ["mkdirSync", "readFileSync", "writeFileSync", "appendFileSync", "unlinkSync", "readdirSync"] as const) {
+for (const name of ["mkdirSync", "readFileSync", "writeFileSync", "appendFileSync", "unlinkSync", "readdirSync", "truncateSync"] as const) {
   const original = fs[name] as Function;
   guardedFs[name] = (path: any, ...args: any[]) => {
     if (typeof path === "number" && safeDescriptors.has(path)) return original(path, ...args);
@@ -90,6 +90,11 @@ for (const name of ["renameSync", "linkSync", "copyFileSync"] as const) {
   const original = fs[name] as Function;
   guardedFs[name] = (from: string, to: string, ...args: any[]) => { assertInside(from); assertInside(to); return original(from, to, ...args); };
 }
+const originalWriteSync = fs.writeSync;
+guardedFs.writeSync = (fd: number, ...args: any[]) => {
+  if (!safeDescriptors.has(fd)) throw new Error("Test isolation: owned descriptor required");
+  return (originalWriteSync as Function)(fd, ...args);
+};
 mock.module("node:fs", () => guardedFs);
 
 // Tests may install fetch mocks. Restoring fetch restores this denial, never live networking.

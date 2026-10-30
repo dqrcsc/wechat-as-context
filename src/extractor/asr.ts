@@ -8,12 +8,15 @@ import {
   statSync,
   unlinkSync,
   writeFileSync,
+  openSync,
+  writeSync,
+  closeSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import type { AppConfig } from "../config.ts";
 import { fetchWithTransientRetry, resolveModelEndpoint } from "../agent/llm.ts";
-import { assertPublicUrl, fetchPublicResource } from "../public_url.ts";
+import { fetchPublicResource } from "../public_url.ts";
 
 export interface AsrTranscriptionRequest {
   mediaUrl?: string;
@@ -81,6 +84,43 @@ function cleanupTempDirSafe(dirPath: string): void {
   } catch {}
 }
 
+/** Same bounded, redirect-checked streaming downloader in tests and production. */
+export async function downloadMediaStream(
+  url: string, target: string, headers: Record<string, string> = {},
+  options: { maxBytes?: number; signal?: AbortSignal } = {}
+): Promise<void> {
+  const maxBytes = options.maxBytes ?? 128 * 1024 * 1024;
+  const signal = options.signal ?? AbortSignal.timeout(75_000);
+  const response = await fetchPublicResource(url, { headers, signal });
+  if (!response.ok || !response.body || Number(response.headers.get("content-length")) > maxBytes) {
+    await response.body?.cancel();
+    throw new Error(`Invalid or oversized media stream (HTTP ${response.status})`);
+  }
+  const reader = response.body.getReader();
+  const fd = openSync(target, "w", 0o600);
+  let total = 0;
+  let complete = false;
+  try {
+    while (true) {
+      signal.throwIfAborted();
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) throw new Error("Media stream exceeds size limit");
+      let offset = 0;
+      while (offset < value.byteLength) offset += writeSync(fd, value, offset, value.byteLength - offset);
+    }
+    signal.throwIfAborted();
+    if (total < 256) throw new Error("Downloaded media stream is empty or invalid");
+    complete = true;
+  } finally {
+    closeSync(fd);
+    try { await reader.cancel(); } catch {}
+    reader.releaseLock();
+    if (!complete && existsSync(target)) unlinkSync(target);
+  }
+}
+
 /**
  * Dual-Engine Audio Transcription (100% self-contained):
  * - Tier 1: Local offline `local-asr` (FunASR + SenseVoiceSmall) with `ffmpeg` audio track extraction.
@@ -111,77 +151,15 @@ export async function transcribeAudioFromMedia(
       const defaultUa =
         req.headers?.["User-Agent"] ||
         "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1";
-      const referer = req.headers?.Referer || "";
-
-      // In production (non-test), prefer curl -4 direct-to-disk download so 50-100MB HD video streams
-      // don't stall on IPv6 or buffer entirely in JS memory, and partial files (>200KB) are still usable by ffmpeg.
-      if (!process.env.WXCTX_TEST_ROOT && existsSync("/usr/bin/curl")) {
-        for (const candidateUrl of candidateUrls) {
-          try {
-            assertPublicUrl(candidateUrl);
-            const curlArgs = [
-              "-4",
-              "-sS",
-              "-L",
-              "--max-time",
-              "75",
-              "-A",
-              defaultUa,
-              ...(referer ? ["-H", `Referer: ${referer}`] : []),
-              "-o",
-              targetOut,
-              candidateUrl,
-            ];
-            const curlRes = spawnSync("/usr/bin/curl", curlArgs, {
-              encoding: "utf-8",
-              timeout: 80_000,
-            });
-            const downloadedSize = existsSync(targetOut)
-              ? statSync(targetOut).size
-              : 0;
-            if (
-              (curlRes.status === 0 && downloadedSize >= 4_096) ||
-              downloadedSize >= 100_000
-            ) {
-              localMediaPath = targetOut;
-              break;
-            }
-          } catch {}
-        }
+      let lastErr: Error | null = null;
+      for (const candidateUrl of candidateUrls) {
+        try {
+          await downloadMediaStream(candidateUrl, targetOut, { "User-Agent": defaultUa, ...(req.headers || {}) });
+          localMediaPath = targetOut;
+          break;
+        } catch (err) { lastErr = err instanceof Error ? err : new Error(String(err)); }
       }
-
-      if (!localMediaPath) {
-        let lastErr: Error | null = null;
-        for (const candidateUrl of candidateUrls) {
-          try {
-            const resp = await fetchPublicResource(candidateUrl, {
-              headers: {
-                "User-Agent": defaultUa,
-                ...(req.headers || {}),
-              },
-              redirect: "follow",
-              signal: AbortSignal.timeout(60_000),
-            });
-            if (!resp.ok) {
-              lastErr = new Error(`Failed to download media stream HTTP ${resp.status}`);
-              continue;
-            }
-            const buf = Buffer.from(await resp.arrayBuffer());
-            if (buf.length < 256) {
-              lastErr = new Error("Downloaded media stream is empty or invalid");
-              continue;
-            }
-            writeFileSync(targetOut, buf);
-            localMediaPath = targetOut;
-            break;
-          } catch (err: any) {
-            lastErr = err instanceof Error ? err : new Error(String(err));
-          }
-        }
-        if (!localMediaPath && lastErr) {
-          throw lastErr;
-        }
-      }
+      if (!localMediaPath && lastErr) throw lastErr;
     }
 
     if (!localMediaPath || !existsSync(localMediaPath)) {
