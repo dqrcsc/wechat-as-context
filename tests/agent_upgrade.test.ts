@@ -1965,10 +1965,12 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
         });
       }
       if (u.includes("iesdouyin.com/share/video/7399887766554433221")) {
-        return new Response(
+        const response = new Response(
           `<!DOCTYPE html><html><body><script>window._ROUTER_DATA = ${JSON.stringify(douyinRouterData)}</script></body></html>`,
           { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } }
         );
+        Object.defineProperty(response, "url", { value: u });
+        return response;
       }
       if (u.includes("wx_video_cdn_param_1")) {
         return new Response(new Uint8Array(encryptedVideoBytes), { status: 200 });

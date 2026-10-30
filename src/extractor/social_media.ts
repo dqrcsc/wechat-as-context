@@ -1,4 +1,5 @@
-import { CdpSession } from "./cdp.ts";
+import { declaredSocialPostId, matchingDouyinDetail, pageHasSocialIdentity, requestedSocialPostId, socialPostId, SocialIdentityError } from "./social_identity.ts";
+import { CdpSession, waitForDevToolsEndpoint } from "./cdp.ts";
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
@@ -214,6 +215,8 @@ export async function extractXiaohongshuNote(
     console.warn(`[XHSExtractor] Direct HTTP warning for ${rawUrl}:`, err);
   }
 
+  const noteId = requestedSocialPostId(rawUrl, finalUrl, "xiaohongshu");
+  let metadataVerified = pageHasSocialIdentity(html, finalUrl, noteId, "xiaohongshu");
   let noteObj = parseXiaohongshuInitialState(html, finalUrl);
 
   // Fallback to local Chrome session if SSR state was blocked or empty
@@ -221,9 +224,12 @@ export async function extractXiaohongshuNote(
     const domHtml = renderDomWithLocalChromeSession(finalUrl, options?.config);
     if (domHtml) {
       html = domHtml;
+      metadataVerified = pageHasSocialIdentity(html, finalUrl, noteId, "xiaohongshu");
       noteObj = parseXiaohongshuInitialState(domHtml, finalUrl);
     }
   }
+
+  if (!noteObj && !metadataVerified) throw new SocialIdentityError("Xiaohongshu metadata identity could not be verified");
 
   const rawTitle =
     noteObj?.title ||
@@ -291,15 +297,7 @@ export async function extractXiaohongshuNote(
       }
     }
   }
-  if (!noteObj) {
-  pushXhsVideoUrl(matchMeta(html, "og:video"));
-  for (const m of html.matchAll(
-    /<video[^>]+src=["'](https?:\/\/[^"']+)["']/gi
-  )) {
-    pushXhsVideoUrl(m[1]?.replace(/&amp;/g, "&"));
-  }
-
-  }
+  if (!noteObj) pushXhsVideoUrl(matchMeta(html, "og:video"));
 
   const videoStreamUrl = candidateVideoUrls[0] || "";
   const isVideoNote =
@@ -414,7 +412,7 @@ function parseXiaohongshuInitialState(html: string, url: string): any | null {
     .replace(/:\s*undefined\b/g, ":null");
   let state: any;
   try { state = JSON.parse(rawJs); } catch { return null; }
-  const noteId = new URL(url).pathname.match(/\/(?:explore|discovery\/item)\/([a-zA-Z0-9]+)/)?.[1];
+  const noteId = socialPostId(url, "xiaohongshu");
   const detailMap = state?.note?.noteDetailMap;
   if (detailMap && typeof detailMap === "object" && Object.keys(detailMap).length) {
     for (const [key, value] of Object.entries(detailMap)) {
@@ -467,13 +465,9 @@ export async function extractDouyinWork(
     console.warn(`[DouyinExtractor] Mobile fetch warning for ${rawUrl}:`, err);
   }
 
-  const awemeId =
-    finalUrl.match(/\/(?:video|note)\/(\d{15,22})/)?.[1] ||
-    finalUrl.match(/[?&]modal_id=(\d{15,22})/)?.[1] ||
-    rawUrl.match(/\/(?:video|note)\/(\d{15,22})/)?.[1] ||
-    "";
-
-  let itemInfo = parseDouyinRouterData(html);
+  const awemeId = requestedSocialPostId(rawUrl, finalUrl, "douyin");
+  let metadataVerified = pageHasSocialIdentity(html, finalUrl, awemeId, "douyin");
+  let itemInfo = parseDouyinRouterData(html, awemeId);
 
   // Step 2: If initial fetch hit desktop WAF or empty page and we have awemeId, query iesdouyin mobile share page
   if (!itemInfo && awemeId) {
@@ -489,10 +483,12 @@ export async function extractDouyinWork(
       });
       if (shareResp.ok) {
         const shareHtml = await shareResp.text();
-        itemInfo = parseDouyinRouterData(shareHtml);
-        if (!html) html = shareHtml;
+        requestedSocialPostId(rawUrl, shareResp.url || shareUrl, "douyin");
+        const shareVerified = pageHasSocialIdentity(shareHtml, shareResp.url || shareUrl, awemeId, "douyin");
+        itemInfo = parseDouyinRouterData(shareHtml, awemeId);
+        if (!html || shareVerified) { html = shareHtml; metadataVerified = shareVerified; }
       }
-    } catch {}
+    } catch (err) { if (err instanceof SocialIdentityError) throw err; }
   }
 
   // Step 3: Fetch rich SEO JSON-LD metadata (creator, duration, uploadDate, creator/top comments)
@@ -502,7 +498,6 @@ export async function extractDouyinWork(
       : null;
 
   // Step 4: Use local headless Chrome CDP to intercept /aweme/v1/web/aweme/detail when SSR _ROUTER_DATA is empty
-  const domStreamUrls: string[] = [];
   if (
     !itemInfo?.video?.play_addr?.url_list?.length &&
     !Array.isArray(itemInfo?.images) &&
@@ -511,25 +506,20 @@ export async function extractDouyinWork(
   ) {
     for (let attempt = 0; attempt < 2; attempt++) {
       const cdpRes = await fetchDouyinAwemeDetailViaCdp(awemeId);
-      if (cdpRes?.awemeDetail) {
-        itemInfo = cdpRes.awemeDetail;
-      }
-      if (cdpRes?.streamUrls?.length) {
-        for (const u of cdpRes.streamUrls) {
-          if (!domStreamUrls.includes(u)) domStreamUrls.push(u);
-        }
-      }
-      if (itemInfo?.video?.play_addr?.url_list?.length || domStreamUrls.length > 0) {
-        break;
-      }
+      if (cdpRes?.awemeDetail) itemInfo = matchingDouyinDetail(cdpRes.awemeDetail, awemeId);
+      if (itemInfo?.video?.play_addr?.url_list?.length || itemInfo?.images?.length) break;
     }
   }
+
+  if (!itemInfo && !seoMeta && !metadataVerified) throw new SocialIdentityError("Douyin content identity could not be verified");
+  // Do not supplement an identified object with unrelated page-level media.
+  const metadataHtml = !itemInfo && !seoMeta && metadataVerified ? html : "";
 
   const rawDescUnstripped =
     itemInfo?.desc ||
     seoMeta?.name ||
-    matchMeta(html, "og:title") ||
-    matchMeta(html, "description") ||
+    matchMeta(metadataHtml, "og:title") ||
+    matchMeta(metadataHtml, "description") ||
     fallbackTitle ||
     fallbackDigest ||
     "";
@@ -549,7 +539,7 @@ export async function extractDouyinWork(
   const author =
     itemInfo?.author?.nickname ||
     seoMeta?.creatorName ||
-    matchMeta(html, "author") ||
+    matchMeta(metadataHtml, "author") ||
     fallbackAuthor ||
     "抖音创作者";
   const publishDate = itemInfo?.create_time
@@ -560,7 +550,7 @@ export async function extractDouyinWork(
     itemInfo?.video?.cover?.url_list?.[0] ||
     itemInfo?.video?.origin_cover?.url_list?.[0] ||
     seoMeta?.coverUrl ||
-    matchMeta(html, "og:image") ||
+    matchMeta(metadataHtml, "og:image") ||
     "";
 
   // Extract watermark-free audio/video stream URLs (prioritize lightweight demuxed audio & low-bitrate gears)
@@ -606,11 +596,8 @@ export async function extractDouyinWork(
       pushStreamCandidate(u);
     }
   }
-  const ogVideo = matchMeta(html, "og:video");
+  const ogVideo = matchMeta(metadataHtml, "og:video");
   if (ogVideo) pushStreamCandidate(ogVideo);
-  for (const u of domStreamUrls) {
-    pushStreamCandidate(u);
-  }
   const playUrl = candidateStreamUrls[0] || "";
 
   const durationSeconds = itemInfo?.video?.duration
@@ -731,7 +718,7 @@ interface DouyinSeoVideoMeta {
   comments: string[];
 }
 
-async function fetchDouyinSeoVideoObject(
+export async function fetchDouyinSeoVideoObject(
   awemeId: string
 ): Promise<DouyinSeoVideoMeta | null> {
   try {
@@ -748,15 +735,27 @@ async function fetchDouyinSeoVideoObject(
     });
     if (!resp.ok) return null;
     const html = await resp.text();
-    const ldMatches = [
-      ...html.matchAll(
-        /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
-      ),
-    ];
-    for (const m of ldMatches) {
-      try {
-        const data = JSON.parse(m[1].trim());
+    requestedSocialPostId(seoUrl, resp.url || seoUrl, "douyin");
+    return parseDouyinSeoVideoObject(html, awemeId);
+  } catch { return null; }
+}
+
+export function parseDouyinSeoVideoObject(html: string, awemeId: string): DouyinSeoVideoMeta | null {
+  const pageUrl = `https://www.douyin.com/video/${awemeId}`;
+  pageHasSocialIdentity(html, pageUrl, awemeId, "douyin");
+  const ldMatches = [
+    ...html.matchAll(
+      /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
+    ),
+  ];
+  for (const m of ldMatches) {
+    try {
+      const parsed = JSON.parse(m[1].trim());
+      const objects = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.["@graph"]) ? parsed["@graph"] : [parsed];
+      for (const data of objects) {
         if (data?.["@type"] === "VideoObject") {
+          const references = [data.url, data["@id"], typeof data.mainEntityOfPage === "string" ? data.mainEntityOfPage : data.mainEntityOfPage?.["@id"]].filter((v): v is string => typeof v === "string" && Boolean(v));
+          if (!references.length || !references.every(ref => declaredSocialPostId(ref, pageUrl, "douyin") === awemeId)) continue;
           const name =
             typeof data.name === "string"
               ? data.name.replace(/\s*-\s*抖音$/, "").trim()
@@ -813,15 +812,14 @@ async function fetchDouyinSeoVideoObject(
             comments,
           };
         }
-      } catch {}
-    }
-  } catch {}
+      }
+    } catch {}
+  }
   return null;
 }
 
 async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
   awemeDetail: any | null;
-  streamUrls: string[];
 } | null> {
   if (process.env.WXCTX_TEST_ROOT) return null;
   const chromePaths = [
@@ -857,24 +855,10 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
       { stderr: "pipe", stdout: "ignore" }
     );
 
-    const reader = (proc.stderr as ReadableStream<Uint8Array>).getReader();
-    const dec = new TextDecoder();
-    let stderrText = "";
-    let browserWsUrl = "";
-
-    const wsDeadline = Date.now() + 12_000;
-    while (!browserWsUrl && Date.now() < wsDeadline) {
-      const readRes = await Promise.race([
-        reader.read(),
-        Bun.sleep(2000).then(() => ({ done: true, value: undefined })),
-      ]);
-      if (readRes.value) {
-        stderrText += dec.decode(readRes.value, { stream: true });
-        const m = stderrText.match(/DevTools listening on (ws:\/\/[^\s]+)/);
-        if (m) browserWsUrl = m[1];
-      }
-      if (readRes.done && !readRes.value) break;
-    }
+    const browserWsUrl = await waitForDevToolsEndpoint(
+      proc.stderr as ReadableStream<Uint8Array>,
+      AbortSignal.any([deadline, AbortSignal.timeout(12_000)])
+    );
     if (!browserWsUrl) return null;
 
     const baseHttp = browserWsUrl
@@ -901,54 +885,20 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
     await cdp.ready;
     const call = (method: string, params: Record<string, unknown> = {}) => cdp!.call(method, params);
 
-    const streamUrls: string[] = [];
     const detailReqIds = new Set<string>();
     let awemeDetail: any = null;
 
     ws.addEventListener("message", async (ev) => {
       try {
         const data = JSON.parse(String(ev.data));
-        if (data.method === "Network.requestWillBeSent") {
-          const u = String(data.params?.request?.url || "");
-          if (u.includes("douyinvod.com") || u.includes("aweme/v1/play")) {
-            if (!streamUrls.includes(u)) streamUrls.push(u);
-          }
-          if (
-            u.includes("/aweme/v1/web/aweme/detail") &&
-            data.params?.requestId
-          ) {
-            detailReqIds.add(String(data.params.requestId));
-          }
+        if (["Network.requestWillBeSent", "Network.responseReceived"].includes(data.method)) {
+          const url = String(data.params?.request?.url || data.params?.response?.url || "");
+          if (url.includes("/aweme/v1/web/aweme/detail") && data.params?.requestId) detailReqIds.add(String(data.params.requestId));
         }
-        if (data.method === "Network.responseReceived") {
-          const u = String(data.params?.response?.url || "");
-          if (u.includes("douyinvod.com") || u.includes("aweme/v1/play")) {
-            if (!streamUrls.includes(u)) streamUrls.push(u);
-          }
-          if (
-            u.includes("/aweme/v1/web/aweme/detail") &&
-            data.params?.requestId
-          ) {
-            detailReqIds.add(String(data.params.requestId));
-          }
-        }
-        if (
-          data.method === "Network.loadingFinished" &&
-          data.params?.requestId &&
-          detailReqIds.has(String(data.params.requestId))
-        ) {
-          const bodyRes = await call("Network.getResponseBody", {
-            requestId: data.params.requestId,
-          });
-          if (bodyRes?.body) {
-            const rawBody = bodyRes.base64Encoded
-              ? Buffer.from(bodyRes.body, "base64").toString("utf-8")
-              : String(bodyRes.body);
-            const parsed = JSON.parse(rawBody);
-            if (parsed?.aweme_detail) {
-              awemeDetail = parsed.aweme_detail;
-            }
-          }
+        if (data.method === "Network.loadingFinished" && detailReqIds.delete(String(data.params?.requestId))) {
+          const bodyRes = await call("Network.getResponseBody", { requestId: data.params.requestId });
+          const detail = parseDouyinCdpBody(bodyRes, awemeId);
+          if (detail) awemeDetail = detail;
         }
       } catch {}
     });
@@ -970,22 +920,7 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
       }
     }
 
-    if (!awemeDetail) {
-      try {
-        const evalRes = await call("Runtime.evaluate", {
-          expression: `JSON.stringify([...document.querySelectorAll("video source, video")].map(e => e.getAttribute("src")).filter(s => s && s.startsWith("http") && (s.includes("douyinvod.com") || s.includes("aweme/v1/play"))))`,
-          returnByValue: true,
-        });
-        const domSrcs = JSON.parse(evalRes?.result?.value || "[]");
-        for (const s of domSrcs) {
-          if (typeof s === "string" && !streamUrls.includes(s)) {
-            streamUrls.push(s);
-          }
-        }
-      } catch {}
-    }
-
-    return { awemeDetail, streamUrls };
+    return { awemeDetail };
   } catch (err) {
     console.warn(`[DouyinExtractor] CDP extraction warning for ${awemeId}:`, err);
     return null;
@@ -1003,45 +938,30 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
   }
 }
 
-function parseDouyinRouterData(html: string): any | null {
-  if (!html) return null;
-  const marker = "window._ROUTER_DATA =";
-  const idx = html.indexOf(marker);
-  if (idx >= 0) {
-    const endScript = html.indexOf("</script>", idx);
-    if (endScript > idx) {
-      const rawJson = html
-        .slice(idx + marker.length, endScript)
-        .trim()
-        .replace(/;$/, "");
-      try {
-        const parsed = JSON.parse(rawJson);
-        const loader = parsed?.loaderData;
-        if (loader && typeof loader === "object") {
-          for (const key of Object.keys(loader)) {
-            const item = loader[key]?.videoInfoRes?.item_list?.[0];
-            if (item) return item;
-          }
-        }
-      } catch {}
-    }
-  }
+export function parseDouyinCdpBody(body: { body?: string; base64Encoded?: boolean } | null, awemeId: string): any | null {
+  if (!body?.body) return null;
+  try {
+    const parsed = JSON.parse(body.base64Encoded ? Buffer.from(body.body, "base64").toString("utf8") : body.body);
+    return matchingDouyinDetail(parsed?.aweme_detail, awemeId);
+  } catch { return null; }
+}
 
-  // Fallback: check RENDER_DATA (URL-encoded JSON in <script id="RENDER_DATA">)
-  const renderMatch = html.match(
-    /<script[^>]+id=["']RENDER_DATA["'][^>]*>([\s\S]*?)<\/script>/i
-  );
-  if (renderMatch?.[1]) {
-    try {
-      const decoded = decodeURIComponent(renderMatch[1].trim());
-      const parsed = JSON.parse(decoded);
-      for (const val of Object.values(parsed) as any[]) {
-        if (val?.aweme?.detail) return val.aweme.detail;
-        if (val?.videoInfoRes?.item_list?.[0]) {
-          return val.videoInfoRes.item_list[0];
-        }
+export function parseDouyinRouterData(html: string, awemeId: string): any | null {
+  const states: any[] = [];
+  const router = html.match(/window\._ROUTER_DATA\s*=\s*([\s\S]*?)<\/script>/i);
+  if (router) { try { states.push(JSON.parse(router[1].trim().replace(/;$/, ""))); } catch {} }
+  const render = html.match(/<script[^>]+id=["']RENDER_DATA["'][^>]*>([\s\S]*?)<\/script>/i);
+  if (render) { try { states.push(JSON.parse(decodeURIComponent(render[1].trim()))); } catch {} }
+  for (const state of states) {
+    const containers = [...Object.values(state?.loaderData || {}), ...Object.values(state || {})] as any[];
+    for (const container of containers) {
+      const items = container?.videoInfoRes?.item_list;
+      const candidates = [container?.aweme?.detail, ...(Array.isArray(items) ? items : [])];
+      for (const candidate of candidates) {
+        const match = matchingDouyinDetail(candidate, awemeId);
+        if (match) return match;
       }
-    } catch {}
+    }
   }
   return null;
 }

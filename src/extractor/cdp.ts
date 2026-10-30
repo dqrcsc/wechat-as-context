@@ -1,3 +1,28 @@
+/** Wait for real output/EOF or the caller's deadline, keeping exactly one read
+ * outstanding. A quiet but still-starting browser is not EOF. */
+export async function waitForDevToolsEndpoint(stream: ReadableStream<Uint8Array>, signal: AbortSignal): Promise<string | null> {
+  signal.throwIfAborted();
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+  const cancel = () => { void reader.cancel().catch(() => {}); };
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    while (true) {
+      const result = await reader.read();
+      signal.throwIfAborted();
+      text = (text + (result.done ? decoder.decode() + "\n" : decoder.decode(result.value, { stream: true }))).slice(-64 * 1024);
+      const match = text.match(/DevTools listening on (ws:\/\/[^\s]+)\s/);
+      if (match) return match[1];
+      if (result.done) return null;
+    }
+  } finally {
+    signal.removeEventListener("abort", cancel);
+    try { await reader.cancel(); } catch {}
+    reader.releaseLock();
+  }
+}
+
 /** Small CDP transport with deadlines and deterministic pending-request cleanup. */
 export class CdpSession {
   private nextId = 1;
