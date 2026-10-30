@@ -18,6 +18,7 @@ import {
   unpackClawBotMessage,
   WeChatClawBotClient,
 } from "./clawbot/client.ts";
+import { DeliveryError, deliveryFingerprint, safeDeliveryError, type DeliveryEvent } from "./clawbot/delivery_diagnostics.ts";
 import { documentLevel } from "./storage.ts";
 import { WeChatAgentRuntime } from "./agent/runtime.ts";
 import { formatLiveTaskStatusReport, isTaskStatusQuery } from "./agent/progress.ts";
@@ -836,10 +837,12 @@ export class WeChatContextPipeline {
     ignoreBusy?: boolean;
   }): Promise<void> {
     const nowMs = options?.nowMs ?? Date.now();
-    const enforceBackoff = Boolean(options?.enforceRetryBackoff);
+    const enforceBackoff = options?.enforceRetryBackoff !== false;
     try {
       await this.db.withLock("outbox", async () => {
+        const interrupted = this.db.db.query("SELECT id, attempts FROM reply_outbox WHERE status = 'pending' AND attempts >= 3").all() as Array<{ id: string; attempts: number }>;
         this.db.db.query("UPDATE reply_outbox SET status = 'failed', error = CASE WHEN error = '' THEN 'Delivery outcome unknown after interrupted attempt' ELSE error END WHERE status = 'pending' AND attempts >= 3").run();
+        for (const row of interrupted) this.db.recordDeliveryEvent(row.id, row.attempts, { stage: "outbox", result: "failed", category: "interrupted" });
         const rows = this.db.db
           .query(
             "SELECT * FROM reply_outbox WHERE status = 'pending' AND attempts < 3 AND (? = 0 OR next_retry_at <= ?) ORDER BY rowid"
@@ -856,20 +859,27 @@ export class WeChatContextPipeline {
         for (const row of rows) {
           const nextAttempts = row.attempts + 1;
           this.db.db.query("UPDATE reply_outbox SET attempts = ? WHERE id = ?").run(nextAttempts, row.id);
+          const report = (event: DeliveryEvent) => this.db.recordDeliveryEvent(row.id, nextAttempts, event);
+          report({ stage: "outbox", result: "started", recipientHash: deliveryFingerprint(row.recipient) });
           try {
             if (
               (row.media_type === "file" || row.media_type === "image") &&
               row.media_path
             ) {
-              if (!row.media_sha256) throw new Error("Legacy media entry has no content snapshot; requeue the file");
-              const digest = createHash("sha256").update(readFileSync(row.media_path)).digest("hex");
-              if (digest !== row.media_sha256) throw new Error("Outbox media snapshot checksum mismatch; requeue the file");
-              await this.clawbot.sendMediaFile(row.recipient, row.media_path, row.id);
+              if (!row.media_sha256) throw new DeliveryError("media_prepare", "local_validation", {}, "missing snapshot digest");
+              let digest: string;
+              try { digest = createHash("sha256").update(readFileSync(row.media_path)).digest("hex"); }
+              catch (error) { throw safeDeliveryError(error, "media_prepare"); }
+              if (digest !== row.media_sha256) throw new DeliveryError("media_prepare", "local_validation", {}, "snapshot checksum mismatch");
+              await this.clawbot.sendMediaFile(row.recipient, row.media_path, row.id, report);
             } else {
-              await this.clawbot.sendTextMessage(row.recipient, row.text, row.id);
+              await this.clawbot.sendTextMessage(row.recipient, row.text, row.id, report);
             }
             this.db.db.query("UPDATE reply_outbox SET status = 'sent', error = '', next_retry_at = 0 WHERE id = ?").run(row.id);
+            report({ stage: "outbox", result: "succeeded" });
           } catch (e: any) {
+            const safe = safeDeliveryError(e, "outbox");
+            report({ stage: "outbox", result: "failed", failureStage: safe.stage, category: safe.category, ...safe.codes });
             const backoffMs =
               nextAttempts === 1 ? 5_000 : nextAttempts === 2 ? 15_000 : 45_000;
             const nextRetryAt = nextAttempts >= 3 ? 0 : nowMs + backoffMs;
@@ -877,8 +887,8 @@ export class WeChatContextPipeline {
               .query(
                 "UPDATE reply_outbox SET status = ?, error = ?, next_retry_at = ? WHERE id = ?"
               )
-              .run(nextAttempts >= 3 ? "failed" : "pending", e.message, nextRetryAt, row.id);
-            console.error(`[Outbox] ${row.id}: ${e.message}`);
+              .run(nextAttempts >= 3 ? "failed" : "pending", safe.message, nextRetryAt, row.id);
+            console.error(`[Outbox] ${deliveryFingerprint(row.id)}: ${safe.message}`);
           }
         }
         this.db.pruneSentOutboxMedia();

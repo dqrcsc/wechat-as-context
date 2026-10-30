@@ -66,8 +66,10 @@ test("unmocked WeChat text and media requests fail locally; mocks still work", a
   seed(path); const db = new ContextDatabase(path), client = new WeChatClawBotClient(db);
   const file = join(root, "file.txt"); writeFileSync(file, "fixture attachment");
   try {
-    await expect(client.sendTextMessage("fixture-recipient", "never send")).rejects.toThrow("unmocked network request blocked");
-    await expect(client.sendMediaFile("fixture-recipient", file)).rejects.toThrow("unmocked network request blocked");
+    // The guard still rejects raw network calls; delivery wrappers now sanitize error text.
+    await expect(fetch("https://ilinkai.weixin.qq.com/ilink/bot/sendmessage")).rejects.toThrow("unmocked network request blocked");
+    await expect(client.sendTextMessage("fixture-recipient", "never send")).rejects.toThrow("sendmessage: network");
+    await expect(client.sendMediaFile("fixture-recipient", file)).rejects.toThrow("getuploadurl: network");
     const blockedFetch = globalThis.fetch; let calls = 0;
     globalThis.fetch = (async () => { calls++; return Response.json({ ret: 0 }); }) as any;
     try { await client.sendTextMessage("fixture-recipient", "mock only"); expect(calls).toBe(1); }

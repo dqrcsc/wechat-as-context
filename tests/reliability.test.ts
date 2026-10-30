@@ -120,7 +120,7 @@ test("receive and send reject HTTP and business failures", async () => {
 test("reply errors are durable, bounded and reuse the same client id", async () => {
   const f = fixture(); f.db.queueReply("stable-client-id", "user", "reply"); const ids: string[] = [];
   globalThis.fetch = (async (_url: any, init: any) => { ids.push(JSON.parse(init.body).msg.client_id); return Response.json({ errcode: 1, errmsg: "denied" }); }) as any;
-  for (let n = 0; n < 5; n++) await f.pipeline.flushReplies();
+  for (let n = 0; n < 5; n++) await f.pipeline.flushReplies({ nowMs: 1000 + n * 20000 });
   expect(ids).toEqual(["stable-client-id", "stable-client-id", "stable-client-id"]);
   const row: any = f.db.db.query("SELECT * FROM reply_outbox").get(); expect(row.status).toBe("failed"); expect(row.attempts).toBe(3); expect(row.error).toContain("denied");
 });
@@ -135,6 +135,7 @@ test("a crash on the last attempt leaves visible uncertain delivery, not endless
   const f = fixture(); f.db.queueReply("id", "user", "reply"); f.db.db.query("UPDATE reply_outbox SET attempts = 3").run();
   globalThis.fetch = (async () => { throw new Error("must not send"); }) as any; await f.pipeline.flushReplies();
   expect((f.db.db.query("SELECT status FROM reply_outbox").get() as any).status).toBe("failed");
+  expect(f.db.recentDeliveryEvents("id")).toContainEqual(expect.objectContaining({ category: "interrupted", attempt: 3 }));
 });
 
 test("two database connections cannot process the same operation concurrently", async () => {
@@ -171,7 +172,7 @@ test("local list/show/doctor CLI uses fixture data and never alters documents", 
   for (const args of [["list", "--json"], ["show", String(id), "--json"], ["doctor", "--json"]]) {
     const proc = Bun.spawnSync([process.execPath, join(import.meta.dir, "../src/cli.ts"), ...args], { env: { ...process.env, WECHAT_CONTEXT_DATA_DIR: f.root, VAULT_ROOT: f.root, LLM_API_KEY: "fixture", LLM_BASE_URL: "https://example.invalid" } });
     expect(proc.exitCode).toBe(0); const data = JSON.parse(proc.stdout.toString()); expect(data.ok).toBe(true);
-    if (args[0] === "doctor") { expect(data.scope).toBe("local_configuration_only"); expect(data.checks.clawbot).toContain("connection not verified"); }
+    if (args[0] === "doctor") { expect(Array.isArray(data.deliveryDiagnostics)).toBe(true); expect(data.scope).toBe("local_configuration_only"); expect(data.checks.clawbot).toContain("connection not verified"); }
   }
   expect(readFileSync(source)).toEqual(sourceBytes); expect(readFileSync(note)).toEqual(noteBytes);
 });

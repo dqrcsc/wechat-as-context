@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import type { DeliveryEvent } from "./clawbot/delivery_diagnostics.ts";
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { dirname, basename, join } from "node:path";
 import { randomUUID, createHash } from "node:crypto";
@@ -195,6 +196,14 @@ export class ContextDatabase {
         media_type TEXT NOT NULL DEFAULT 'text',
         media_path TEXT NOT NULL DEFAULT ''
       );
+      CREATE TABLE IF NOT EXISTS delivery_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        outbox_id TEXT NOT NULL,
+        attempt INTEGER NOT NULL,
+        recorded_at TEXT NOT NULL,
+        event_json TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_delivery_events_outbox ON delivery_events(outbox_id, id);
       CREATE TABLE IF NOT EXISTS operation_locks (name TEXT PRIMARY KEY, pid INTEGER NOT NULL, owner TEXT NOT NULL, acquired_at INTEGER NOT NULL DEFAULT 0);
 
       CREATE TABLE IF NOT EXISTS conversation_turns (
@@ -376,7 +385,8 @@ export class ContextDatabase {
   }
 
   public queueReply(id: string, recipient: string, text: string): void {
-    this.db.query("INSERT OR IGNORE INTO reply_outbox (id, recipient, text, media_type, media_path) VALUES (?, ?, ?, 'text', '')").run(id, recipient, text);
+    const result = this.db.query("INSERT OR IGNORE INTO reply_outbox (id, recipient, text, media_type, media_path) VALUES (?, ?, ?, 'text', '')").run(id, recipient, text);
+    if (result.changes) this.recordDeliveryEvent(id, 0, { stage: "queue", result: "queued" });
   }
 
   public queueMediaReply(
@@ -399,6 +409,7 @@ export class ContextDatabase {
         "INSERT OR IGNORE INTO reply_outbox (id, recipient, text, media_type, media_path, media_sha256) VALUES (?, ?, ?, ?, ?, ?)"
       )
       .run(id, recipient, captionText, mediaType, snapshot, digest);
+    this.recordDeliveryEvent(id, 0, { stage: "queue", result: "queued" });
   }
 
   /**
@@ -788,6 +799,21 @@ export class ContextDatabase {
         .get(senderId) as ArticleRecord | null;
     }
     return null;
+  }
+
+  public recordDeliveryEvent(outboxId: string, attempt: number, event: DeliveryEvent): void {
+    try {
+      this.db.query("INSERT INTO delivery_events (outbox_id, attempt, recorded_at, event_json) VALUES (?, ?, ?, ?)")
+        .run(outboxId, attempt, new Date().toISOString(), JSON.stringify(event));
+      // Bounded diagnostic history, independent of business/outbox retention.
+      this.db.query("DELETE FROM delivery_events WHERE id <= (SELECT id FROM delivery_events ORDER BY id DESC LIMIT 1 OFFSET 3000)").run();
+    } catch { console.warn("[DeliveryDiagnostics] event persistence failed"); }
+  }
+
+  public recentDeliveryEvents(outboxId?: string, limit = 50): unknown[] {
+    const rows = this.db.query("SELECT * FROM delivery_events WHERE (? IS NULL OR outbox_id = ?) ORDER BY id DESC LIMIT ?")
+      .all(outboxId ?? null, outboxId ?? null, Math.min(3000, Math.max(1, limit))) as Array<{ id: number; outbox_id: string; attempt: number; recorded_at: string; event_json: string }>;
+    return rows.map(({ event_json, ...row }) => ({ ...row, ...JSON.parse(event_json) }));
   }
 
   public deliveryStatus() {

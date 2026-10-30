@@ -420,6 +420,7 @@ async function main() {
         vaultEnabled: Boolean(config.vaultEnabled),
         lastPoll: db.getState("clawbot_last_poll") ? JSON.parse(db.getState("clawbot_last_poll")!) : null,
         delivery: db.deliveryStatus(),
+        deliveryDiagnostics: db.recentDeliveryEvents(),
         deliveryErrors: db.db.query("SELECT id, status, attempts, error FROM reply_outbox WHERE error != '' ORDER BY rowid DESC LIMIT 10").all(),
         inboxErrors: db.db.query("SELECT message_key, error FROM inbound_messages WHERE error != '' ORDER BY sequence DESC LIMIT 10").all(),
         vaultRoot: config.vaultRoot,
@@ -465,7 +466,7 @@ async function main() {
         console.log(`- 微信文章落盘: ${report.wechatArticlesDir}`);
         console.log(`- LLM 初筛引擎: ${report.checks.llmApiKey}`);
         console.log(`- 微信ClawBot [AI] (置顶长轮询通道): ${report.checks.clawbot}`);
-        console.log(JSON.stringify({ lastPoll: report.lastPoll, delivery: report.delivery, deliveryErrors: report.deliveryErrors, inboxErrors: report.inboxErrors }, null, 2));
+        console.log(JSON.stringify({ lastPoll: report.lastPoll, delivery: report.delivery, deliveryErrors: report.deliveryErrors, deliveryDiagnostics: report.deliveryDiagnostics, inboxErrors: report.inboxErrors }, null, 2));
       }
       break;
     }

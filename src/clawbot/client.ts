@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { DeliveryError, deliveryFingerprint, deliveryRequest, reportDelivery, safeDeliveryError, type DeliveryReporter, type DeliveryEvent } from "./delivery_diagnostics.ts";
 import { ContextDatabase } from "../db.ts";
 import { extractUrlsFromMixedText } from "../extractor/sanitizer.ts";
 import { CDN_BASE_URL, CdnMediaRef, prepareMediaForUpload } from "./media.ts";
@@ -146,14 +147,85 @@ export class WeChatClawBotClient {
     return this.db.getState(`clawbot_ctx_${userId}`) ?? undefined;
   }
 
-  public setContextToken(userId: string, contextToken: string): void {
+  private contextSnapshot(userId: string): { token?: string; metadata: string | null; revision: string; sourceTime: number; observedAt: string } {
+    const row = this.db.db.query(`SELECT (SELECT value FROM kv_state WHERE key = ?1) AS metadata,
+      (SELECT value FROM kv_state WHERE key = ?2) AS token,
+      (SELECT updated_at FROM kv_state WHERE key = ?2) AS observed_at`)
+      .get(`clawbot_context_meta_${userId}`, `clawbot_ctx_${userId}`) as { token: string; observed_at: string; metadata: string | null } | null;
+    let meta: any = {};
+    try { const parsed = JSON.parse(row?.metadata || "{}"); if (parsed && typeof parsed === "object") meta = parsed; } catch {}
+    return { token: row?.token || undefined, metadata: row?.metadata ?? null,
+      revision: typeof meta.revision === "string" ? meta.revision : "", sourceTime: Number(meta.sourceTime) || 0,
+      observedAt: row?.observed_at || "" };
+  }
+
+  public setContextToken(userId: string, contextToken: string, sourceTime?: number): void {
     if (!userId || !contextToken) return;
-    this.db.setState(`clawbot_ctx_${userId}`, contextToken);
+    this.db.db.transaction(() => {
+      const current = this.contextSnapshot(userId);
+      const knownTime = Number.isSafeInteger(sourceTime) && sourceTime! > 0 ? sourceTime! : 0;
+      if (knownTime && knownTime < current.sourceTime) return;
+      this.db.setState(`clawbot_ctx_${userId}`, contextToken);
+      this.db.setState(`clawbot_context_meta_${userId}`, JSON.stringify({ revision: randomUUID(), sourceTime: knownTime || current.sourceTime }));
+    }).immediate();
   }
 
   public clearContextToken(userId: string): void {
     if (!userId) return;
-    this.db.db.query("DELETE FROM kv_state WHERE key = ?").run(`clawbot_ctx_${userId}`);
+    this.db.db.transaction(() => {
+      const current = this.contextSnapshot(userId);
+      this.db.db.query("DELETE FROM kv_state WHERE key = ?").run(`clawbot_ctx_${userId}`);
+      // Keep the inbound high-water mark so delayed messages cannot restore retired context.
+      this.db.setState(`clawbot_context_meta_${userId}`, JSON.stringify({ revision: randomUUID(), sourceTime: current.sourceTime }));
+    }).immediate();
+  }
+
+  private clearContextIfUnchanged(userId: string, expected: ReturnType<WeChatClawBotClient["contextSnapshot"]>): boolean {
+    return this.db.db.transaction(() => {
+      const current = this.contextSnapshot(userId);
+      if (current.token !== expected.token || current.metadata !== expected.metadata) return false;
+      this.clearContextToken(userId);
+      return true;
+    }).immediate();
+  }
+
+  /** At most one recovery request per chunk/media message. A rejection alone
+   * does not prove token expiry; only a successful tokenless fallback retires it. */
+  private async sendWithContext(userId: string, stage: "sendmessage" | "sendmessage_media",
+    send: (token?: string) => Promise<Response>, report?: DeliveryReporter, chunk?: number): Promise<void> {
+    const original = this.contextSnapshot(userId);
+    const metadata = (snapshot: typeof original): Partial<DeliveryEvent> => ({
+      recipientHash: deliveryFingerprint(userId), tokenPresent: Boolean(snapshot.token),
+      ...(snapshot.token ? { tokenHash: deliveryFingerprint(snapshot.token) } : {}),
+      ...(snapshot.revision ? { tokenRevision: deliveryFingerprint(snapshot.revision) } : {}),
+      ...(snapshot.observedAt ? { tokenAgeMs: Math.max(0, Date.now() - Date.parse(snapshot.observedAt)) } : {}),
+      ...(chunk !== undefined ? { chunk } : {}),
+    });
+    try {
+      await deliveryRequest(stage, () => send(original.token), report, metadata(original));
+    } catch (error) {
+      if (!(error instanceof DeliveryError) || error.codes.ret !== -2) throw error;
+      const latest = this.contextSnapshot(userId);
+      if (latest.token && (latest.token !== original.token || latest.metadata !== original.metadata)) {
+        reportDelivery(report, { ...metadata(latest), stage: "context", result: "retry_new_context" });
+        await deliveryRequest(stage, () => send(latest.token), report, metadata(latest));
+      } else if (original.token) {
+        reportDelivery(report, { ...metadata(original), stage: "context", result: "retry_without_context" });
+        try {
+          await deliveryRequest(stage, () => send(undefined), report, { recipientHash: deliveryFingerprint(userId), tokenPresent: false, chunk });
+        } catch (failure) {
+          reportDelivery(report, { ...metadata(original), stage: "context", result: "context_preserved" });
+          throw failure;
+        }
+        let cleared = false;
+        // A local cleanup failure must not replay a remotely accepted message.
+        try { cleared = this.clearContextIfUnchanged(userId, original); }
+        catch { console.warn("[DeliveryDiagnostics] context cleanup failed"); }
+        reportDelivery(report, { ...metadata(original), stage: "context", result: cleared ? "context_cleared" : "context_preserved" });
+      } else {
+        throw error;
+      }
+    }
   }
 
   /**
@@ -376,8 +448,8 @@ export class WeChatClawBotClient {
         for (const m of msgs) {
           if (!m.message_id) throw new Error("Incoming message has no stable message_id; cursor retained");
           const key = `${creds.botId}:${m.message_id}`;
-          this.db.db.query("INSERT OR IGNORE INTO inbound_messages (message_key, payload) VALUES (?, ?)").run(key, JSON.stringify(m));
-          if (m.from_user_id && m.context_token) this.setContextToken(m.from_user_id, m.context_token);
+          const inserted = this.db.db.query("INSERT OR IGNORE INTO inbound_messages (message_key, payload) VALUES (?, ?)").run(key, JSON.stringify(m));
+          if (inserted.changes && m.from_user_id && m.context_token) this.setContextToken(m.from_user_id, m.context_token, m.create_time_ms);
         }
         if (data.get_updates_buf && data.get_updates_buf !== syncBuf) {
           this.db.setState("clawbot_updates_buf", data.get_updates_buf);
@@ -397,11 +469,10 @@ export class WeChatClawBotClient {
    * Send a text reply directly back to the user in the pinned 微信ClawBot [AI] chat window.
    * Automatically splits oversized messages (> 2500 chars) at natural paragraph/line boundaries.
    */
-  public async sendTextMessage(toUserId: string, text: string, clientId = `wxctx-${randomUUID()}`): Promise<void> {
+  public async sendTextMessage(toUserId: string, text: string, clientId = `wxctx-${randomUUID()}`, report?: DeliveryReporter): Promise<void> {
     const creds = this.getCredentials();
-    if (!creds || !toUserId) throw new Error("Missing ClawBot credentials or recipient");
+    if (!creds || !toUserId) throw new DeliveryError("sendmessage", "local_validation", {}, "missing credentials or recipient");
 
-    let contextToken = this.getContextToken(toUserId);
     const base = creds.baseUrl.endsWith("/")
       ? creds.baseUrl
       : `${creds.baseUrl}/`;
@@ -434,30 +505,11 @@ export class WeChatClawBotClient {
           base_info: buildBaseInfo(),
         };
 
-        const resp = await fetch(url.toString(), {
-          method: "POST",
-          headers: buildHeaders(creds.botToken),
-          body: JSON.stringify(payload),
-          signal: AbortSignal.timeout(30_000),
+        return fetch(url.toString(), {
+          method: "POST", headers: buildHeaders(creds.botToken), body: JSON.stringify(payload), signal: AbortSignal.timeout(30_000),
         });
-
-        if (!resp.ok) throw new Error(`sendmessage HTTP ${resp.status}`);
-        return resp.json();
       };
-
-      let data = await sendChunk(contextToken);
-      if (
-        contextToken &&
-        data &&
-        typeof data === "object" &&
-        !Array.isArray(data) &&
-        Number((data as any).ret) === -2
-      ) {
-        this.clearContextToken(toUserId);
-        contextToken = undefined;
-        data = await sendChunk(undefined);
-      }
-      assertApiSuccess(data, "sendmessage");
+      await this.sendWithContext(toUserId, "sendmessage", sendChunk, report, i + 1);
       if (progressKey) {
         this.db.setState(progressKey, String(i + 1));
       }
@@ -578,19 +630,26 @@ export class WeChatClawBotClient {
   public async sendMediaFile(
     toUserId: string,
     filePath: string,
-    clientId = `wxctx-media-${randomUUID()}`
+    clientId = `wxctx-media-${randomUUID()}`,
+    report?: DeliveryReporter
   ): Promise<void> {
     const creds = this.getCredentials();
     if (!creds || !toUserId) {
-      throw new Error("Missing ClawBot credentials or recipient");
+      throw new DeliveryError("sendmessage_media", "local_validation", {}, "missing credentials or recipient");
     }
 
-    const prepared = prepareMediaForUpload(filePath);
+    let prepared: ReturnType<typeof prepareMediaForUpload>;
+    try { prepared = prepareMediaForUpload(filePath); }
+    catch (error) {
+      const safe = safeDeliveryError(error, "media_prepare");
+      reportDelivery(report, { stage: safe.stage, result: "failed", category: safe.category });
+      throw safe;
+    }
     const base = creds.baseUrl.endsWith("/") ? creds.baseUrl : `${creds.baseUrl}/`;
 
     // Step 1: Request upload URL from /ilink/bot/getuploadurl
     const getUploadUrlEndpoint = new URL("ilink/bot/getuploadurl", base);
-    const uploadResp = await fetch(getUploadUrlEndpoint.toString(), {
+    const uploadMeta = await deliveryRequest("getuploadurl", () => fetch(getUploadUrlEndpoint.toString(), {
       method: "POST",
       headers: buildHeaders(creds.botToken),
       body: JSON.stringify({
@@ -605,20 +664,11 @@ export class WeChatClawBotClient {
         base_info: buildBaseInfo(),
       }),
       signal: AbortSignal.timeout(30_000),
-    });
+    }), report);
 
-    if (!uploadResp.ok) {
-      throw new Error(`getuploadurl HTTP ${uploadResp.status}`);
+    if (!uploadMeta.upload_full_url && !uploadMeta.upload_param) {
+      throw new DeliveryError("getuploadurl", "invalid_response");
     }
-    const uploadMeta = (await uploadResp.json()) as {
-      ret?: number;
-      errcode?: number;
-      errmsg?: string;
-      upload_param?: string;
-      upload_full_url?: string;
-    };
-    assertApiSuccess(uploadMeta, "getuploadurl");
-
     const c2cUploadUrl =
       uploadMeta.upload_full_url ||
       `${CDN_BASE_URL}/upload?encrypted_query_param=${encodeURIComponent(
@@ -626,26 +676,22 @@ export class WeChatClawBotClient {
       )}&filekey=${encodeURIComponent(prepared.filekey)}`;
 
     // Step 2: Upload AES-128-ECB ciphertext to C2C CDN
-    const cdnResp = await fetch(c2cUploadUrl, {
+    const cdnResp: Response = await deliveryRequest("cdn_upload", () => fetch(c2cUploadUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/octet-stream",
       },
       body: new Uint8Array(prepared.cipherBuf),
       signal: AbortSignal.timeout(60_000),
-    });
+    }), report, {}, false);
 
-    if (!cdnResp.ok) {
-      throw new Error(`C2C CDN upload HTTP ${cdnResp.status}`);
-    }
     const downloadEncryptedQueryParam =
       cdnResp.headers.get("x-encrypted-param") || uploadMeta.upload_param || "";
     if (!downloadEncryptedQueryParam) {
-      throw new Error("C2C CDN upload missing x-encrypted-param header");
+      throw new DeliveryError("cdn_upload", "invalid_response");
     }
 
     // Step 3: Send message referencing the uploaded media
-    const contextToken = this.getContextToken(toUserId);
     const sendEndpoint = new URL("ilink/bot/sendmessage", base);
     const mediaObject: CdnMediaRef = {
       encrypt_query_param: downloadEncryptedQueryParam,
@@ -673,7 +719,7 @@ export class WeChatClawBotClient {
           };
 
     const sendMediaMsg = async (token?: string) => {
-      const msgResp = await fetch(sendEndpoint.toString(), {
+      return fetch(sendEndpoint.toString(), {
         method: "POST",
         headers: buildHeaders(creds.botToken),
         body: JSON.stringify({
@@ -691,24 +737,8 @@ export class WeChatClawBotClient {
         signal: AbortSignal.timeout(30_000),
       });
 
-      if (!msgResp.ok) {
-        throw new Error(`sendmessage (media) HTTP ${msgResp.status}`);
-      }
-      return msgResp.json();
     };
-
-    let msgData = await sendMediaMsg(contextToken);
-    if (
-      contextToken &&
-      msgData &&
-      typeof msgData === "object" &&
-      !Array.isArray(msgData) &&
-      Number((msgData as any).ret) === -2
-    ) {
-      this.clearContextToken(toUserId);
-      msgData = await sendMediaMsg(undefined);
-    }
-    assertApiSuccess(msgData, "sendmessage_media");
+    await this.sendWithContext(toUserId, "sendmessage_media", sendMediaMsg, report);
   }
 }
 

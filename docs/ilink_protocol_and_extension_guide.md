@@ -125,7 +125,7 @@
    - `status`: `pending_extract` $\rightarrow$ `extracting` $\rightarrow$ `analyzing` $\rightarrow$ `light_done` / `deep_done`（或 `failed`）
    - `process_level`: `raw` | `light` | `deep`
    - `triage`: `keep_raw` | `reference` | `process_later` | `process_now`
-4. **`reply_outbox`**：出站微信回执持久队列（`id`, `recipient`, `text`, `status`, `attempts`, `error`）。最多重试 3 次，每次重试复用同一个幂等 `client_id`。
+4. **`reply_outbox`**：出站微信回执持久队列（`id`, `recipient`, `text`, `status`, `attempts`, `error`）。最多尝试 3 次（含首次），失败后的间隔至少5秒/15秒，每次尝试复用同一个 `client_id`，不保证端到端 exactly-once。
 5. **`operation_locks`**：基于进程 PID 存活探测（`process.kill(pid, 0)`）的跨进程互斥锁表（如 `sync`、`outbox`、`article_<id>`、`agent_queue`），防止后台守护进程与手动 CLI 并发冲突。
 6. **`agent_tasks`**：持久 Agent 队列，记录 pending/processing/done/failed、执行阶段及错误。
 7. **`conversation_turns`**：对话上下文、执行模型、关联文章和产物路径。
@@ -142,7 +142,7 @@ bun run src/cli.ts <command> [options]
 | 命令 | 语法与参数 | 是否与微信服务器网络交互？ | 完整数据处理流程 |
 | :--- | :--- | :--- | :--- |
 | **`login`** | `bun run src/cli.ts login` | **是（交互式扫码）** | 1. 读取 `kv_state` 中旧 token（如有）放入 `local_token_list`；<br>2. POST `/ilink/bot/get_bot_qrcode?bot_type=3` 获取二维码内容；<br>3. 在终端渲染 ASCII 二维码并打印备用 URL；<br>4. 循环 GET `/ilink/bot/get_qrcode_status`（处理扫码提示、数字配对码 `need_verifycode`、IDC 机房跳转 `scaned_but_redirect`）；<br>5. 用户在手机点击确认后，将返回的 `bot_token`、`botId`、`userId`、`baseUrl` 写入 `kv_state.clawbot_credentials`。 |
-| **`doctor`** | `bun run src/cli.ts doctor [--json]` | **否（纯本地只读诊断）** | 1. 检查 `VAULT_ROOT` 目录是否存在；<br>2. 检查 LLM API Key 与模型配置；<br>3. 读取 `kv_state` 中的 `clawbot_credentials` 与 `clawbot_last_poll`；<br>4. 聚合统计 `reply_outbox` 发送状态、`deliveryErrors` 与 `inbound_messages` 错误日志并输出。 |
+| **`doctor`** | `bun run src/cli.ts doctor [--json]` | **否（不发送/不消费队列；初始化可能建表）** | 1. 检查 `VAULT_ROOT` 目录是否存在；<br>2. 检查 LLM API Key 与模型配置；<br>3. 读取 `kv_state` 中的 `clawbot_credentials` 与 `clawbot_last_poll`；<br>4. 聚合统计 `reply_outbox` 发送状态、`deliveryErrors`、`deliveryDiagnostics` 与 `inbound_messages` 错误日志并输出。 |
 | **`sync`** | `bun run src/cli.ts sync [--json]` | **是（拉取消息 + 发送回执）** | 1. 获取跨进程锁 `withLock("sync")`；<br>2. 先处理 `inbound_messages` 中上次未完成的 `pending` 记录；<br>3. POST `/ilink/bot/getupdates`（携带 `clawbot_updates_buf`），在**单个 SQLite 事务**内将新消息写入 `inbound_messages`、更新 `context_token` 并推进 `clawbot_updates_buf`；<br>4. 调用 `processPendingMessages()` 进行意图路由（识别「想法：...」、公众号 URL、「深读」或补充批注），将确认回执写入 `reply_outbox`；<br>5. 调用 `drainReadyQueue()`，对已过等待窗口的文章执行：**网页抓取 + 图片防盗链下载 + 知识库检索 + LLM 初筛 + 原子化落盘 `.md` 与 `_note.md`**，并将初筛卡片写入 `reply_outbox`；<br>6. 调用 `flushReplies()`，POST `/ilink/bot/sendmessage` 把所有待发回执推送到用户手机微信。 |
 | **`list`** | `bun run src/cli.ts list [--status <s>] [--triage <t>] [--limit <n>] [--json]` | **否（纯本地只读）** | 从 SQLite `articles` 表按条件（如 `--triage process_now`）倒序查询文章列表，返回 ID、标题、作者、`process_level`、`triage`、用户批注、关联知识库节点及本地 Markdown 路径。**严守无副作用原则，不触发网络同步。** |
 | **`show`** | `bun run src/cli.ts show <id> [--json]` | **否（纯本地只读）** | 1. 查询 `articles` 表中指定 `<id>` 的完整元数据；<br>2. 读取磁盘上 `note_md_path` 对应的伴读笔记 Markdown 全文并一并返回，供 Agent 或用户检视。 |
@@ -232,3 +232,14 @@ bun run src/cli.ts <command> [options]
 `bun run test` 在临时源码副本中运行，生产配置加载顺序及服务行为不变。父子进程均加载测试守卫：SQLite 路径只能在隔离根目录内，符号链接越界与 `ATTACH` 等 SQL 文件入口被拒绝；未模拟的 `fetch` 和外部命令被阻止。`bun run test:isolation` 用合成部署目录、HOME 和外部哨兵数据库验证边界，不需要真实微信凭据。
 
 `push --queue-only` 只控制当前调用的立即发送，不控制消费同一数据库的后台服务。测试必须使用隔离入口；不能将真实 outbox 作为“离线”测试库。详细验收及边界见 [测试隔离说明](./test-isolation.md)。
+
+
+## v0.4.2 令牌与发送诊断
+
+令牌值继续保存在 `clawbot_ctx_<user>`，`clawbot_context_meta_<user>` 保存 revision 和入站时间高水位。入站持久去重、令牌更新和游标同事务；有效时间较旧的消息不覆盖新值，清理后保留高水位，未知时间仍按接收顺序。发送前逐段取快照；ret=-2 时最多恢复一次，优先并发新令牌，否则兼容无令牌请求。无令牌成功后按值和 revision 比较清理；失败不清理。媒体最终发送与文本使用同一规则。
+
+普通 flush 默认遵守 next_retry_at，避免轮询、进度回执、CLI 等多入口快速耗尽三次尝试。旧 failed 不被自动重新入队。
+
+新增 `delivery_events(id, outbox_id, attempt, recorded_at, event_json)`，保留最近3000个事件，`doctor --json` 输出最近50个。记录请求阶段、耗时、HTTP/数字业务码、分段和令牌指纹/本地年龄，区分新令牌恢复与无令牌回退；错误文本受控，不保存任意 errmsg、令牌或正文。历史 error 不改写，新表不会补造过去的发送事实。诊断写入失败不改变远端成功结果。
+
+字段解释、迁移、隔离回归和历史故障证据边界见 [v0.4.2 验收](review-2026-10-30-v042-delivery.md)。不要从 `prepare failed` 推导固定令牌 TTL 或发送额度；[腾讯协议文档](https://github.com/Tencent/openclaw-weixin/blob/main/docs/protocol.md) 描述的是客户端实现，并非完整服务端契约。

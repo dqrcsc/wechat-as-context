@@ -74,7 +74,7 @@ test('F02 retries retain the queued snapshot even after original deletion',async
  const f=fixture(),md=join(f.root,'retry.md');writeFileSync(md,'# SNAPSHOT');f.db.queueMediaReply('retry','A','file',md);
  renameSync(md,join(f.root,'moved.md'));let calls=0;const bodies:string[]=[];
  (f.p.clawbot as any).sendMediaFile=async (_to:string,path:string)=>{bodies.push(readFileSync(path,'utf8'));if(++calls===1)throw new Error('synthetic transient failure');};
- await f.p.flushReplies();await f.p.flushReplies();expect(bodies).toEqual(['# SNAPSHOT','# SNAPSHOT']);
+ await f.p.flushReplies({nowMs:1000});await f.p.flushReplies({nowMs:6000});expect(bodies).toEqual(['# SNAPSHOT','# SNAPSHOT']);
  expect((f.db.db.query('SELECT status FROM reply_outbox WHERE id=?').get('retry') as any).status).toBe('sent');
 });
 test('F02 legacy and tampered snapshots cannot silently send mutable bytes',async()=>{
@@ -82,7 +82,7 @@ test('F02 legacy and tampered snapshots cannot silently send mutable bytes',asyn
  const row=f.db.db.query('SELECT media_path FROM reply_outbox WHERE id=?').get('snapshot') as any;writeFileSync(row.media_path,'# TAMPERED');
  f.db.db.query("INSERT INTO reply_outbox(id,recipient,text,media_type,media_path) VALUES('legacy','A','','file',?)").run(md);
  let sends=0;(f.p.clawbot as any).sendMediaFile=async()=>{sends++;};
- for(let i=0;i<3;i++)await f.p.flushReplies();expect(sends).toBe(0);
+ for(let i=0;i<3;i++)await f.p.flushReplies({nowMs:1000+i*20000});expect(sends).toBe(0);
  const rows=f.db.db.query('SELECT status,error FROM reply_outbox').all() as any[];expect(rows.every(r=>r.status==='failed'&&r.error.length>0)).toBe(true);
 });
 test('F07 legacy multi-file records still work but damaged records do not guess',async()=>{
