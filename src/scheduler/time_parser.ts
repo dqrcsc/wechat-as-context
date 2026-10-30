@@ -276,20 +276,8 @@ export function parseNaturalScheduleSpec(
   });
 
   // 1. Check deterministic relative time FIRST (e.g. "20分钟后", "半小时后", "2小时后", "1个半小时后", "3天后")
-  if (/半\s*(?:个)?\s*小时(?:后|之后|以后)/.test(text)) {
-    const nextRunAt = nowMs + 30 * 60_000;
-    return withMeta({
-      scheduleType: "once",
-      cronExpr: "",
-      nextRunAt,
-      isDefaultTime: false,
-      humanScheduleLabel: "30 分钟后",
-      cleanedTaskText,
-    });
-  }
-
   const oneAndHalfHour = text.match(
-    /(\d+|[一二两三四五六七八九十]+)\s*个半小时(?:后|之后|以后)/
+    /(\d+|[一二两三四五六七八九十]+)\s*个\s*半\s*小时\s*(?:后|之后|以后)/
   );
   if (oneAndHalfHour) {
     const n = parseChineseOrArabicInt(oneAndHalfHour[1]) ?? 1;
@@ -300,6 +288,18 @@ export function parseNaturalScheduleSpec(
       nextRunAt: nowMs + mins * 60_000,
       isDefaultTime: false,
       humanScheduleLabel: `${n} 个半小时后`,
+      cleanedTaskText,
+    });
+  }
+
+  if (/半\s*(?:个)?\s*小时(?:后|之后|以后)/.test(text)) {
+    const nextRunAt = nowMs + 30 * 60_000;
+    return withMeta({
+      scheduleType: "once",
+      cronExpr: "",
+      nextRunAt,
+      isDefaultTime: false,
+      humanScheduleLabel: "30 分钟后",
       cleanedTaskText,
     });
   }
@@ -344,7 +344,7 @@ export function parseNaturalScheduleSpec(
 
   // 2. Check recurring natural language expressions ("每天...", "每日...", "每个工作日...", "每周X...", "每月X号...")
   const isRecurringText =
-    /(?:每天|每日|每个?工作日|每周\s*[一二三四五六日天]|礼拜[一二三四五六日天]|星期[一二三四五六日天]|每个?周末|每月\s*\d{1,2}\s*[日号]|每隔?\s*\d+\s*小时)/.test(
+    /(?:每天|每日|每个?工作日|每(?:周|礼拜|星期)\s*[一二三四五六日天]|每个?周末|每月\s*\d{1,2}\s*[日号]|每隔?\s*\d+\s*小时)/.test(
       text
     ) && !/(?:这周|本周|下周)/.test(text);
 
@@ -387,6 +387,7 @@ export function parseNaturalScheduleSpec(
   // 3. If LLM router provided a valid cron hint when user asked for recurring schedule
   if (
     params.llmScheduleTypeHint === "cron" &&
+    !/(?<!每)(?:本|这|下)?(?:周|星期|礼拜)\s*[一二三四五六日天]/.test(text) &&
     params.llmCronHint &&
     isValidCronExpression(params.llmCronHint)
   ) {

@@ -97,6 +97,7 @@ export interface ScheduledActionPayload {
 }
 
 export interface ScheduledTaskRecord {
+  revision: number;
   id: number;
   sender_id: string;
   title: string;
@@ -118,6 +119,7 @@ export interface ScheduledTaskRecord {
 }
 
 export interface ScheduledTaskRunRecord {
+  prepared_result: string;
   id: number;
   task_id: number;
   scheduled_for_ms: number;
@@ -287,6 +289,11 @@ export class ContextDatabase {
     try {
       this.db.exec("ALTER TABLE agent_tasks ADD COLUMN heartbeat_at TEXT NOT NULL DEFAULT ''");
     } catch {}
+    for (const sql of [
+      "ALTER TABLE scheduled_tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 0",
+      "ALTER TABLE scheduled_task_runs ADD COLUMN prepared_result TEXT NOT NULL DEFAULT ''",
+    ]) { try { this.db.exec(sql); } catch {} }
+
     try {
       this.db.exec("ALTER TABLE operation_locks ADD COLUMN acquired_at INTEGER NOT NULL DEFAULT 0");
     } catch {}
@@ -311,8 +318,8 @@ export class ContextDatabase {
 
   public async withLock<T>(
     name: string,
-    action: () => Promise<T>,
-    options?: { ttlMs?: number }
+    action: (ownsLock: () => boolean) => Promise<T>,
+    options?: { ttlMs?: number; renew?: boolean }
   ): Promise<T> {
     const owner = randomUUID();
     const ttlMs = options?.ttlMs ?? 15 * 60 * 1000;
@@ -338,9 +345,26 @@ export class ContextDatabase {
         )
         .run(name, process.pid, owner, nowMs);
     }).immediate();
+    let leaseLost = false;
+    const ownsLock = () => !leaseLost && Boolean(this.db.query("SELECT owner FROM operation_locks WHERE name = ? AND owner = ? AND acquired_at > ?")
+      .get(name, owner, Date.now() - ttlMs));
+    const heartbeat = options?.renew ? setInterval(() => {
+      try {
+        const renewed = this.db.query("UPDATE operation_locks SET acquired_at = ? WHERE name = ? AND owner = ? AND acquired_at > ?")
+          .run(Date.now(), name, owner, Date.now() - ttlMs);
+        if (!renewed.changes) leaseLost = true;
+      } catch {
+        // Do not crash the daemon from a timer callback. Fence this owner and
+        // let the expired lease be recovered by the next scheduler invocation.
+        leaseLost = true;
+      }
+      if (leaseLost && heartbeat) clearInterval(heartbeat);
+    }, Math.max(1, Math.floor(ttlMs / 3))) : undefined;
+    heartbeat?.unref();
     try {
-      return await action();
+      return await action(ownsLock);
     } finally {
+      if (heartbeat) clearInterval(heartbeat);
       this.db
         .query("DELETE FROM operation_locks WHERE name = ? AND owner = ?")
         .run(name, owner);
@@ -1154,9 +1178,10 @@ export class ContextDatabase {
         | "last_error"
         | "related_article_id"
       >
-    >
+    >,
+    expectedRevision?: number
   ): ScheduledTaskRecord | null {
-    const sets: string[] = ["updated_at = ?"];
+    const sets: string[] = ["updated_at = ?", "revision = revision + 1"];
     const values: (string | number | null)[] = [new Date().toISOString()];
 
     for (const [k, v] of Object.entries(fields)) {
@@ -1167,9 +1192,11 @@ export class ContextDatabase {
     }
     values.push(id);
 
-    this.db
-      .query(`UPDATE scheduled_tasks SET ${sets.join(", ")} WHERE id = ?`)
+    if (expectedRevision !== undefined) values.push(expectedRevision);
+    const result = this.db
+      .query(`UPDATE scheduled_tasks SET ${sets.join(", ")} WHERE id = ?${expectedRevision === undefined ? "" : " AND revision = ?"}`)
       .run(...values);
+    if (!result.changes) return null;
 
     return this.getScheduledTaskById(id);
   }
@@ -1185,7 +1212,8 @@ export class ContextDatabase {
     const idMatch = trimmed.match(/(?:^|#|(?:任务|提醒|待办|日程)\s*#?)(\d+)\b/i);
     if (idMatch?.[1]) {
       const byId = this.getScheduledTaskById(Number.parseInt(idMatch[1], 10));
-      if (byId) return byId;
+      return byId && (!options?.senderId || !byId.sender_id || byId.sender_id === options.senderId) &&
+        (options?.activeOnly === false || ["active", "running", "paused"].includes(byId.status)) ? byId : null;
     }
 
     const statuses: ScheduledTaskStatus[] =
@@ -1202,6 +1230,7 @@ export class ContextDatabase {
     if (candidates.length === 0) return null;
 
     const cleanKeyword = trimmed
+      .replace(/(?:改到|推迟到|推迟|延后|提前到|调整到|改为|设为)\s*.+$/, "")
       .replace(
         /^(?:把|将|完成|已完成|做完了|取消|删除|关掉|停用|暂停|恢复|修改|调整|推迟|改期|立即执行|执行|运行)\s*/g,
         ""
@@ -1211,17 +1240,19 @@ export class ContextDatabase {
       .toLowerCase();
 
     if (cleanKeyword) {
-      const exactOrSub = candidates.find(
-        (c) =>
-          c.title.toLowerCase().includes(cleanKeyword) ||
-          cleanKeyword.includes(c.title.toLowerCase())
-      );
-      if (exactOrSub) return exactOrSub;
+      const exact = candidates.filter(c => c.title.toLowerCase() === cleanKeyword);
+      if (exact.length === 1) return exact[0];
+      const matches = candidates.filter(c => c.title.toLowerCase().includes(cleanKeyword));
+      if (matches.length === 1) return matches[0];
     }
 
-    // If user didn't give a keyword (e.g. "把刚才的提醒推迟1小时"), return the most recently created active task
-    const sortedByCreated = [...candidates].sort((a, b) => b.id - a.id);
-    return sortedByCreated[0] ?? null;
+    // Only an explicit contextual reference may select the latest task. A missing or
+    // ambiguous name/ID must never authorize a mutation of an unrelated task.
+    if (/^(?:把|将)?(?:刚才|上一个|最近一个)(?:的|那个)?(?:待办|提醒|定时任务|任务)?(?:推迟|改到|取消|暂停|完成|执行|运行|$)/.test(trimmed) ||
+        /^(?:取消|暂停|完成|执行|运行)(?:刚才|上一个|最近一个)(?:的|那个)?(?:待办|提醒|定时任务|任务)?$/.test(trimmed)) {
+      return [...candidates].sort((a, b) => b.id - a.id)[0] ?? null;
+    }
+    return null;
   }
 
   public recordScheduledTaskRun(params: {
@@ -1266,7 +1297,7 @@ export class ContextDatabase {
     fields: Partial<
       Pick<
         ScheduledTaskRunRecord,
-        "finished_at" | "status" | "output_summary" | "deposited_path" | "error"
+        "finished_at" | "status" | "output_summary" | "deposited_path" | "error" | "prepared_result"
       >
     >
   ): void {

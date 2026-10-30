@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join, relative } from "node:path";
-import { randomUUID } from "node:crypto";
 import type { AppConfig } from "../config.ts";
 import type {
   ContextDatabase,
@@ -113,7 +112,8 @@ export class TaskSchedulerEngine {
     const misfireGraceMs = options?.misfireGraceMs ?? 12 * 3600_000;
 
     try {
-      return await this.db.withLock("scheduler", async () => {
+      return await this.db.withLock("scheduler", async (ownsLock) => {
+        this.recoverInterruptedRuns(nowMs);
         let dueTasks: ScheduledTaskRecord[] = [];
         if (options?.forceTaskId !== undefined) {
           const t = this.db.getScheduledTaskById(options.forceTaskId);
@@ -130,6 +130,7 @@ export class TaskSchedulerEngine {
             nowMs,
             forced: options?.forceTaskId === task.id,
             misfireGraceMs,
+            ownsLock,
           });
           if (outcome) {
             outcomes.push(outcome);
@@ -143,7 +144,7 @@ export class TaskSchedulerEngine {
         }
 
         return outcomes;
-      });
+      }, { renew: true });
     } catch (err: any) {
       if (!String(err?.message || "").includes("Operation busy")) {
         console.error("[Scheduler] tick error:", err);
@@ -154,200 +155,149 @@ export class TaskSchedulerEngine {
     }
   }
 
+  // Called only while holding the scheduler's process lock. A live owner renews
+  // its lease; expired/replaced owners are fenced out before side effects commit.
+  private recoverInterruptedRuns(nowMs: number): void {
+    const tasks = this.db.db.query("SELECT * FROM scheduled_tasks WHERE status = 'running'").all() as ScheduledTaskRecord[];
+    for (const task of tasks) {
+      const run = this.db.getScheduledTaskRuns(task.id, 1)[0];
+      const queued = run && this.db.db.query("SELECT id FROM reply_outbox WHERE id = ?")
+        .get(`sched_${task.id}_${run.scheduled_for_ms}`);
+      const partialMedia = run && !queued && this.db.db.query("SELECT id FROM reply_outbox WHERE id GLOB ? LIMIT 1")
+        .get(`sched_media_${task.id}_${run.scheduled_for_ms}_*`);
+      this.db.db.transaction(() => {
+        if (this.db.getScheduledTaskById(task.id)?.revision !== task.revision) return;
+        if (partialMedia) {
+          this.db.updateScheduledTask(task.id, { status: "paused", last_error: "旧版本附件已入队但正文状态不明；已暂停，需人工核对，未重试发送" }, task.revision);
+          return;
+        }
+        if (queued || run?.status === "succeeded") {
+          // Legacy versions could crash between enqueue and completion. Preserve
+          // even failed outbox rows: recovery must not retry or replace delivery.
+          const next = task.schedule_type === "cron" && task.cron_expr
+            ? getNextCronRunMs(task.cron_expr, nowMs, task.timezone) : null;
+          this.db.updateScheduledTask(task.id, { status: next === null ? "completed" : "active",
+            next_run_at: next, run_count: task.run_count + 1, last_error: "" }, task.revision);
+          if (run) this.db.updateScheduledTaskRun(run.id, { status: "succeeded", finished_at: new Date(nowMs).toISOString() });
+        } else {
+          this.db.updateScheduledTask(task.id, { status: "active", next_run_at: run?.scheduled_for_ms ?? task.next_run_at ?? nowMs,
+            last_error: "检测到中断，将从已保存的生成结果恢复" }, task.revision);
+        }
+      }).immediate();
+    }
+  }
+
   private async executeSingleTask(
     task: ScheduledTaskRecord,
-    params: { nowMs: number; forced: boolean; misfireGraceMs: number }
+    params: { nowMs: number; forced: boolean; misfireGraceMs: number; ownsLock: () => boolean }
   ): Promise<ScheduledRunOutcome | null> {
-    const { nowMs, forced, misfireGraceMs } = params;
+    const { nowMs, forced, misfireGraceMs, ownsLock } = params;
+    const current = this.db.getScheduledTaskById(task.id);
+    if (!ownsLock() || !current || current.revision !== task.revision || current.status === "running" || (!forced && current.status !== "active")) return null;
     const tz = task.timezone || "Asia/Shanghai";
     const scheduledForMs = task.next_run_at ?? nowMs;
     const overdueMs = Math.max(0, nowMs - scheduledForMs);
-
-    // Check misfire window for recurring cron jobs (unless forced manually)
-    if (
-      !forced &&
-      task.schedule_type === "cron" &&
-      task.cron_expr &&
-      overdueMs > misfireGraceMs
-    ) {
+    if (!forced && task.schedule_type === "cron" && task.cron_expr && overdueMs > misfireGraceMs) {
       const nextRunAt = getNextCronRunMs(task.cron_expr, nowMs, tz);
-      this.db.recordScheduledTaskRun({
-        taskId: task.id,
-        scheduledForMs,
-        finishedAt: new Date(nowMs).toISOString(),
-        status: "skipped_misfire",
-        outputSummary: `Skipped misfired cron slot (${formatZonedDateTime(scheduledForMs, tz)}); advanced to ${formatZonedDateTime(nextRunAt, tz)}`,
-      });
-      this.db.updateScheduledTask(task.id, {
-        next_run_at: nextRunAt,
-        last_result_summary: `跳过过期触发窗口，已顺延至 ${formatZonedDateTime(nextRunAt, tz)}`,
-      });
-      return {
-        taskId: task.id,
-        title: task.title,
-        taskKind: task.task_kind,
-        scheduleType: task.schedule_type,
-        status: "skipped_misfire",
-        summary: `Skipped misfired slot; next at ${formatZonedDateTime(nextRunAt, tz)}`,
-        nextRunAt,
-      };
+      this.db.db.transaction(() => {
+        const run = this.db.recordScheduledTaskRun({ taskId: task.id, scheduledForMs, finishedAt: new Date(nowMs).toISOString(),
+          status: "skipped_misfire", outputSummary: "Skipped expired cron slot" });
+        if (run) this.db.updateScheduledTaskRun(run.id, { status: "skipped_misfire", finished_at: new Date(nowMs).toISOString(), output_summary: "Skipped expired cron slot" });
+        this.db.updateScheduledTask(task.id, { next_run_at: nextRunAt,
+          last_result_summary: `跳过过期触发窗口，已顺延至 ${formatZonedDateTime(nextRunAt, tz)}` }, task.revision);
+      }).immediate();
+      return { taskId: task.id, title: task.title, taskKind: task.task_kind, scheduleType: task.schedule_type,
+        status: "skipped_misfire", summary: "Skipped expired cron slot", nextRunAt };
     }
 
     const runSlotKey = forced ? nowMs : scheduledForMs;
-    const runRecord = this.db.recordScheduledTaskRun({
-      taskId: task.id,
-      scheduledForMs: runSlotKey,
-      startedAt: new Date(nowMs).toISOString(),
-      status: "running",
-    });
-
-    this.db.updateScheduledTask(task.id, {
-      status: "running",
-    });
-
+    const claim = this.db.db.transaction(() => {
+      const run = this.db.recordScheduledTaskRun({ taskId: task.id, scheduledForMs: runSlotKey,
+        startedAt: new Date(nowMs).toISOString(), status: "running" });
+      if (!run || run.status === "succeeded" || run.status === "skipped_misfire") return null;
+      const owned = this.db.updateScheduledTask(task.id, { status: "running" }, task.revision);
+      if (!owned) return null;
+      this.db.updateScheduledTaskRun(run.id, { status: "running", finished_at: "", error: "" });
+      return { run, revision: owned.revision };
+    }).immediate();
+    if (!claim) return null;
+    const { run, revision } = claim;
+    const ownsRun = () => {
+      const latest = this.db.getScheduledTaskById(task.id);
+      return ownsLock() && latest?.status === "running" && latest.revision === revision;
+    };
+    const superseded = () => {
+      if (!ownsLock()) return null;
+      this.db.updateScheduledTaskRun(run.id, { status: "failed", finished_at: new Date().toISOString(),
+        error: "Task changed during execution; result not queued" });
+      return null;
+    };
     const payload = parseTaskActionPayload(task);
     const recipient = this.resolveTaskRecipient(task);
-
+    const inputKey = JSON.stringify([task.title, task.action_payload, task.schedule_type, task.cron_expr, task.timezone]);
     try {
-      let replyText = "";
-      let depositedPath = "";
-      let modelUsed = "scheduler-engine";
-
-      if (
-        payload.executor === "web_search_digest" ||
-        payload.executor === "vault_digest" ||
-        payload.executor === "agent_delegate" ||
-        task.task_kind === "digest"
-      ) {
-        const digestResult = await this.executeDigestOrCollectionTask(
-          task,
-          payload,
-          nowMs
-        );
-        replyText = digestResult.wechatReply;
-        depositedPath = digestResult.depositedPath;
-        modelUsed = digestResult.modelUsed;
-
-        if (
-          depositedPath &&
-          Array.isArray(payload.deliverables) &&
-          payload.deliverables.length > 0
-        ) {
-          const normalizedFormats: DeliverableFormat[] = payload.deliverables.map(
-            (fmt) => (fmt === "markdown" ? "md" : (fmt as DeliverableFormat))
-          );
-          const produced = await ensureMultiFormatDeliverables({
-            markdownPath: depositedPath,
-            outputDir: dirname(depositedPath),
-            baseFileStem: basename(depositedPath, extname(depositedPath)),
-            title: task.title,
-            requestedFormats: normalizedFormats,
-          });
-          for (const filePath of produced) {
-            const mediaId = `sched_media_${task.id}_${runSlotKey}_${randomUUID().slice(0, 6)}`;
-            this.db.queueMediaReply(
-              mediaId,
-              recipient,
-              "file",
-              filePath,
-              `📎 定时简报附件：${task.title}`
-            );
-          }
+      let prepared: { inputKey: string; wechatReply: string; depositedPath: string; modelUsed: string; archiveContent?: string } | undefined;
+      if (run.prepared_result) {
+        const cached = JSON.parse(run.prepared_result);
+        if (cached.inputKey === inputKey) prepared = cached;
+      }
+      if (!prepared) {
+        if (["web_search_digest", "vault_digest", "agent_delegate"].includes(payload.executor) || task.task_kind === "digest") {
+          prepared = { ...await this.executeDigestOrCollectionTask(task, payload, nowMs, runSlotKey), inputKey };
+        } else {
+          prepared = { inputKey, wechatReply: this.buildReminderNotificationText(task, payload, scheduledForMs, nowMs),
+            depositedPath: "", modelUsed: "scheduler-engine" };
         }
-      } else {
-        replyText = this.buildReminderNotificationText(
-          task,
-          payload,
-          scheduledForMs,
-          nowMs
-        );
+        if (!ownsRun()) return superseded();
+        // Persist full generated content before writing files or queuing messages.
+        this.db.updateScheduledTaskRun(run.id, { prepared_result: JSON.stringify(prepared) });
       }
-
+      if (!ownsRun()) return superseded();
+      const { wechatReply: replyText, depositedPath, modelUsed, archiveContent } = prepared;
+      if (depositedPath && archiveContent !== undefined) {
+        writeNewFile(depositedPath, archiveContent);
+        if (readFileSync(depositedPath, "utf8") !== archiveContent) throw new Error("Digest archive changed; refusing to overwrite or send stale content");
+      }
+      let attachments: string[] = [];
+      if (depositedPath && payload.deliverables?.length) {
+        attachments = await ensureMultiFormatDeliverables({ markdownPath: depositedPath, outputDir: dirname(depositedPath),
+          baseFileStem: basename(depositedPath, extname(depositedPath)), title: task.title,
+          requestedFormats: payload.deliverables.map(fmt => fmt === "markdown" ? "md" : fmt as DeliverableFormat) });
+      }
       const replyClientId = `sched_${task.id}_${runSlotKey}`;
-      this.db.queueReply(replyClientId, recipient, replyText);
-
       const nowIso = new Date(nowMs).toISOString();
-      const nextRunAt =
-        task.schedule_type === "cron" && task.cron_expr
-          ? getNextCronRunMs(task.cron_expr, nowMs, tz)
-          : null;
-      const nextStatus =
-        task.schedule_type === "cron" ? "active" : "completed";
-
-      this.db.updateScheduledTask(task.id, {
-        status: nextStatus,
-        next_run_at: nextRunAt,
-        run_count: (task.run_count || 0) + 1,
-        last_run_at: nowIso,
-        last_result_summary: replyText.slice(0, 280),
-        last_error: "",
-      });
-
-      if (runRecord) {
-        this.db.updateScheduledTaskRun(runRecord.id, {
-          finished_at: nowIso,
-          status: "succeeded",
-          output_summary: replyText.slice(0, 300),
-          deposited_path: depositedPath,
-          error: "",
-        });
-      }
-
-      this.db.recordConversationTurn({
-        messageKey: `scheduled_task_${task.id}_${runSlotKey}`,
-        senderId: recipient,
-        userText: `[定时任务触发 #${task.id}] ${task.title}`,
-        intent: "manage_schedule",
-        complexity: task.task_kind === "digest" ? "deep" : "fast",
-        modelUsed,
-        relatedArticleId: payload.relatedArticleId ?? task.related_article_id,
-        depositedPath,
-        assistantReply: replyText,
-      });
-
-      return {
-        taskId: task.id,
-        title: task.title,
-        taskKind: task.task_kind,
-        scheduleType: task.schedule_type,
-        status: "succeeded",
-        replyClientId,
-        recipient,
-        depositedPath: depositedPath || undefined,
-        summary: replyText.slice(0, 200),
-        nextRunAt,
-      };
+      const nextRunAt = task.schedule_type === "cron" && task.cron_expr ? getNextCronRunMs(task.cron_expr, nowMs, tz) : null;
+      const committed = this.db.db.transaction(() => {
+        if (!ownsRun()) return false;
+        for (const [index, filePath] of attachments.entries()) {
+          this.db.queueMediaReply(`sched_media_${task.id}_${runSlotKey}_${index}`, recipient, "file", filePath, `📎 定时简报附件：${task.title}`);
+        }
+        this.db.queueReply(replyClientId, recipient, replyText);
+        this.db.updateScheduledTask(task.id, { status: task.schedule_type === "cron" ? "active" : "completed",
+          next_run_at: nextRunAt, run_count: task.run_count + 1, last_run_at: nowIso,
+          last_result_summary: replyText.slice(0, 280), last_error: "" }, revision);
+        this.db.updateScheduledTaskRun(run.id, { finished_at: nowIso, status: "succeeded",
+          output_summary: replyText.slice(0, 300), deposited_path: depositedPath, error: "" });
+        this.db.recordConversationTurn({ messageKey: `scheduled_task_${task.id}_${runSlotKey}`, senderId: recipient,
+          userText: `[定时任务触发 #${task.id}] ${task.title}`, intent: "manage_schedule",
+          complexity: task.task_kind === "digest" ? "deep" : "fast", modelUsed,
+          relatedArticleId: payload.relatedArticleId ?? task.related_article_id, depositedPath, assistantReply: replyText });
+        return true;
+      }).immediate();
+      if (!committed) return superseded();
+      return { taskId: task.id, title: task.title, taskKind: task.task_kind, scheduleType: task.schedule_type,
+        status: "succeeded", replyClientId, recipient, depositedPath: depositedPath || undefined,
+        summary: replyText.slice(0, 200), nextRunAt };
     } catch (err: any) {
+      if (!ownsRun()) return superseded();
       const errMsg = String(err?.message || err);
-      const nowIso = new Date(nowMs).toISOString();
-      const nextRunAt =
-        task.schedule_type === "cron" && task.cron_expr
-          ? getNextCronRunMs(task.cron_expr, nowMs, tz)
-          : nowMs + 5 * 60_000;
-
-      this.db.updateScheduledTask(task.id, {
-        status: "active",
-        next_run_at: nextRunAt,
-        last_error: errMsg.slice(0, 300),
-      });
-
-      if (runRecord) {
-        this.db.updateScheduledTaskRun(runRecord.id, {
-          finished_at: nowIso,
-          status: "failed",
-          error: errMsg.slice(0, 300),
-        });
-      }
-
-      return {
-        taskId: task.id,
-        title: task.title,
-        taskKind: task.task_kind,
-        scheduleType: task.schedule_type,
-        status: "failed",
-        summary: errMsg,
-        nextRunAt,
-      };
+      const nextRunAt = task.schedule_type === "cron" && task.cron_expr ? getNextCronRunMs(task.cron_expr, nowMs, tz) : nowMs + 5 * 60_000;
+      this.db.db.transaction(() => {
+        this.db.updateScheduledTask(task.id, { status: "active", next_run_at: nextRunAt, last_error: errMsg.slice(0, 300) }, revision);
+        this.db.updateScheduledTaskRun(run.id, { finished_at: new Date(nowMs).toISOString(), status: "failed", error: errMsg.slice(0, 300) });
+      }).immediate();
+      return { taskId: task.id, title: task.title, taskKind: task.task_kind, scheduleType: task.schedule_type,
+        status: "failed", summary: errMsg, nextRunAt };
     }
   }
 
@@ -417,11 +367,13 @@ export class TaskSchedulerEngine {
   private async executeDigestOrCollectionTask(
     task: ScheduledTaskRecord,
     payload: ScheduledActionPayload,
-    nowMs: number
+    nowMs: number,
+    runSlotKey: number
   ): Promise<{
     wechatReply: string;
     depositedPath: string;
     modelUsed: string;
+    archiveContent: string;
   }> {
     const tz = task.timezone || "Asia/Shanghai";
     const dateTimeStr = formatZonedDateTime(nowMs, tz);
@@ -528,7 +480,8 @@ export class TaskSchedulerEngine {
     }
 
     // 3. Always archive a complete Markdown note to Vault by default (Decision #2)
-    const depositedPath = this.saveDigestMarkdownToVault({
+    const { filePath: depositedPath, content: archiveContent } = this.prepareDigestMarkdown({
+      runSlotKey,
       task,
       payload,
       dateStr,
@@ -579,10 +532,12 @@ export class TaskSchedulerEngine {
       wechatReply: wechatLines.join("\n"),
       depositedPath,
       modelUsed,
+      archiveContent,
     };
   }
 
-  private saveDigestMarkdownToVault(params: {
+  private prepareDigestMarkdown(params: {
+    runSlotKey: number;
     task: ScheduledTaskRecord;
     payload: ScheduledActionPayload;
     dateStr: string;
@@ -592,7 +547,7 @@ export class TaskSchedulerEngine {
     sources: Array<{ title: string; uri: string }>;
     recentArticlesSummary: string;
     activeTodosSummary: string;
-  }): string {
+  }): { filePath: string; content: string } {
     const {
       task,
       payload,
@@ -616,14 +571,7 @@ export class TaskSchedulerEngine {
     mkdirSync(dirPath, { recursive: true });
 
     const slug = sanitizeSlug(task.title) || `digest-${task.id}`;
-    let filePath = join(dirPath, `${dateStr}-${slug}.md`);
-    if (existsSync(filePath)) {
-      const timeSuffix = dateTimeStr.slice(11, 16).replace(":", "");
-      filePath = join(
-        dirPath,
-        `${dateStr}-${timeSuffix}-${slug}-${randomUUID().slice(0, 4)}.md`
-      );
-    }
+    const filePath = join(dirPath, `${dateStr}-${slug}-${task.id}-${params.runSlotKey}.md`);
 
     const scheduleLabel =
       task.schedule_type === "cron" && task.cron_expr
@@ -672,8 +620,7 @@ export class TaskSchedulerEngine {
       ""
     );
 
-    writeNewFile(filePath, mdLines.join("\n"));
-    return filePath;
+    return { filePath, content: mdLines.join("\n") };
   }
 
   private readNowMdSnippet(): string {
