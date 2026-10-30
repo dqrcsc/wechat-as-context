@@ -825,15 +825,13 @@ export function extractTextFromClawBotMessage(msg: ClawBotMessage): string {
     if (item.ref_msg?.message_item?.text_item?.text) {
       parts.push(item.ref_msg.message_item.text_item.text);
     }
-    // Fallback: if item contains any nested link/card structure with an mp.weixin.qq.com URL, extract it
+    // Fallback: if item contains any nested link/card structure with a public URL, extract it
     const combinedSoFar = parts.join("\n");
-    if (!/https?:\/\/mp\.weixin\.qq\.com\//i.test(combinedSoFar)) {
-      const rawItemJson = JSON.stringify(item);
-      const mpMatch = rawItemJson.match(
-        /https?:\/\/mp\.weixin\.qq\.com\/[^\s"'<>\\]+/i
-      );
-      if (mpMatch) {
-        parts.push(mpMatch[0]);
+    if (!/https?:\/\//i.test(combinedSoFar)) {
+      const rawItemWithoutRef = JSON.stringify({ ...item, ref_msg: undefined });
+      const cardUrls = extractUrlsFromMixedText(rawItemWithoutRef);
+      if (cardUrls.length > 0) {
+        parts.push(cardUrls[0]);
       }
     }
   }

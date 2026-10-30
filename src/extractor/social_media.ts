@@ -224,17 +224,21 @@ export async function extractXiaohongshuNote(
     }
   }
 
-  const title =
+  const rawTitle =
     noteObj?.title ||
     matchMeta(html, "og:title")?.replace(/\s*-\s*小红书$/, "") ||
     fallbackTitle ||
     "小红书笔记";
-  const desc =
+  const title = rawTitle.replace(/#([^#\[]+)\[话题\]#/g, "#$1").trim();
+
+  const rawDesc =
     noteObj?.desc ||
     matchMeta(html, "og:description") ||
     matchMeta(html, "description") ||
     fallbackDigest ||
     "";
+  const desc = rawDesc.replace(/#([^#\[]+)\[话题\]#/g, "#$1").trim();
+
   const author =
     noteObj?.user?.nickname ||
     matchMeta(html, "author") ||
@@ -266,18 +270,39 @@ export async function extractXiaohongshuNote(
     }
   }
 
-  // Detect video stream URL if this is a video note
+  // Detect video stream URLs if this is a video note
+  const candidateVideoUrls: string[] = [];
+  const pushXhsVideoUrl = (u: unknown) => {
+    if (typeof u !== "string" || !u.startsWith("http")) return;
+    const httpsUrl = u.replace(/^http:\/\//i, "https://");
+    if (!candidateVideoUrls.includes(httpsUrl)) {
+      candidateVideoUrls.push(httpsUrl);
+    }
+  };
+  for (const codec of ["h264", "h265"] as const) {
+    const streams = noteObj?.video?.media?.stream?.[codec];
+    if (Array.isArray(streams)) {
+      for (const s of streams) {
+        pushXhsVideoUrl(s?.masterUrl);
+        if (Array.isArray(s?.backupUrls)) {
+          for (const b of s.backupUrls) pushXhsVideoUrl(b);
+        }
+      }
+    }
+  }
+  pushXhsVideoUrl(matchMeta(html, "og:video"));
+  for (const m of html.matchAll(
+    /<video[^>]+src=["'](https?:\/\/[^"']+)["']/gi
+  )) {
+    pushXhsVideoUrl(m[1]?.replace(/&amp;/g, "&"));
+  }
+
+  const videoStreamUrl = candidateVideoUrls[0] || "";
   const isVideoNote =
     noteObj?.type === "video" ||
     Boolean(noteObj?.video?.media?.stream) ||
-    matchMeta(html, "og:type") === "video";
-
-  const videoStreamUrl =
-    noteObj?.video?.media?.stream?.h264?.[0]?.masterUrl ||
-    noteObj?.video?.media?.stream?.h264?.[0]?.backupUrls?.[0] ||
-    noteObj?.video?.media?.stream?.h265?.[0]?.masterUrl ||
-    matchMeta(html, "og:video") ||
-    "";
+    matchMeta(html, "og:type") === "video" ||
+    Boolean(videoStreamUrl);
 
   const durationSeconds =
     Number(noteObj?.video?.capa?.duration || 0) || undefined;
@@ -293,7 +318,11 @@ export async function extractXiaohongshuNote(
     try {
       const asrRes = await transcribeAudioFromMedia({
         mediaUrl: videoStreamUrl,
-        headers: { Referer: "https://www.xiaohongshu.com/" },
+        mediaUrls: candidateVideoUrls,
+        headers: {
+          Referer: "https://www.xiaohongshu.com/",
+          "User-Agent": DESKTOP_CHROME_UA,
+        },
         config: options?.config,
         hintTitle: title,
       });

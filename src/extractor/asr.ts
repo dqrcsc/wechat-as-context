@@ -132,11 +132,17 @@ export async function transcribeAudioFromMedia(
               targetOut,
               candidateUrl,
             ];
-            spawnSync("/usr/bin/curl", curlArgs, {
+            const curlRes = spawnSync("/usr/bin/curl", curlArgs, {
               encoding: "utf-8",
               timeout: 80_000,
             });
-            if (existsSync(targetOut) && statSync(targetOut).size >= 100_000) {
+            const downloadedSize = existsSync(targetOut)
+              ? statSync(targetOut).size
+              : 0;
+            if (
+              (curlRes.status === 0 && downloadedSize >= 4_096) ||
+              downloadedSize >= 100_000
+            ) {
               localMediaPath = targetOut;
               break;
             }

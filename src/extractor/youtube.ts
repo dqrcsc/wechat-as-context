@@ -100,18 +100,19 @@ export async function extractYouTubeVideo(
     watchHtml,
     "ytInitialPlayerResponse"
   );
+  const webCaptionTracks: any[] =
+    playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
   const apiKey = watchHtml.match(/"INNERTUBE_API_KEY":\s*"([a-zA-Z0-9_-]+)"/)?.[1];
   const visitorData =
     watchHtml.match(/"VISITOR_DATA":\s*"([^"]+)"/)?.[1] ||
     watchHtml.match(/"visitorData":\s*"([^"]+)"/)?.[1] ||
     "";
 
-  // If watchHtml didn't include captionTracks directly and we have an InnerTube API key, query InnerTube
-  if (
-    apiKey &&
-    (!playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks ||
-      !playerData?.videoDetails)
-  ) {
+  // Always query the ANDROID InnerTube player API when apiKey is present because YouTube's WEB
+  // watch-page captionTracks baseUrl requires a Proof-of-Origin Token (pot) and returns 0 bytes,
+  // and WEB streamingData encrypts audio stream URLs via signatureCipher.
+  let usedAndroidInnerTube = false;
+  if (apiKey) {
     try {
       const itResp = await fetchPublicResource(
         `https://www.youtube.com/youtubei/v1/player?key=${encodeURIComponent(
@@ -148,13 +149,23 @@ export async function extractYouTubeVideo(
       );
       if (itResp.ok) {
         const itJson = (await itResp.json()) as any;
-        if (itJson?.videoDetails || itJson?.captions) {
+        if (itJson?.videoDetails || itJson?.captions || itJson?.streamingData) {
+          usedAndroidInnerTube = Boolean(
+            itJson?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length
+          );
           playerData = {
             ...playerData,
             ...itJson,
             videoDetails: itJson.videoDetails || playerData?.videoDetails,
-            captions: itJson.captions || playerData?.captions,
-            streamingData: itJson.streamingData || playerData?.streamingData,
+            captions:
+              itJson.captions?.playerCaptionsTracklistRenderer?.captionTracks
+                ?.length
+                ? itJson.captions
+                : playerData?.captions,
+            streamingData:
+              itJson.streamingData?.adaptiveFormats?.length
+                ? itJson.streamingData
+                : playerData?.streamingData,
           };
         }
       }
@@ -210,27 +221,44 @@ export async function extractYouTubeVideo(
   let snippets: YouTubeSnippet[] = [];
   let transcriptSourceLabel = "";
 
-  const selectedTrack = selectBestCaptionTrack(captionTracks, preferredLangs);
-  if (selectedTrack?.baseUrl) {
+  const candidateTrackPools = [
+    {
+      tracks: captionTracks,
+      ua: usedAndroidInnerTube
+        ? ANDROID_INNERTUBE_CLIENT.userAgent
+        : WATCH_PAGE_UA,
+    },
+    ...(usedAndroidInnerTube && webCaptionTracks.length > 0
+      ? [{ tracks: webCaptionTracks, ua: WATCH_PAGE_UA }]
+      : []),
+  ];
+
+  for (const pool of candidateTrackPools) {
+    const selectedTrack = selectBestCaptionTrack(pool.tracks, preferredLangs);
+    if (!selectedTrack?.baseUrl) continue;
     try {
       const trackResp = await fetchPublicResource(selectedTrack.baseUrl, {
         headers: {
-          "User-Agent": WATCH_PAGE_UA,
+          "User-Agent": pool.ua,
           "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
         },
         signal: AbortSignal.timeout(20_000),
       });
       if (trackResp.ok) {
         const rawTrack = await trackResp.text();
-        snippets = parseYouTubeTranscriptPayload(rawTrack);
-        const langName =
-          selectedTrack.name?.simpleText ||
-          selectedTrack.name?.runs?.[0]?.text ||
-          selectedTrack.languageCode ||
-          "default";
-        transcriptSourceLabel = `YouTube 字幕轨道 (${langName}${
-          selectedTrack.kind === "asr" ? " · 自动生成" : ""
-        })`;
+        const parsedSnippets = parseYouTubeTranscriptPayload(rawTrack);
+        if (parsedSnippets.length > 0) {
+          snippets = parsedSnippets;
+          const langName =
+            selectedTrack.name?.simpleText ||
+            selectedTrack.name?.runs?.[0]?.text ||
+            selectedTrack.languageCode ||
+            "default";
+          transcriptSourceLabel = `YouTube 字幕轨道 (${langName}${
+            selectedTrack.kind === "asr" ? " · 自动生成" : ""
+          })`;
+          break;
+        }
       }
     } catch (err) {
       console.warn(`[YouTubeExtractor] Failed to download caption track:`, err);
@@ -240,16 +268,27 @@ export async function extractYouTubeVideo(
   // Step 3: Fallback to audio stream + ASR if no captions were obtained
   let asrTranscript = "";
   if (snippets.length === 0) {
-    const audioFormat = (playerData?.streamingData?.adaptiveFormats ?? []).find(
-      (f: any) =>
-        typeof f?.mimeType === "string" &&
-        f.mimeType.startsWith("audio/") &&
-        typeof f?.url === "string"
-    );
-    if (audioFormat?.url) {
+    const audioFormats = (playerData?.streamingData?.adaptiveFormats ?? [])
+      .filter(
+        (f: any) =>
+          typeof f?.mimeType === "string" &&
+          f.mimeType.startsWith("audio/") &&
+          typeof f?.url === "string"
+      )
+      .sort(
+        (a: any, b: any) =>
+          Number(a?.contentLength || Infinity) -
+          Number(b?.contentLength || Infinity)
+      );
+    const audioUrls = audioFormats.map((f: any) => String(f.url));
+    if (audioUrls.length > 0) {
       try {
         const asrRes = await transcribeAudioFromMedia({
-          mediaUrl: audioFormat.url,
+          mediaUrl: audioUrls[0],
+          mediaUrls: audioUrls,
+          headers: {
+            "User-Agent": ANDROID_INNERTUBE_CLIENT.userAgent,
+          },
           config: options?.config,
           hintTitle: title,
         });

@@ -249,13 +249,18 @@ export function sanitizeSharedLinkMessage(
   // Example: "67 AI研究员发布了一篇小红书笔记，快来看吧！ 😆 abc12345 😆 http://xhslink.com/a/xyz，复制本条信息，打开【小红书】App查看精彩内容！"
   if (
     platform === "xiaohongshu" ||
-    /发布了一篇小红书笔记|打开【小红书】App|复制本条信息/.test(remaining)
+    /发布了一篇小红书笔记|打开【小红书】App|复制本条信息|小红书\s*-\s*你的生活/.test(
+      remaining
+    )
   ) {
     const beforeStrip = remaining;
     // Extract optional bracketed title if XHS shared with title
-    const xhsTitleMatch = remaining.match(/^【([^】]{2,80})】/);
+    const xhsTitleMatch = remaining.match(/【([^】]{2,120})】/);
     if (xhsTitleMatch?.[1] && xhsTitleMatch[1] !== "小红书") {
-      extractedTitle = xhsTitleMatch[1].trim();
+      extractedTitle = xhsTitleMatch[1]
+        .replace(/\s*\|\s*小红书.*$/, "")
+        .replace(/\s*-\s*[^-|]+$/, "")
+        .trim();
     }
     remaining = remaining
       .replace(/^\s*\d+\s+/g, "")
@@ -263,14 +268,16 @@ export function sanitizeSharedLinkMessage(
       .replace(/😆\s*[A-Za-z0-9_-]{3,25}\s*😆/g, "")
       .replace(/😆/g, "")
       .replace(/[，,。.\s]*复制本条信息[，,]\s*打开【小红书】App查看精彩内容[！!]?/g, "")
-      .replace(/小红书，你的生活指南/g, "")
+      .replace(/小红书[，,\s-]*你的生活(?:指南|兴趣社区)/g, "")
       .trim();
-    if (remaining !== beforeStrip) {
+    if (remaining !== beforeStrip || xhsTitleMatch) {
       wasBoilerplate = true;
       // If only the extracted bracketed title remains, treat it as title rather than user note
       if (
-        extractedTitle &&
-        (remaining === `【${extractedTitle}】` || remaining === extractedTitle)
+        xhsTitleMatch?.[0] &&
+        (remaining === xhsTitleMatch[0] ||
+          remaining === xhsTitleMatch[1] ||
+          remaining === extractedTitle)
       ) {
         remaining = "";
       }

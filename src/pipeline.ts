@@ -629,7 +629,9 @@ export class WeChatContextPipeline {
           const m = JSON.parse(pending.payload) as ClawBotMessage;
           const unpacked = unpackClawBotMessage(m);
           const text = extractTextFromClawBotMessage(m);
-          const hasContent = Boolean(text || unpacked.mediaItems.length > 0);
+          const hasContent = Boolean(
+            text || unpacked.urls.length > 0 || unpacked.mediaItems.length > 0
+          );
 
           if ((!m.message_type || m.message_type === 1) && hasContent) {
             if (!m.from_user_id) throw new Error("Message has no sender identity");
