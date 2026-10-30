@@ -1,5 +1,4 @@
-import { existsSync, renameSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { rotateDaemonLogsIfOversized } from "./log_rotation.ts";
 import { LOCAL_HOST, createHttpHandler } from "./http.ts";
 import { loadConfig } from "./config.ts";
 import { ContextDatabase } from "./db.ts";
@@ -9,16 +8,6 @@ const config = loadConfig();
 const db = new ContextDatabase(config.dbPath);
 const pipeline = new WeChatContextPipeline(config, db);
 
-function rotateDaemonLogsIfOversized(dataDir: string, maxBytes = 5 * 1024 * 1024): void {
-  for (const name of ["daemon.stdout.log", "daemon.stderr.log"]) {
-    const logPath = join(dataDir, name);
-    try {
-      if (existsSync(logPath) && statSync(logPath).size > maxBytes) {
-        renameSync(logPath, `${logPath}.1`);
-      }
-    } catch {}
-  }
-}
 
 rotateDaemonLogsIfOversized(config.dataDir);
 

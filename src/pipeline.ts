@@ -11,7 +11,7 @@ import {
   saveRawWebArticleToVault,
 } from "./extractor/web.ts";
 import { analyzeArticleWithVault, isFallbackLightNote } from "./vault/analyzer.ts";
-import { createIdeaSeedInVault, gatherVaultContext, saveCompanionLightNote } from "./vault/context.ts";
+import { createIdeaSeedInVault, gatherVaultContext, saveCompanionLightNote, isUnmodifiedGeneratedLightNote } from "./vault/context.ts";
 import {
   ClawBotMessage,
   extractTextFromClawBotMessage,
@@ -346,12 +346,11 @@ export class WeChatContextPipeline {
           : "";
       const wasFallback =
         !existingNoteContent ||
-        isFallbackLightNote(existingNoteContent) ||
-        isFallbackLightNote(record.short_summary);
+        isFallbackLightNote(existingNoteContent);
 
-      if (existingNoteContent && !wasFallback && !options?.force) {
+      if (existingNoteContent && (!wasFallback || !isUnmodifiedGeneratedLightNote(existingNoteContent)) && !options?.force) {
         throw new Error(
-          `Article #${id} already has a completed model analysis note (${record.note_md_path}). Pass --force to re-generate light note.`
+          `Article #${id} has an existing note that is complete, edited or lacks a generation fingerprint (${record.note_md_path}). Review it and pass --force to re-generate light note.`
         );
       }
 
@@ -434,6 +433,10 @@ export class WeChatContextPipeline {
         };
       }
 
+      if (record.note_md_path && (existsSync(record.note_md_path) ? readFileSync(record.note_md_path, "utf8") : "") !== existingNoteContent) {
+        throw new Error(`Article #${id} note changed during analysis; refusing to overwrite concurrent edits.`);
+      }
+
       const targetExternalDir =
         extracted.mediaKind === "video"
           ? this.config.videoDir ||
@@ -464,6 +467,9 @@ export class WeChatContextPipeline {
 
       const noteMdPath =
         record.note_md_path || sourceMdPath.replace(/\.md$/, "_note.md");
+      if ((existsSync(noteMdPath) ? readFileSync(noteMdPath, "utf8") : "") !== existingNoteContent) {
+        throw new Error(`Article #${id} note changed during analysis; refusing to overwrite concurrent edits.`);
+      }
       saveCompanionLightNote({
         sourceMdPath,
         existingPath: noteMdPath,

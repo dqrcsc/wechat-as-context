@@ -548,6 +548,17 @@ function collectMarkdownFiles(dir: string, out: string[]): void {
   }
 }
 
+/** Fingerprint covers the generated file except its own frontmatter field. Legacy
+ * notes without a fingerprint are deliberately not eligible for automatic overwrite. */
+export function isUnmodifiedGeneratedLightNote(content: string): boolean {
+  const matches = [...content.matchAll(/^generated_content_sha256: ([a-f0-9]{64})\n/gm)];
+  if (matches.length !== 1 || !content.startsWith("---\n")) return false;
+  const match = matches[0];
+  if (match.index! > content.indexOf("\n---", 4)) return false;
+  const original = content.slice(0, match.index) + content.slice(match.index! + match[0].length);
+  return createHash("sha256").update(original).digest("hex") === match[1];
+}
+
 export function saveCompanionLightNote(params: {
   sourceMdPath: string;
   sourceUrl: string;
@@ -595,10 +606,13 @@ export function saveCompanionLightNote(params: {
     "",
   ];
 
+  const generated = frontmatter.join("\n");
+  const fingerprint = createHash("sha256").update(generated).digest("hex");
+  const content = generated.replace(/^---\n/, `---\ngenerated_content_sha256: ${fingerprint}\n`);
   if (params.overwriteExisting) {
-    replaceFileAtomically(noteMdPath, frontmatter.join("\n"));
+    replaceFileAtomically(noteMdPath, content);
   } else {
-    writeNewFile(noteMdPath, frontmatter.join("\n"));
+    writeNewFile(noteMdPath, content);
   }
 
   return noteMdPath;
