@@ -747,6 +747,7 @@ export class WeChatContextPipeline {
   public async drainScheduledTasks(options?: {
     nowMs?: number;
     forceTaskId?: number;
+    manual?: boolean;
   }): Promise<ScheduledRunOutcome[]> {
     this.refreshConfigFromDiskIfChanged();
     return this.scheduler.tick(options);

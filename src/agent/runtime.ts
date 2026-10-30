@@ -1758,6 +1758,8 @@ ${text}`,
       ctx.unpacked.userText ||
       ""
     ).trim();
+    // A router hint must not override the explicit target in the user's text.
+    const taskQuery = ctx.unpacked.userText?.trim() || rawText;
     const tz = "Asia/Shanghai";
     const nowMs = Date.now();
 
@@ -1876,12 +1878,10 @@ ${text}`,
 
     // 2. COMPLETE
     if (subAction === "complete") {
-      const target = ctx.decision.slots.targetTaskId
-        ? this.db.getScheduledTaskById(ctx.decision.slots.targetTaskId)
-        : this.db.findScheduledTaskByQuery(rawText, {
-            senderId: ctx.senderId,
-            activeOnly: true,
-          });
+      const target = this.db.findScheduledTaskByQuery(taskQuery, {
+        senderId: ctx.senderId,
+        activeOnly: true,
+      });
 
       if (!target) {
         return {
@@ -1914,12 +1914,10 @@ ${text}`,
 
     // 3. CANCEL / PAUSE
     if (subAction === "cancel") {
-      const target = ctx.decision.slots.targetTaskId
-        ? this.db.getScheduledTaskById(ctx.decision.slots.targetTaskId)
-        : this.db.findScheduledTaskByQuery(rawText, {
-            senderId: ctx.senderId,
-            activeOnly: true,
-          });
+      const target = this.db.findScheduledTaskByQuery(taskQuery, {
+        senderId: ctx.senderId,
+        activeOnly: true,
+      });
 
       if (!target) {
         return {
@@ -1928,7 +1926,7 @@ ${text}`,
         };
       }
 
-      const isPause = /暂停/.test(rawText);
+      const isPause = /^暂停/.test(taskQuery);
       const updated = this.db.updateScheduledTask(target.id, {
         status: isPause ? "paused" : "cancelled",
         next_run_at: null,
@@ -1951,12 +1949,10 @@ ${text}`,
 
     // 4. UPDATE (Reschedule)
     if (subAction === "update") {
-      const target = ctx.decision.slots.targetTaskId
-        ? this.db.getScheduledTaskById(ctx.decision.slots.targetTaskId)
-        : this.db.findScheduledTaskByQuery(rawText, {
-            senderId: ctx.senderId,
-            activeOnly: false,
-          });
+      const target = this.db.findScheduledTaskByQuery(taskQuery, {
+        senderId: ctx.senderId,
+        activeOnly: false,
+      });
 
       if (!target) {
         return {
@@ -1965,10 +1961,14 @@ ${text}`,
         };
       }
 
+      const updateTarget = taskQuery.replace(/^(?:把|将|修改|调整|推迟|改期)\s*/, "").trim();
+      const titleForm = [target.title, `「${target.title}」`, `“${target.title}”`, `"${target.title}"`]
+        .find(name => updateTarget.toLowerCase().startsWith(name.toLowerCase()));
+      const updateText = titleForm ? updateTarget.slice(titleForm.length).trim() : updateTarget;
       const afterClause =
-        rawText.match(
+        updateText.match(
           /(?:改到|推迟到|推迟|延后|提前到|调整到|改为|设为)\s*(.+)$/i
-        )?.[1] || rawText;
+        )?.[1] || taskQuery;
       const spec = parseNaturalScheduleSpec(afterClause, {
         nowMs,
         timezone: target.timezone || tz,
@@ -2009,12 +2009,10 @@ ${text}`,
 
     // 5. RUN NOW
     if (subAction === "run_now") {
-      const target = ctx.decision.slots.targetTaskId
-        ? this.db.getScheduledTaskById(ctx.decision.slots.targetTaskId)
-        : this.db.findScheduledTaskByQuery(rawText, {
-            senderId: ctx.senderId,
-            activeOnly: false,
-          });
+      const target = this.db.findScheduledTaskByQuery(taskQuery, {
+        senderId: ctx.senderId,
+        activeOnly: false,
+      });
 
       if (!target) {
         return {
@@ -2028,16 +2026,19 @@ ${text}`,
         this.db,
         new WeChatClawBotClient(this.db)
       );
-      const outcomes = await engine.tick({ nowMs, forceTaskId: target.id });
-      const first = outcomes[0];
-
-      return {
-        replyText: first
-          ? `⚡ 已立即执行任务 #${target.id}「${target.title}」（状态：${first.status}）`
-          : `⚡ 已触发任务 #${target.id}「${target.title}」`,
-        modelUsed: "schedule_manager",
-        depositedPath: first?.depositedPath,
-      };
+      try {
+        const outcomes = await engine.tick({ nowMs, forceTaskId: target.id });
+        const first = outcomes[0];
+        return {
+          replyText: first?.status === "succeeded"
+            ? `⚡ 任务 #${target.id}「${target.title}」已执行，回执已入队（尚不代表微信送达）`
+            : `⚠️ 任务 #${target.id}「${target.title}」未成功执行（${first?.status || "未执行"}）${first?.summary ? `：${first.summary}` : ""}`,
+          modelUsed: "schedule_manager",
+          depositedPath: first?.depositedPath,
+        };
+      } catch (error: any) {
+        return { replyText: `⚠️ 任务 #${target.id}「${target.title}」：${error?.message || "执行失败"}`, modelUsed: "schedule_manager" };
+      }
     }
 
     // 6. CREATE (Default)

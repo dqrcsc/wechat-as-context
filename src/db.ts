@@ -1209,13 +1209,6 @@ export class ContextDatabase {
     }
   ): ScheduledTaskRecord | null {
     const trimmed = String(query || "").trim();
-    const idMatch = trimmed.match(/(?:^|#|(?:任务|提醒|待办|日程)\s*#?)(\d+)\b/i);
-    if (idMatch?.[1]) {
-      const byId = this.getScheduledTaskById(Number.parseInt(idMatch[1], 10));
-      return byId && (!options?.senderId || !byId.sender_id || byId.sender_id === options.senderId) &&
-        (options?.activeOnly === false || ["active", "running", "paused"].includes(byId.status)) ? byId : null;
-    }
-
     const statuses: ScheduledTaskStatus[] =
       options?.activeOnly === false
         ? ["active", "running", "paused", "completed", "cancelled"]
@@ -1229,22 +1222,42 @@ export class ContextDatabase {
 
     if (candidates.length === 0) return null;
 
-    const cleanKeyword = trimmed
-      .replace(/(?:改到|推迟到|推迟|延后|提前到|调整到|改为|设为)\s*.+$/, "")
-      .replace(
-        /^(?:把|将|完成|已完成|做完了|取消|删除|关掉|停用|暂停|恢复|修改|调整|推迟|改期|立即执行|执行|运行)\s*/g,
-        ""
-      )
-      .replace(/(?:的)?(?:待办|提醒|定时任务|周期任务|早报|日报|任务)/g, "")
-      .trim()
-      .toLowerCase();
+    // Match complete stored titles before interpreting command words or numeric IDs.
+    const targetText = trimmed.replace(
+      /^(?:把|将|已完成|完成|做完了|取消|删除|关掉|停用|暂停|恢复|修改|调整|推迟|改期|立即执行|执行|运行)\s*/, ""
+    ).trim().toLowerCase();
+    const exactFull = candidates.filter(c => c.title.toLowerCase() === targetText ||
+      c.title.toLowerCase() === trimmed.toLowerCase());
+    if (exactFull.length) return exactFull.length === 1 ? exactFull[0] : null;
 
-    if (cleanKeyword) {
-      const exact = candidates.filter(c => c.title.toLowerCase() === cleanKeyword);
-      if (exact.length === 1) return exact[0];
-      const matches = candidates.filter(c => c.title.toLowerCase().includes(cleanKeyword));
-      if (matches.length === 1) return matches[0];
+    const allowsReschedule = !/^(?:已完成|完成|做完了|取消|删除|关掉|停用|暂停|恢复|立即执行|执行|运行)/.test(trimmed);
+    const named = candidates.filter(c => {
+      const title = c.title.toLowerCase();
+      return [title, `「${title}」`, `“${title}”`, `"${title}"`].some(name => {
+        if (!targetText.startsWith(name)) return false;
+        const suffix = targetText.slice(name.length).trim();
+        return !suffix || /^(?:的(?:待办|提醒|定时任务|任务))$/.test(suffix) ||
+          allowsReschedule && suffix.match(/改到|推迟到|推迟|延后|提前到|调整到|改为|设为/g)?.length === 1 &&
+          /^(?:改到|推迟到|推迟|延后|提前到|调整到|改为|设为)\s*(?:今天|明天|明早|明晚|明日|后天|大后天|今晚|今早|今晨|本|这|下|周|星期|礼拜|每天|每周|每月|每隔|\d|[一二三四五六七八九十半两]|早上|上午|中午|下午|晚上|凌晨)/.test(suffix);
+      });
+    }).sort((a, b) => b.title.length - a.title.length);
+    if (named.length) {
+      const longest = named.filter(c => c.title.length === named[0].title.length);
+      return longest.length === 1 ? longest[0] : null;
     }
+
+    const idMatch = targetText.match(/^(?:(?:任务|提醒|待办|日程)\s*#?|#)?(\d+)(?:\s|$|改到|推迟到|延后|提前到|调整到|改为|设为)/i);
+    if (idMatch?.[1]) {
+      const byId = this.getScheduledTaskById(Number.parseInt(idMatch[1], 10));
+      return byId && (!options?.senderId || !byId.sender_id || byId.sender_id === options.senderId) &&
+        (options?.activeOnly === false || ["active", "running", "paused"].includes(byId.status)) ? byId : null;
+    }
+
+    // A fuzzy title can select only one candidate; never truncate a title at an
+    // embedded rescheduling word. Ambiguous phrasing needs an explicit #ID.
+    const keyword = targetText.replace(/^[「“"]([\s\S]*)[」”"]$/, "$1").replace(/的(?:待办|提醒|定时任务|任务)$/, "");
+    const matches = keyword ? candidates.filter(c => c.title.toLowerCase().includes(keyword)) : [];
+    if (matches.length === 1) return matches[0];
 
     // Only an explicit contextual reference may select the latest task. A missing or
     // ambiguous name/ID must never authorize a mutation of an unrelated task.

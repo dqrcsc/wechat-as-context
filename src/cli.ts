@@ -1080,15 +1080,16 @@ async function main() {
         const id = args[2] && !args[2].startsWith("--") ? Number(args[2]) : undefined;
         const outcomes = await pipeline.drainScheduledTasks({
           forceTaskId: id,
+          manual: true,
         });
         if (pipeline.clawbot.isConfigured()) {
           await pipeline.flushReplies({ ignoreBusy: true });
         }
         if (isJson) {
-          console.log(JSON.stringify({ ok: true, outcomes }, null, 2));
+          console.log(JSON.stringify({ ok: outcomes.every(outcome => outcome.status === "succeeded"), outcomes }, null, 2));
         } else {
           console.log(
-            `⚡ 已执行定时任务调度 (触发 ${outcomes.length} 项)`
+            `⚡ 定时任务调度结束 (${outcomes.length} 项，成功 ${outcomes.filter(o => o.status === "succeeded").length} 项)`
           );
           for (const o of outcomes) {
             console.log(
@@ -1098,6 +1099,7 @@ async function main() {
             );
           }
         }
+        if (outcomes.some(outcome => outcome.status !== "succeeded")) process.exitCode = 1;
         break;
       }
 

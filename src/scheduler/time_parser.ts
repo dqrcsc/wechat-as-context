@@ -1,5 +1,6 @@
 import {
   describeCronExpression,
+  formatZonedDateTime,
   getNextCronRunMs,
   getZonedDateParts,
   isValidCronExpression,
@@ -406,6 +407,7 @@ export function parseNaturalScheduleSpec(
   const zpNow = getZonedDateParts(nowMs, timeZone);
   let dayOffset: number | null = null;
   let dayLabel = "";
+  let weekday: { prefix: string; label: string } | null = null;
   let defaultMeridiemFromDay = "";
 
   if (/今早|今晨/.test(text)) {
@@ -437,19 +439,20 @@ export function parseNaturalScheduleSpec(
     dayOffset = 2;
     dayLabel = "后天";
   } else {
-    const weekdayMatch = text.match(/(本|这|下)?(?:周|星期|礼拜)([一二三四五六日天])/);
+    const weekdayMatch = text.match(/(本|这|下)?\s*(?:周|星期|礼拜)\s*([一二三四五六日天])/);
     if (weekdayMatch) {
       const prefix = weekdayMatch[1] || "";
       const targetDow = ZH_DOW_MAP[weekdayMatch[2]];
       if (targetDow !== undefined) {
-        let diff = targetDow - zpNow.dayOfWeek;
+        weekday = { prefix, label: weekdayMatch[2] };
+        let diff = ((targetDow + 6) % 7) - ((zpNow.dayOfWeek + 6) % 7);
         if (prefix === "下") {
           // Next week's weekday
           const daysToNextMonday =
             zpNow.dayOfWeek === 0 ? 1 : 8 - zpNow.dayOfWeek;
           const offsetFromMonday = targetDow === 0 ? 6 : targetDow - 1;
           diff = daysToNextMonday + offsetFromMonday;
-        } else if (diff < 0 || (diff === 0 && !prefix)) {
+        } else if (!prefix && diff < 0) {
           diff += 7;
         }
         dayOffset = diff;
@@ -533,6 +536,17 @@ export function parseNaturalScheduleSpec(
         timeZone
       );
       finalDayLabel = "明天";
+    }
+
+    if (weekday) {
+      if (!weekday.prefix && candidateMs < nowMs) {
+        const nextWeek = getZonedDateParts(baseMiddayMs + 7 * 24 * 3_600_000, timeZone);
+        candidateMs = zonedWallClockToEpochMs(nextWeek.year, nextWeek.month, nextWeek.day, hour, minute, timeZone);
+      } else if (candidateMs < nowMs) {
+        throw new Error("指定的星期日期时间已过，请明确未来时间");
+      }
+      return withMeta({ scheduleType: "once", cronExpr: "", nextRunAt: candidateMs, isDefaultTime: false,
+        humanScheduleLabel: `${formatZonedDateTime(candidateMs, timeZone)}（周${weekday.label}）`, cleanedTaskText });
     }
 
     const hhmm = `${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`;

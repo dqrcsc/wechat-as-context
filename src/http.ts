@@ -1,3 +1,4 @@
+import { ScheduleRunRejected } from "./scheduler/engine.ts";
 import { ContextDatabase, ScheduledTaskKind, ScheduledTaskStatus } from "./db.ts";
 import { WeChatContextPipeline, normalizeWeChatUrl } from "./pipeline.ts";
 import { scanLocalAgentClis } from "./agent/subagent_cli.ts";
@@ -194,7 +195,8 @@ export function createHttpHandler(db: ContextDatabase, pipeline: WeChatContextPi
           if (pipeline.clawbot.isConfigured()) {
             await pipeline.flushReplies({ ignoreBusy: true });
           }
-          return Response.json({ ok: true, outcomes });
+          const ok = outcomes.length > 0 && outcomes.every(outcome => outcome.status === "succeeded");
+          return Response.json({ ok, outcomes }, { status: ok ? 200 : 409 });
         }
 
         const rawText = String(body?.text || body?.title || "").trim();
@@ -241,8 +243,8 @@ export function createHttpHandler(db: ContextDatabase, pipeline: WeChatContextPi
         return Response.json({ ok: true, task: created });
       } catch (error: any) {
         return Response.json(
-          { ok: false, error: error?.message || String(error) },
-          { status: 400 }
+          { ok: false, error: error?.message || String(error), ...(error instanceof ScheduleRunRejected ? { code: error.code } : {}) },
+          { status: error instanceof ScheduleRunRejected ? (error.code === "not_found" ? 404 : 409) : 400 }
         );
       }
     }

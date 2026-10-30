@@ -21,6 +21,10 @@ import {
 } from "./cron.ts";
 import { syncScheduledTasksToVaultQueue } from "./vault_sync.ts";
 
+export class ScheduleRunRejected extends Error {
+  constructor(public code: "busy" | "not_found" | "not_executed", message: string) { super(message); }
+}
+
 export interface ScheduledRunOutcome {
   taskId: number;
   title: string;
@@ -104,9 +108,13 @@ export class TaskSchedulerEngine {
   public async tick(options?: {
     nowMs?: number;
     forceTaskId?: number;
+    manual?: boolean;
     misfireGraceMs?: number;
   }): Promise<ScheduledRunOutcome[]> {
-    if (this.isTicking) return [];
+    if (this.isTicking) {
+      if (options?.manual || options?.forceTaskId !== undefined) throw new ScheduleRunRejected("busy", "调度繁忙，本次未执行，也未加入待执行队列");
+      return [];
+    }
     this.isTicking = true;
     const nowMs = options?.nowMs ?? Date.now();
     const misfireGraceMs = options?.misfireGraceMs ?? 12 * 3600_000;
@@ -117,7 +125,8 @@ export class TaskSchedulerEngine {
         let dueTasks: ScheduledTaskRecord[] = [];
         if (options?.forceTaskId !== undefined) {
           const t = this.db.getScheduledTaskById(options.forceTaskId);
-          if (t) dueTasks = [t];
+          if (!t) throw new ScheduleRunRejected("not_found", "任务不存在，本次未执行");
+          dueTasks = [t];
         } else {
           dueTasks = this.db.getDueScheduledTasks(nowMs, 20);
         }
@@ -143,9 +152,16 @@ export class TaskSchedulerEngine {
           console.error("[Scheduler] Failed to sync queue.md:", err);
         }
 
+        if (options?.forceTaskId !== undefined && !outcomes.length) {
+          throw new ScheduleRunRejected("not_executed", "任务状态已变化或该次运行已处理，本次未执行，也未加入待执行队列");
+        }
         return outcomes;
       }, { renew: true });
     } catch (err: any) {
+      if (options?.manual || options?.forceTaskId !== undefined) {
+        if (String(err?.message || "").includes("Operation busy")) throw new ScheduleRunRejected("busy", "调度繁忙，本次未执行，也未加入待执行队列");
+        throw err;
+      }
       if (!String(err?.message || "").includes("Operation busy")) {
         console.error("[Scheduler] tick error:", err);
       }
