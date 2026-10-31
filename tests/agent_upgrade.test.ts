@@ -2028,7 +2028,8 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
         ],
       },
     });
-    expect(wxVidRes.replyText).toContain("已完成视频语音转写并归档至知识库");
+    expect(wxVidRes.replyText).toContain("已归档视频口播采集记录");
+    expect(wxVidRes.replyText).toContain("转写 1/1");
     expect(asrLocalFilesExistDuringRun).toEqual([true]);
     const videoFilesInDir = readdirSync(f.config.videoDir!);
     expect(videoFilesInDir.some((name) => name.endsWith(".mp4"))).toBe(false);

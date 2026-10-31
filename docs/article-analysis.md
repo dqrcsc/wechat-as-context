@@ -23,6 +23,12 @@ v0.4.3 对图集和 YouTube 写入 `extraction_quality`，`show <id> --json` 返
 
 发布日期只采用来源中可识别的日期，没有依据时留空并显示“未知”。UTC 的 `captured_at`/`captured_date` 是采集时间，不能作为发布时间。ASR 只合并重复中文标点；有变化时在原文内保留转义的原始转写，分析输入避免重复该保留块，专名与数字仍需核对。
 
+### v0.4.4 原生视频与其他视频入口
+
+微信原生视频也使用未知发布日期、共享标点清理和原始转写保留规则。`extraction_quality` 的 `totalVideos/processedVideos/missingVideos` 按消息内视频顺序记录口播覆盖；该状态只适用于视频，不能替代混合附件的成功状态。纯视频归档、混合附件收集箱和灵感记录都保留质量与成功转写；附件失败独立提示，视频已取得的证据不随其他附件失败丢失。
+
+小红书/抖音视频区分缺流、空转写、音频下载错误与ASR失败，未取得逐字稿时为 metadata_only；已知小红书视频缺流不转入封面 OCR。取得口播不表示已分析视频画面，也不意味着转写准确。原生视频媒体记录通过 recent 的 deposited_path 查找，未新增文章表记录或数据库迁移；历史内容不自动重跑。详见 [跨入口验收](review-2026-10-31-v044-video-entries.md)。
+
 ## 配置本地背景
 
 复制 [通用示例](../examples/analysis-context.example.json) 到私有文件，例如项目 `data/analysis-context.json`（该目录已被 Git 忽略），将虚构示例替换成自己的有来源内容，然后配置：

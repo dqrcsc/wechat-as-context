@@ -1,3 +1,5 @@
+import { extractionNotice, type ExtractionQuality } from "../extractor/quality.ts";
+import { normalizeTranscriptPunctuation, renderAsrTranscript } from "../extractor/transcript_text.ts";
 import { decodeArtifactPaths } from "../storage.ts";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -805,11 +807,16 @@ ${vaultCtx.nowSummary}`,
     const imageInputs: MultimodalImageInput[] = [];
     const textSnippets: string[] = [];
     const unreadableApiFiles: string[] = [];
-    const tempVideoPathsToClean: string[] = [];
-    let hasVideoTranscript = false;
-    let lastVideoTranscriptEngine = "";
+    const containsVideo = ctx.unpacked.mediaItems.some(item => item.kind === "video");
+    const attachmentWarnings: string[] = [];
+    const videoSourceSnippets: string[] = [];
+    const modelVideoSnippets: string[] = [];
+    const processedVideos: number[] = [];
+    const videoReasons: string[] = [];
+    const videoEngines = new Set<string>();
+    let videoCount = 0;
 
-    for (const item of ctx.unpacked.mediaItems) {
+    for (const [mediaIndex, item] of ctx.unpacked.mediaItems.entries()) {
       if (
         item.kind !== "image" &&
         item.kind !== "file" &&
@@ -819,37 +826,33 @@ ${vaultCtx.nowSummary}`,
       }
 
       if (item.kind === "video") {
-        const tmpVideoDir = join(this.config.dataDir, "tmp_video");
-        const downloadedVideo = await downloadAndDecryptCdnMedia({
-          media: item.media,
-          hexAesKeyFallback: item.hexAesKeyFallback,
-          saveDir: tmpVideoDir,
-          suggestedFileName: item.fileName || "wechat_video.mp4",
-        });
-        tempVideoPathsToClean.push(downloadedVideo.filePath);
+        const index = ++videoCount;
+        let videoPath = "";
         try {
-          const asrRes = await transcribeAudioFromMedia({
-            mediaPath: downloadedVideo.filePath,
-            config: this.config,
-            hintTitle: ctx.unpacked.userText,
+          const downloaded = await downloadAndDecryptCdnMedia({
+            media: item.media,
+            hexAesKeyFallback: item.hexAesKeyFallback,
+            saveDir: join(this.config.dataDir, "tmp_video"),
+            suggestedFileName: item.fileName || "wechat_video.mp4",
           });
-          if (asrRes.transcript.trim()) {
-            hasVideoTranscript = true;
-            lastVideoTranscriptEngine = asrRes.engineUsed;
-            textSnippets.push(
-              `【微信视频口播转写稿（${asrRes.engineUsed}）】\n${asrRes.transcript.trim()}`
-            );
-          }
-        } catch (err: any) {
-          unreadableApiFiles.push(
-            `视频(${err?.message || "转写未完成"})`
-          );
+          videoPath = downloaded.filePath;
+          const asrRes = await transcribeAudioFromMedia({
+            mediaPath: videoPath, config: this.config, hintTitle: ctx.unpacked.userText,
+          });
+          const transcript = asrRes.transcript.trim();
+          if (transcript) {
+            processedVideos.push(index);
+            videoEngines.add(asrRes.engineUsed);
+            const heading = `【微信视频 ${index} 口播转写稿（${asrRes.engineUsed}）】`;
+            videoSourceSnippets.push(`${heading}\n${renderAsrTranscript(transcript)}`);
+            modelVideoSnippets.push(`${heading}\n自动转写未经核对，仅代表口播，不包括全部画面。\n${normalizeTranscriptPunctuation(transcript)}`);
+          } else videoReasons.push(`video_${index}:asr_empty`);
+        } catch {
+          videoReasons.push(`video_${index}:${videoPath ? "asr_failed" : "download_or_decrypt_failed"}`);
         } finally {
-          try {
-            if (existsSync(downloadedVideo.filePath)) {
-              unlinkSync(downloadedVideo.filePath);
-            }
-          } catch {}
+          if (videoPath) {
+            try { if (existsSync(videoPath)) unlinkSync(videoPath); } catch {}
+          }
         }
         continue;
       }
@@ -859,12 +862,20 @@ ${vaultCtx.nowSummary}`,
           ? papersDir
           : assetsDir;
 
-      const downloaded = await downloadAndDecryptCdnMedia({
-        media: item.media,
-        hexAesKeyFallback: item.hexAesKeyFallback,
-        saveDir: targetSaveDir,
-        suggestedFileName: item.fileName,
-      });
+      let downloaded: Awaited<ReturnType<typeof downloadAndDecryptCdnMedia>>;
+      try {
+        downloaded = await downloadAndDecryptCdnMedia({
+          media: item.media,
+          hexAesKeyFallback: item.hexAesKeyFallback,
+          saveDir: targetSaveDir,
+          suggestedFileName: item.fileName,
+        });
+      } catch (err) {
+        if (!containsVideo) throw err;
+        // Preserve independently acquired video evidence in mixed messages, in either order.
+        attachmentWarnings.push(`⚠️ 非视频附件（消息媒体序号 ${mediaIndex + 1}）下载或解密失败，未归档或解析该附件。`);
+        continue;
+      }
 
       downloadedPaths.push(downloaded.filePath);
 
@@ -887,9 +898,18 @@ ${vaultCtx.nowSummary}`,
       }
     }
 
-    if (downloadedPaths.length === 0 && !hasVideoTranscript && unreadableApiFiles.length === 0) {
+    if (downloadedPaths.length === 0 && videoCount === 0 && unreadableApiFiles.length === 0) {
       return this.handleGeneralAssistant(ctx);
     }
+
+    const videoQuality: ExtractionQuality | undefined = videoCount ? {
+      status: processedVideos.length === videoCount ? "complete" : processedVideos.length ? "partial" : "unavailable",
+      reasons: videoReasons, totalVideos: videoCount, processedVideos,
+      missingVideos: Array.from({ length: videoCount }, (_, i) => i + 1).filter(i => !processedVideos.includes(i)),
+    } : undefined;
+    const qualityNotice = extractionNotice(videoQuality);
+    const modelSnippets = [qualityNotice, ...attachmentWarnings, ...textSnippets, ...modelVideoSnippets].filter(Boolean).join("\n\n");
+    const archiveSnippets = [...attachmentWarnings, ...textSnippets, ...videoSourceSnippets].join("\n\n");
 
     let extractedAnalysis = "";
     let analysisWarning = "";
@@ -906,6 +926,7 @@ ${vaultCtx.nowSummary}`,
       (/codex/i.test(ctx.unpacked.userText) ? "codex" : "agy");
 
     try {
+      if (videoCount && !processedVideos.length && !downloadedPaths.length) throw new Error("本次未取得视频转写，未调用模型分析");
       const tieredRes = await executeTieredAgentTask({
         config: this.config,
         complexity: ctx.decision.complexity,
@@ -925,10 +946,10 @@ ${vaultCtx.nowSummary}`,
 【用户说明】
 ${userInstruction}
 
-${textSnippets.join("\n\n")}`,
+${modelSnippets}`,
         systemPrompt: `你是用户的多模态知识采集助手。用户在微信上发来了图片或文件附件。
 请提取其中的核心内容（如截图文字、架构图逻辑、书页摘录或文档核心论点），输出清晰的 Markdown 摘要。`,
-        userPrompt: `【用户附带说明】\n${userInstruction}\n\n${textSnippets.join("\n\n")}`,
+        userPrompt: `【用户附带说明】\n${userInstruction}\n\n${modelSnippets}`,
         images: imageInputs,
         temperature: 0.2,
       });
@@ -945,7 +966,7 @@ ${textSnippets.join("\n\n")}`,
     const targetMode = ctx.decision.slots.multimodalTarget || "inbox";
     let depositedPath = downloadedPaths[0] || "";
 
-    if (hasVideoTranscript && downloadedPaths.length === 0 && targetMode !== "idea") {
+    if (videoCount > 0 && downloadedPaths.length === 0 && targetMode !== "idea") {
       const videoDir =
         this.config.videoDir || join(this.config.vaultRoot, "01_inputs", "video");
       const videoTitle =
@@ -956,10 +977,12 @@ ${textSnippets.join("\n\n")}`,
           url: `https://wx.qq.com/video/${encodeURIComponent(ctx.messageKey)}`,
           title: videoTitle,
           author: "微信视频",
-          publishDate: new Date().toISOString().slice(0, 10),
-          digest: textSnippets.join(" ").slice(0, 180),
+          publishDate: "",
+          digest: modelVideoSnippets.join(" ").slice(0, 180),
           markdownBody: [
-            textSnippets.join("\n\n"),
+            qualityNotice,
+            archiveSnippets,
+            analysisWarning,
             extractedAnalysis ? `## 初步提炼\n\n${extractedAnalysis}` : "",
           ]
             .filter(Boolean)
@@ -968,7 +991,8 @@ ${textSnippets.join("\n\n")}`,
           extractorUsed: "native_http",
           mediaKind: "video",
           sourceType: "wechat_video",
-          transcriptEngine: lastVideoTranscriptEngine || "local_asr_sensevoice",
+          transcriptEngine: [...videoEngines].join(", ") || "unavailable",
+          extractionQuality: videoQuality,
         },
         slug: "wechat_video_transcript",
         userNotes: ctx.unpacked.userText,
@@ -979,7 +1003,8 @@ ${textSnippets.join("\n\n")}`,
         thoughtText: [
           ctx.unpacked.userText,
           extractedAnalysis,
-          textSnippets.join("\n\n"),
+          qualityNotice,
+          archiveSnippets,
           analysisWarning,
           ...(downloadedPaths[0]
             ? [`\n关联媒体文件：\`${relative(this.config.vaultRoot, downloadedPaths[0])}\``]
@@ -989,6 +1014,7 @@ ${textSnippets.join("\n\n")}`,
           .join("\n\n"),
         slug: "wechat_multimodal_idea",
         captureId: ctx.messageKey,
+        extractionQuality: videoQuality,
       });
     } else {
       depositedPath = createInboxCaptureInVault({
@@ -999,7 +1025,7 @@ ${textSnippets.join("\n\n")}`,
             ? `微信多媒体采集 (${basename(downloadedPaths[0])})`
             : "微信视频采集"),
         bodyText:
-          extractedAnalysis ||
+          (videoCount ? [qualityNotice, analysisWarning, extractedAnalysis, archiveSnippets, ctx.unpacked.userText].filter(Boolean).join("\n\n") : extractedAnalysis) ||
           [analysisWarning, textSnippets.join("\n\n"), ctx.unpacked.userText]
             .filter(Boolean)
             .join("\n\n") ||
@@ -1009,6 +1035,7 @@ ${textSnippets.join("\n\n")}`,
             : "已接收媒体附件"),
         slug: "wechat_media_capture",
         captureId: ctx.messageKey,
+        extractionQuality: videoQuality,
         attachedAssetRelPath: firstAssetRel,
       });
     }
@@ -1016,9 +1043,11 @@ ${textSnippets.join("\n\n")}`,
     const relSaved = relative(this.config.vaultRoot, depositedPath);
     return {
       replyText: [
-        hasVideoTranscript && downloadedPaths.length === 0
-          ? `🎬 已完成视频语音转写并归档至知识库：\`${relSaved}\`（原始视频临时文件已自动清理）`
+        videoCount > 0
+          ? `🎬 已归档视频口播采集记录：\`${relSaved}\`（转写 ${processedVideos.length}/${videoCount}；不代表完整画面解析）`
           : `🖼️ 已解密并归档媒体文件：\`${relSaved}\``,
+        qualityNotice,
+        ...attachmentWarnings,
         extractedAnalysis ? `\n📋 内容提炼（${modelUsed}）：\n${extractedAnalysis}` : "",
         analysisWarning ? `\n⚠️ ${analysisWarning}` : "",
       ]

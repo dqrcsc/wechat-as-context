@@ -1,3 +1,4 @@
+import { publicationDateFromTimestamp, validPublicationDate } from "./publication_date.ts";
 import { renderAsrTranscript } from "./transcript_text.ts";
 import { declaredSocialPostId, matchingDouyinDetail, pageHasSocialIdentity, requestedSocialPostId, socialPostId, SocialIdentityError } from "./social_identity.ts";
 import { CdpSession, waitForDevToolsEndpoint } from "./cdp.ts";
@@ -16,6 +17,7 @@ import type { AppConfig } from "../config.ts";
 import { fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
 import {
   extractStructuredTextFromImageCards,
+  MediaDownloadError,
   transcribeAudioFromMedia,
 } from "./asr.ts";
 import {
@@ -253,9 +255,7 @@ export async function extractXiaohongshuNote(
     fallbackAuthor ||
     "小红书博主";
 
-  const publishDate = noteObj?.time
-    ? new Date(Number(noteObj.time)).toISOString().slice(0, 10)
-    : "";
+  const publishDate = publicationDateFromTimestamp(noteObj?.time, "milliseconds");
 
   // Extract slide images
   const imageUrls: string[] = [];
@@ -310,15 +310,17 @@ export async function extractXiaohongshuNote(
   const durationSeconds =
     Number(noteObj?.video?.capa?.duration || 0) || undefined;
 
-  if (!desc.trim() && imageUrls.length === 0 && !videoStreamUrl) {
+  if (!desc.trim() && imageUrls.length === 0 && !videoStreamUrl && !isVideoNote) {
     throw new Error(`Failed to extract Xiaohongshu note from ${rawUrl}`);
   }
 
   // Branch A: Xiaohongshu Video Note -> Audio ASR Transcription + Save to 01_inputs/video/
-  if (isVideoNote && videoStreamUrl) {
+  if (isVideoNote) {
     let transcript = "";
     let engineUsed = "metadata_only";
-    try {
+    const reasons: string[] = [];
+    if (!videoStreamUrl) reasons.push("audio_stream_not_found");
+    else try {
       const asrRes = await transcribeAudioFromMedia({
         mediaUrl: videoStreamUrl,
         mediaUrls: candidateVideoUrls,
@@ -330,9 +332,11 @@ export async function extractXiaohongshuNote(
         hintTitle: title,
       });
       transcript = asrRes.transcript.trim();
-      engineUsed = asrRes.engineUsed;
+      if (transcript) engineUsed = asrRes.engineUsed;
+      else reasons.push("asr_empty");
     } catch (err) {
-      console.warn(`[XHSExtractor] Video ASR warning for ${finalUrl}:`, err);
+      reasons.push(err instanceof MediaDownloadError ? `audio_${err.reason}` : "asr_failed");
+      console.warn(`[XHSExtractor] ${reasons.at(-1)}`);
     }
 
     const coverUrl = imageUrls[0] || "";
@@ -359,6 +363,7 @@ export async function extractXiaohongshuNote(
       durationSeconds,
       durationText: durationSeconds ? formatDurationHms(durationSeconds) : undefined,
       transcriptEngine: engineUsed,
+      extractionQuality: { status: transcript ? "complete" : "metadata_only", reasons },
     };
   }
 
@@ -544,9 +549,7 @@ export async function extractDouyinWork(
     matchMeta(metadataHtml, "author") ||
     fallbackAuthor ||
     "抖音创作者";
-  const publishDate = itemInfo?.create_time
-    ? new Date(Number(itemInfo.create_time) * 1000).toISOString().slice(0, 10)
-    : seoMeta?.uploadDate || "";
+  const publishDate = publicationDateFromTimestamp(itemInfo?.create_time, "seconds") || validPublicationDate(seoMeta?.uploadDate);
 
   const coverUrl =
     itemInfo?.video?.cover?.url_list?.[0] ||
@@ -651,6 +654,8 @@ export async function extractDouyinWork(
   // Transcribe spoken audio via Local-ASR / Cloud Multimodal Audio
   let transcript = "";
   let engineUsed = "metadata_only";
+  const reasons: string[] = [];
+  if (!playUrl) reasons.push("audio_stream_not_found");
   if (playUrl) {
     try {
       const asrRes = await transcribeAudioFromMedia({
@@ -664,9 +669,11 @@ export async function extractDouyinWork(
         hintTitle: title,
       });
       transcript = asrRes.transcript.trim();
-      engineUsed = asrRes.engineUsed;
+      if (transcript) engineUsed = asrRes.engineUsed;
+      else reasons.push("asr_empty");
     } catch (err) {
-      console.warn(`[DouyinExtractor] Audio ASR warning for ${finalUrl}:`, err);
+      reasons.push(err instanceof MediaDownloadError ? `audio_${err.reason}` : "asr_failed");
+      console.warn(`[DouyinExtractor] ${reasons.at(-1)}`);
     }
   }
 
@@ -709,6 +716,7 @@ export async function extractDouyinWork(
     durationSeconds,
     durationText: durationSeconds ? formatDurationHms(durationSeconds) : undefined,
     transcriptEngine: engineUsed,
+    extractionQuality: { status: transcript ? "complete" : "metadata_only", reasons },
   };
 }
 

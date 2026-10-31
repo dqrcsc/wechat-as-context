@@ -1,3 +1,4 @@
+import type { ExtractionQuality } from "../extractor/quality.ts";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { sanitizeSlug, yamlQuote } from "../extractor/wechat.ts";
@@ -626,6 +627,7 @@ export function createIdeaSeedInVault(params: {
   sourceUrl?: string;
   relatedVaultNodes?: string[];
   captureId?: string;
+  extractionQuality?: ExtractionQuality;
 }): string {
   mkdirSync(params.ideasSeedsDir, { recursive: true });
   const datePrefix = new Date()
@@ -653,6 +655,7 @@ export function createIdeaSeedInVault(params: {
     "status: seed",
     `created: ${nowDate}`,
     `updated: ${nowDate}`,
+    ...(params.extractionQuality ? [`extraction_quality: ${JSON.stringify(params.extractionQuality)}`] : []),
     ...(params.sourceMdPath ? [`source_path: ${yamlQuote(params.sourceMdPath)}`] : []),
     ...(params.sourceUrl ? [`source_url: ${yamlQuote(params.sourceUrl)}`] : []),
     "tags:",
@@ -689,6 +692,7 @@ export function createInboxCaptureInVault(params: {
   bodyText: string;
   slug?: string;
   captureId?: string;
+  extractionQuality?: ExtractionQuality;
   attachedAssetRelPath?: string;
   tags?: string[];
 }): string {
@@ -710,6 +714,7 @@ export function createInboxCaptureInVault(params: {
     `title: ${yamlQuote(params.title || "WeChat Capture")}`,
     `created: ${nowDate}`,
     `updated: ${nowDate}`,
+    ...(params.extractionQuality ? [`extraction_quality: ${JSON.stringify(params.extractionQuality)}`] : []),
     "tags:",
     ...tags.map((t) => `  - ${t}`),
     "---",

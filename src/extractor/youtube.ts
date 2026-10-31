@@ -1,3 +1,4 @@
+import { validPublicationDate } from "./publication_date.ts";
 import { renderAsrTranscript } from "./transcript_text.ts";
 import type { AppConfig } from "../config.ts";
 import { fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
@@ -197,7 +198,7 @@ export async function extractYouTubeVideo(
     watchHtml.match(/"publishDate":\s*"(\d{4}-\d{2}-\d{2})/) ||
     watchHtml.match(/itemprop=["']datePublished["']\s+content=["'](\d{4}-\d{2}-\d{2})/);
   const publishDate =
-    publishDateMatch?.[1] || "";
+    validPublicationDate(publishDateMatch?.[1]);
 
   const coverUrl =
     videoDetails.thumbnail?.thumbnails?.slice(-1)?.[0]?.url ||

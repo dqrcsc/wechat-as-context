@@ -552,6 +552,7 @@ export async function saveRawArticleToVault(params: {
     `account_name: ${yamlQuote(params.article.author)}`,
     `source_url: ${yamlQuote(params.article.url)}`,
     `published_date: ${yamlQuote(params.article.publishDate)}`,
+    ...(params.article.extractionQuality ? [`extraction_quality: ${JSON.stringify(params.article.extractionQuality)}`] : []),
     `captured_date: ${nowDate}`,
     "captured_timezone: UTC",
     `captured_at: ${new Date().toISOString()}`,

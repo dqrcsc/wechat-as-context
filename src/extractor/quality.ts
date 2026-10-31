@@ -5,9 +5,14 @@ export interface ExtractionQuality {
   totalPages?: number;
   processedPages?: number[];
   missingPages?: number[];
+  /** Coverage of video transcripts only, even when a message also contains files/images. */
+  totalVideos?: number;
+  processedVideos?: number[];
+  missingVideos?: number[];
 }
 export function extractionNotice(quality?: ExtractionQuality): string {
   if (!quality || quality.status === 'complete') return '';
+  if (quality.totalVideos !== undefined) return `⚠️ 视频口播转写仅取得 ${quality.processedVideos?.length ?? 0}/${quality.totalVideos} 份；未取得转写的视频序号：${quality.missingVideos?.join('、') || '无'}。不代表已理解全部视频画面或其他附件。`;
   if (quality.totalPages !== undefined) return `⚠️ 图集仅解析 ${quality.processedPages?.length ?? 0}/${quality.totalPages} 页；未解析页：${quality.missingPages?.join('、') || '无'}。以下分析不代表覆盖全部图片。`;
   if (quality.status === 'unavailable') return '⚠️ 采集内容或解析质量记录不可用；需核对原始来源，以下分析不能视为完整正文分析。';
   return '⚠️ 本次未取得完整逐字稿，仅根据已获取的简介/元数据分析；不能据此判断源站是否提供字幕。';
@@ -21,11 +26,22 @@ export function readSavedExtractionQuality(source: string): ExtractionQuality | 
     try {
       const q=JSON.parse(raw);
       if(!['complete','partial','metadata_only','unavailable'].includes(q?.status)||!Array.isArray(q.reasons)||!q.reasons.every((x:unknown)=>typeof x==='string'))throw new Error('invalid');
-      if(q.totalPages!==undefined && (!Number.isSafeInteger(q.totalPages)||q.totalPages<0||![q.processedPages,q.missingPages].every(a=>Array.isArray(a)&&a.every((n:unknown)=>Number.isSafeInteger(n)&&Number(n)>0&&Number(n)<=q.totalPages))))throw new Error('invalid');
-      if (q.totalPages !== undefined) {
-        const pages = [...q.processedPages, ...q.missingPages];
-        if (pages.length !== q.totalPages || new Set(pages).size !== q.totalPages ||
-            (q.status === 'complete' && q.missingPages.length > 0)) throw new Error('invalid');
+      for (const [totalKey, processedKey, missingKey] of [
+        ['totalPages', 'processedPages', 'missingPages'],
+        ['totalVideos', 'processedVideos', 'missingVideos'],
+      ]) {
+        const total = q[totalKey], processed = q[processedKey], missing = q[missingKey];
+        if (total === undefined) {
+          if (processed !== undefined || missing !== undefined) throw new Error('invalid');
+          continue;
+        }
+        if (!Number.isSafeInteger(total) || total < 0 ||
+            ![processed, missing].every(a => Array.isArray(a) && a.every(n => Number.isSafeInteger(n) && n > 0 && n <= total))) throw new Error('invalid');
+        const items = [...processed, ...missing];
+        if (items.length !== total || new Set(items).size !== total ||
+            (q.status === 'complete' && missing.length > 0) ||
+            (q.status === 'partial' && (!processed.length || !missing.length)) ||
+            (q.status === 'unavailable' && processed.length > 0)) throw new Error('invalid');
       }
       return q;
     } catch { return {status:'unavailable',reasons:['invalid_saved_quality']}; }

@@ -51,3 +51,12 @@ export function savedPublicationDate(source: string): string {
   const front=source.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] || '';
   return validPublicationDate(front.match(/^published_date:\s*([^\n]*)$/m)?.[1]?.trim().replace(/^["']|["']$/g,''));
 }
+
+/** Source timestamps only; missing/invalid values are unknown, never collection time. */
+export function publicationDateFromTimestamp(raw: unknown, unit: 'seconds' | 'milliseconds'): string {
+  if ((typeof raw !== 'number' && typeof raw !== 'string') || !String(raw).trim()) return '';
+  const value = Number(raw);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  const date = new Date(value * (unit === 'seconds' ? 1000 : 1));
+  return Number.isFinite(date.getTime()) ? validPublicationDate(date.toISOString()) : '';
+}
