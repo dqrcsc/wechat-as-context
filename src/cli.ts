@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { readSavedExtractionQuality } from "./extractor/quality.ts";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -584,6 +585,7 @@ async function main() {
               ok: true,
               article: item,
               isFallbackNote: isFallbackLightNote(noteContent || item.short_summary),
+              extractionQuality: item.source_md_path && existsSync(item.source_md_path) ? readSavedExtractionQuality(readFileSync(item.source_md_path, "utf8")) ?? null : null,
               noteMarkdown: noteContent,
             },
             null,

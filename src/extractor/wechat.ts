@@ -1,3 +1,4 @@
+import type { ExtractionQuality } from "./quality.ts";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
@@ -30,6 +31,7 @@ export interface ExtractedWeChatArticle {
   durationSeconds?: number;
   durationText?: string;
   transcriptEngine?: string;
+  extractionQuality?: ExtractionQuality;
 }
 
 const WECHAT_USER_AGENT =
@@ -192,7 +194,7 @@ export function parseWeChatHtmlToArticle(
       /var\s+msg_desc\s*=\s*htmlDecode\(["']([^"']+)["']\)/,
     ]) || fallbackDigest;
 
-  let publishDate = new Date().toISOString().slice(0, 10);
+  let publishDate = "";
   const ctMatch =
     html.match(/var\s+ct\s*=\s*["'](\d{10})["']/) ||
     html.match(/create_time\s*:\s*JsDecode\(['"](\d{10})['"]\)/);
@@ -207,7 +209,10 @@ export function parseWeChatHtmlToArticle(
     extractDivById(html, "js_content") || extractTagContent(html, "article");
   if (!jsContentHtml) return null;
 
-  const { markdown, imageUrls } = htmlToCleanMarkdownWithImages(jsContentHtml);
+  const converted = htmlToCleanMarkdownWithImages(jsContentHtml);
+  const imageUrls = converted.imageUrls;
+  // Only a standalone trailing platform reward panel is removed, never prose mentions.
+  const markdown = converted.markdown.replace(/(?:^|\n)\s*(?:\*\*)?微信扫一扫赞赏作者(?:\*\*)?(?:喜欢作者)?[ \t]*\n\s*(?:(?:关闭|(?:\*\*)?\d+人付费|正在加载)[ \t.。…*]*(?:\n\s*|$))+$/, "").trim();
   if (!markdown || markdown.trim().length < 40) return null;
 
   return {
@@ -546,8 +551,10 @@ export async function saveRawArticleToVault(params: {
     `title: ${yamlQuote(params.article.title)}`,
     `account_name: ${yamlQuote(params.article.author)}`,
     `source_url: ${yamlQuote(params.article.url)}`,
-    `published_date: ${params.article.publishDate}`,
+    `published_date: ${yamlQuote(params.article.publishDate)}`,
     `captured_date: ${nowDate}`,
+    "captured_timezone: UTC",
+    `captured_at: ${new Date().toISOString()}`,
     "process_level: raw",
     "triage: process_later",
     "tags:",
@@ -558,7 +565,7 @@ export async function saveRawArticleToVault(params: {
     `# ${params.article.title}`,
     "",
     `- **公众号 / 作者**：${params.article.author}`,
-    `- **发布时间**：${params.article.publishDate}`,
+    `- **发布时间**：${params.article.publishDate || "未知（未取得可信来源日期）"}`,
     `- **捕获时间**：${nowDate}`,
     `- **原始链接**：[原文链接](${params.article.url})`,
   ];

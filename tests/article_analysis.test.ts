@@ -270,10 +270,11 @@ test("pipeline stores and queues complete analysis over 450 chars without touchi
     const requests = interceptModel(modelResult({ wechat_reply: text }));
     const pipeline = new WeChatContextPipeline(f.config, db);
     const result = await pipeline.processArticleById(row.id);
-    expect(result.short_summary).toBe(text);
+    expect(result.short_summary).toStartWith(text);
+    expect(result.short_summary).toContain("未压缩到手机短版");
     const reply = db.db.query("SELECT text, status, attempts FROM reply_outbox WHERE id = ?").get(`article_${row.id}_light`) as any;
-    expect(reply.text).toBe(text); expect(reply.status).toBe("pending"); expect(reply.attempts).toBe(0);
-    expect(requests).toHaveLength(1);
+    expect(reply.text).toBe(result.short_summary); expect(reply.status).toBe("pending"); expect(reply.attempts).toBe(0);
+    expect(requests).toHaveLength(2);
     expect(readFileSync(result.note_md_path, "utf8")).toContain("脱水干货");
   } finally { db.db.close(); }
 });

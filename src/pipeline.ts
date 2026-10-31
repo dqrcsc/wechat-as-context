@@ -1,3 +1,5 @@
+import { readSavedExtractionQuality } from "./extractor/quality.ts";
+import { savedPublicationDate } from "./extractor/publication_date.ts";
 import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
@@ -136,15 +138,17 @@ export class WeChatContextPipeline {
           try {
             this.db.updateArticle(id, { status: "extracting", error_message: "" });
             const isWeChat = isWeChatArticleUrl(record.url);
+            const savedSource = record.source_md_path && existsSync(record.source_md_path) ? readFileSync(record.source_md_path, "utf8") : "";
             const extracted =
-              record.source_md_path && existsSync(record.source_md_path)
+              savedSource
                 ? {
                     url: record.url,
                     title: record.title,
                     author: record.author,
                     digest: record.digest,
-                    publishDate: "",
-                    markdownBody: readFileSync(record.source_md_path, "utf8").replace(
+                    publishDate: savedPublicationDate(savedSource),
+                    extractionQuality: readSavedExtractionQuality(savedSource),
+                    markdownBody: savedSource.replace(
                       /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
                       ""
                     ),
@@ -375,9 +379,8 @@ export class WeChatContextPipeline {
               title: record.title,
               author: record.author,
               digest: record.digest,
-              publishDate:
-                record.created_at?.slice(0, 10) ||
-                new Date().toISOString().slice(0, 10),
+              publishDate: savedPublicationDate(existingSourceContent),
+              extractionQuality: readSavedExtractionQuality(existingSourceContent),
               markdownBody: existingSourceContent.replace(
                 /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
                 ""

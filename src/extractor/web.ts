@@ -1,3 +1,4 @@
+import { extractPublicationDate, validPublicationDate } from "./publication_date.ts";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -195,7 +196,7 @@ export async function extractGeneralWebArticle(
           url,
           title,
           author: fallbackAuthor || new URL(url).hostname,
-          publishDate: new Date().toISOString().slice(0, 10),
+          publishDate: validPublicationDate(text.match(/^Published Time:\s*(.+)$/m)?.[1]),
           digest: fallbackDigest || markdownBody.slice(0, 180).replace(/\r?\n/g, " "),
           markdownBody,
           imageUrls: [],
@@ -270,7 +271,7 @@ export function parseGeneralHtmlToArticle(
     url,
     title: stripTags(title).trim() || "Web Article",
     author: stripTags(author).trim() || new URL(url).hostname,
-    publishDate: new Date().toISOString().slice(0, 10),
+    publishDate: extractPublicationDate(html, url),
     digest: stripTags(digest).trim(),
     markdownBody: markdown,
     imageUrls,
@@ -320,8 +321,10 @@ export async function saveRawWebArticleToVault(params: {
       : []),
     `account_name: ${yamlQuote(params.article.author)}`,
     `source_url: ${yamlQuote(params.article.url)}`,
-    `published_date: ${params.article.publishDate}`,
+    `published_date: ${yamlQuote(params.article.publishDate)}`,
     `captured_date: ${nowDate}`,
+    "captured_timezone: UTC",
+    `captured_at: ${new Date().toISOString()}`,
     ...(params.article.durationSeconds
       ? [`duration_seconds: ${params.article.durationSeconds}`]
       : []),
@@ -331,6 +334,7 @@ export async function saveRawWebArticleToVault(params: {
     ...(params.article.transcriptEngine
       ? [`transcript_engine: ${yamlQuote(params.article.transcriptEngine)}`]
       : []),
+    ...(params.article.extractionQuality ? [`extraction_quality: ${JSON.stringify(params.article.extractionQuality)}`] : []),
     "process_level: raw",
     "triage: process_later",
     "tags:",
@@ -342,7 +346,7 @@ export async function saveRawWebArticleToVault(params: {
     `# ${params.article.title}`,
     "",
     `- **来源 / 作者**：${params.article.author}`,
-    `- **发布时间**：${params.article.publishDate}`,
+    `- **发布时间**：${params.article.publishDate || "未知（未取得可信来源日期）"}`,
     `- **捕获时间**：${nowDate}`,
     ...(params.article.durationText
       ? [`- **视频时长**：${params.article.durationText}`]

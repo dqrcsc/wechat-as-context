@@ -1,3 +1,4 @@
+import { renderAsrTranscript } from "./transcript_text.ts";
 import { declaredSocialPostId, matchingDouyinDetail, pageHasSocialIdentity, requestedSocialPostId, socialPostId, SocialIdentityError } from "./social_identity.ts";
 import { CdpSession, waitForDevToolsEndpoint } from "./cdp.ts";
 import { spawnSync } from "node:child_process";
@@ -254,7 +255,7 @@ export async function extractXiaohongshuNote(
 
   const publishDate = noteObj?.time
     ? new Date(Number(noteObj.time)).toISOString().slice(0, 10)
-    : new Date().toISOString().slice(0, 10);
+    : "";
 
   // Extract slide images
   const imageUrls: string[] = [];
@@ -339,7 +340,7 @@ export async function extractXiaohongshuNote(
     if (coverUrl) sections.push(`![视频封面](${coverUrl})`);
     if (desc.trim()) sections.push(`## 笔记正文与标签\n\n${desc.trim()}`);
     if (transcript) {
-      sections.push(`## 视频口播逐字稿（${engineUsed}）\n\n${transcript}`);
+      sections.push(`## 视频口播逐字稿（${engineUsed}）\n\n${renderAsrTranscript(transcript)}`);
     } else {
       sections.push(`> ⚠️ 暂未提取到口播语音转写稿，以上为笔记原始文案。`);
     }
@@ -362,7 +363,7 @@ export async function extractXiaohongshuNote(
   }
 
   // Branch B: Xiaohongshu Image-Carousel Note -> Download Images + Vision OCR Card Extraction
-  const ocrText = await extractStructuredTextFromImageCards({
+  const ocr = await extractStructuredTextFromImageCards({
     imageUrls,
     noteTitle: title,
     noteDesc: desc,
@@ -380,8 +381,8 @@ export async function extractXiaohongshuNote(
         imageUrls.map((u, idx) => `![配图 ${idx + 1}](${u})`).join("\n\n")
     );
   }
-  if (ocrText.trim()) {
-    sections.push(`## 图集卡片内容提取（Vision OCR）\n\n${ocrText.trim()}`);
+  if (ocr.text.trim()) {
+    sections.push(`## 图集卡片内容提取（Vision OCR）\n\n${ocr.text.trim()}`);
   }
 
   return {
@@ -389,12 +390,13 @@ export async function extractXiaohongshuNote(
     title: title.trim(),
     author: author.trim(),
     publishDate,
-    digest: (desc || ocrText).slice(0, 180).replace(/\r?\n/g, " ").trim(),
+    digest: (desc || ocr.text).slice(0, 180).replace(/\r?\n/g, " ").trim(),
     markdownBody: sections.join("\n\n"),
     imageUrls,
     extractorUsed: "native_http",
     mediaKind: "article",
     sourceType: "xiaohongshu_note",
+    extractionQuality: ocr.quality,
   };
 }
 
@@ -544,7 +546,7 @@ export async function extractDouyinWork(
     "抖音创作者";
   const publishDate = itemInfo?.create_time
     ? new Date(Number(itemInfo.create_time) * 1000).toISOString().slice(0, 10)
-    : seoMeta?.uploadDate || new Date().toISOString().slice(0, 10);
+    : seoMeta?.uploadDate || "";
 
   const coverUrl =
     itemInfo?.video?.cover?.url_list?.[0] ||
@@ -617,7 +619,7 @@ export async function extractDouyinWork(
   }
 
   if (albumImages.length > 0) {
-    const ocrText = await extractStructuredTextFromImageCards({
+    const ocr = await extractStructuredTextFromImageCards({
       imageUrls: albumImages,
       noteTitle: title,
       noteDesc: rawDesc,
@@ -628,7 +630,7 @@ export async function extractDouyinWork(
       rawDesc ? `## 作品文案\n\n${rawDesc}` : "",
       `## 图集配图（共 ${albumImages.length} 张）\n\n` +
         albumImages.map((u, i) => `![配图 ${i + 1}](${u})`).join("\n\n"),
-      ocrText ? `## 图集卡片内容提取（Vision OCR）\n\n${ocrText}` : "",
+      ocr.text ? `## 图集卡片内容提取（Vision OCR）\n\n${ocr.text}` : "",
     ].filter(Boolean);
 
     return {
@@ -636,12 +638,13 @@ export async function extractDouyinWork(
       title,
       author,
       publishDate,
-      digest: (rawDesc || ocrText).slice(0, 180).replace(/\r?\n/g, " ").trim(),
+      digest: (rawDesc || ocr.text).slice(0, 180).replace(/\r?\n/g, " ").trim(),
       markdownBody: sections.join("\n\n"),
       imageUrls: albumImages,
       extractorUsed: "native_http",
       mediaKind: "article",
       sourceType: "douyin_note",
+      extractionQuality: ocr.quality,
     };
   }
 
@@ -679,7 +682,7 @@ export async function extractDouyinWork(
   if (coverUrl) sections.push(`![视频封面](${coverUrl})`);
   if (rawDesc.trim()) sections.push(`## 视频文案与标签\n\n${rawDesc.trim()}`);
   if (transcript) {
-    sections.push(`## 视频口播逐字稿（${engineUsed}）\n\n${transcript}`);
+    sections.push(`## 视频口播逐字稿（${engineUsed}）\n\n${renderAsrTranscript(transcript)}`);
   } else {
     sections.push(
       `> ⚠️ 暂未获取到视频音频流或转写结果，以上为视频标题与文案。`

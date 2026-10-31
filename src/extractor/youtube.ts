@@ -1,6 +1,7 @@
+import { renderAsrTranscript } from "./transcript_text.ts";
 import type { AppConfig } from "../config.ts";
 import { fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
-import { transcribeAudioFromMedia } from "./asr.ts";
+import { MediaDownloadError, transcribeAudioFromMedia } from "./asr.ts";
 import type { ExtractedWeChatArticle } from "./wechat.ts";
 
 const WATCH_PAGE_UA =
@@ -196,7 +197,7 @@ export async function extractYouTubeVideo(
     watchHtml.match(/"publishDate":\s*"(\d{4}-\d{2}-\d{2})/) ||
     watchHtml.match(/itemprop=["']datePublished["']\s+content=["'](\d{4}-\d{2}-\d{2})/);
   const publishDate =
-    publishDateMatch?.[1] || new Date().toISOString().slice(0, 10);
+    publishDateMatch?.[1] || "";
 
   const coverUrl =
     videoDetails.thumbnail?.thumbnails?.slice(-1)?.[0]?.url ||
@@ -218,6 +219,7 @@ export async function extractYouTubeVideo(
     "en-US",
   ];
 
+  const acquisitionReasons = new Set<string>();
   let snippets: YouTubeSnippet[] = [];
   let transcriptSourceLabel = "";
 
@@ -233,6 +235,7 @@ export async function extractYouTubeVideo(
       : []),
   ];
 
+  if (!candidateTrackPools.some(pool => pool.tracks.length)) acquisitionReasons.add("caption_track_not_found");
   for (const pool of candidateTrackPools) {
     const selectedTrack = selectBestCaptionTrack(pool.tracks, preferredLangs);
     if (!selectedTrack?.baseUrl) continue;
@@ -244,9 +247,11 @@ export async function extractYouTubeVideo(
         },
         signal: AbortSignal.timeout(20_000),
       });
+      if (!trackResp.ok) acquisitionReasons.add(`caption_http_${trackResp.status}`);
       if (trackResp.ok) {
         const rawTrack = await trackResp.text();
         const parsedSnippets = parseYouTubeTranscriptPayload(rawTrack);
+        if (!parsedSnippets.length) acquisitionReasons.add("caption_empty_or_invalid");
         if (parsedSnippets.length > 0) {
           snippets = parsedSnippets;
           const langName =
@@ -261,7 +266,8 @@ export async function extractYouTubeVideo(
         }
       }
     } catch (err) {
-      console.warn(`[YouTubeExtractor] Failed to download caption track:`, err);
+      acquisitionReasons.add("caption_download_failed");
+      console.warn("[YouTubeExtractor] caption_download_failed");
     }
   }
 
@@ -281,6 +287,7 @@ export async function extractYouTubeVideo(
           Number(b?.contentLength || Infinity)
       );
     const audioUrls = audioFormats.map((f: any) => String(f.url));
+    if (!audioUrls.length) acquisitionReasons.add("audio_stream_not_found");
     if (audioUrls.length > 0) {
       try {
         const asrRes = await transcribeAudioFromMedia({
@@ -292,12 +299,15 @@ export async function extractYouTubeVideo(
           config: options?.config,
           hintTitle: title,
         });
+        if (!asrRes.transcript.trim()) acquisitionReasons.add("asr_empty");
         if (asrRes.transcript.trim()) {
           asrTranscript = asrRes.transcript.trim();
           transcriptSourceLabel = `音频自动转写 (${asrRes.engineUsed})`;
         }
       } catch (err) {
-        console.warn(`[YouTubeExtractor] Audio ASR fallback warning:`, err);
+        const reason = err instanceof MediaDownloadError ? `audio_${err.reason}` : "asr_failed";
+        acquisitionReasons.add(reason);
+        console.warn(`[YouTubeExtractor] ${reason}`);
       }
     }
   }
@@ -305,7 +315,7 @@ export async function extractYouTubeVideo(
   const formattedTranscript =
     snippets.length > 0
       ? formatSnippetsWithChapters(snippets, chapters)
-      : asrTranscript;
+      : asrTranscript ? renderAsrTranscript(asrTranscript) : "";
 
   if (!formattedTranscript && !description.trim() && !watchHtml.trim()) {
     throw new Error(`Failed to extract YouTube video content for ${canonicalUrl}`);
@@ -339,7 +349,7 @@ export async function extractYouTubeVideo(
     );
   } else {
     mdSections.push(
-      `> ⚠️ 该视频暂未开放公开字幕轨道，以上为视频元数据与简介摘录。`
+      `> ⚠️ 本次未取得逐字稿，以上仅为视频元数据与简介摘录，不代表源站未提供字幕。采集原因：${[...acquisitionReasons].join("、")}。`
     );
   }
 
@@ -364,6 +374,7 @@ export async function extractYouTubeVideo(
     durationSeconds,
      durationText,
     transcriptEngine: transcriptSourceLabel || "metadata_only",
+    extractionQuality: { status: formattedTranscript ? "complete" : "metadata_only", reasons: [...acquisitionReasons] },
   };
 }
 

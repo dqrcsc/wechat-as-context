@@ -1,3 +1,5 @@
+import { preservesReplyConditions, INITIAL_REPLY_LIMIT, LONG_REPLY_NOTICE, replyLength, omitEmptyAnnotation, hasSubstantiveAnnotation } from "./initial_reply.ts";
+import { extractionNotice } from "../extractor/quality.ts";
 import { AppConfig } from "../config.ts";
 import { fetchWithTransientRetry, resolveModelEndpoint } from "../agent/llm.ts";
 import { TriageLevel } from "../db.ts";
@@ -57,13 +59,20 @@ export async function analyzeArticleWithVault(params: {
   }
 
   result ??= buildFallbackAnalysis(article, userNotes, vaultContext);
-  result.wechat_reply = sanitizeInitialText(result.wechat_reply, vaultContext);
-  result.companion_note_markdown = sanitizeInitialText(result.companion_note_markdown, vaultContext);
+  const keepAnnotation = hasSubstantiveAnnotation(userNotes, article.title);
+  result.wechat_reply = sanitizeInitialText(omitEmptyAnnotation(result.wechat_reply, keepAnnotation), vaultContext);
+  result.companion_note_markdown = sanitizeInitialText(omitEmptyAnnotation(result.companion_note_markdown, keepAnnotation), vaultContext);
   if (background.warnings.length) {
     const notice = `⚠️ 背景材料未完整采用：${background.warnings.join("；")}`;
     result.wechat_reply += `\n\n${notice}`;
     result.companion_note_markdown += `\n\n${notice}`;
   }
+  const qualityNotice = extractionNotice(article.extractionQuality);
+  if (qualityNotice) {
+    result.wechat_reply = `${qualityNotice}\n\n${result.wechat_reply}`;
+    result.companion_note_markdown = `${qualityNotice}\n\n${result.companion_note_markdown}`;
+  }
+  if (replyLength(result.wechat_reply) > INITIAL_REPLY_LIMIT) result.wechat_reply += `\n\n${LONG_REPLY_NOTICE}`;
   // Keep the exact selected snapshot as plain provenance, not semantic note links.
   if (background.entries.length) {
     const entities: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", "[": "&#91;", "]": "&#93;" };
@@ -103,14 +112,16 @@ validation_contract 对象结构：{"metrics":[{"name":"指标短名","numerator
 5. 🔍 边界与待验证：证据强弱、实施前提、反例、可能失效的情形。
 6. 🚦 分诊与下一步：固定分成“逐段精读价值”“场景验证价值”“分诊与下一步”三项，分别给理由。先判断是否有与当前业务相关的实质未决问题，再决定 triage；若上文提出值得继续检验的业务假设，默认 process_later，不能在结尾又以篇幅短/细节浅降为 reference。若认为试验不值得做，须解释为何没有实质后续价值。process_now 还须明确即时请求、决策期限或可追溯紧迫性。
 微信精简（尽量提炼压缩，非刚性指标）：观点碰撞只留一组已有判断→增量/边界；业务只选一个候选，将验证假设、样本与反例、A/B等量信息和唯一改动、规则确认与独立复核尽量压成2–3句连贯短文（无需拆成编号子标题），指标和通过/失败条件交给占位符。边界一句，分诊三项合成一句。统计段落之外尽量控制在200–300字左右；详细样本分层、推演和解释放伴读，不重复铺陈。
+采集质量为partial/metadata_only/unavailable时，说明未取得的材料；未取得字幕不等于源站无字幕，缺页不代表原作者未展开。
 初筛微信和伴读正文不得输出具体笔记标题、文件路径、Markdown 笔记链接或 [[WikiLink]]，不得宣称已建立知识关系。具体笔记链接留到精读查证全文后。候选片段仅供比较观点，不等于用户认可的观点或现行公司规划。
 输出前逐项核对：转述是否保留原文“往往/可能/在某范围”等限定，是否把未展开推成做错；微信和伴读两份正文是否都能逐项核对A/B信息与被测变量，验收是否有明确判据，失败是否只涉及已测试范围；两种阅读价值及 triage 是否自洽。发现问题先修正输出，不要仅声称已遵守规则。`;
 
-  const bodyExcerpt = article.markdownBody.length > 14000
-    ? article.markdownBody.slice(0, 14000) + "\n\n...(正文过长已截断，不代表已阅读全文)"
-    : article.markdownBody;
+  const analysisBody = article.markdownBody.replace(/<details data-asr-raw="true">[\s\S]*?<\/details>/g, "");
+  const bodyExcerpt = analysisBody.length > 14000
+    ? analysisBody.slice(0, 14000) + "\n\n...(正文过长已截断，不代表已阅读全文)"
+    : analysisBody;
   const userPrompt = JSON.stringify({
-    user_annotation: userNotes.trim() || "（无额外批注）",
+    user_annotation: hasSubstantiveAnnotation(userNotes, article.title) ? userNotes.trim() : "（无额外批注）",
     analysis_background: formatAnalysisContext(background),
     focus: vaultContext.nowSummary || "（未提供）",
     queue: vaultContext.queueSummary || "（未提供）",
@@ -120,7 +131,7 @@ validation_contract 对象结构：{"metrics":[{"name":"指标短名","numerator
       evidence_scope: "background_only_not_article_evidence", excerpt: m.excerpt })),
     article: { evidence_scope: "current_article_author_claims_not_verified_facts",
       title: article.title, author: article.author, publishDate: article.publishDate,
-      url: article.url, body: bodyExcerpt },
+      url: article.url, extraction_quality: article.extractionQuality, body: bodyExcerpt },
   }, null, 2);
 
   const resolvedEp = resolveModelEndpoint(config, "fast");
@@ -206,6 +217,33 @@ validation_contract 对象结构：{"metrics":[{"name":"指标短名","numerator
     const retried = await requestParsedOutput(retryMessages);
     parsed = retried.parsed;
     rendered = applyValidationContract(parsed);
+  }
+
+  const keepAnnotation = hasSubstantiveAnnotation(userNotes, article.title);
+  rendered.wechat_reply = omitEmptyAnnotation(rendered.wechat_reply, keepAnnotation);
+  rendered.companion_note_markdown = omitEmptyAnnotation(rendered.companion_note_markdown, keepAnnotation);
+  const qualityPrefix = extractionNotice(article.extractionQuality);
+  const backgroundNotice = background.warnings.length ? `⚠️ 背景材料未完整采用：${background.warnings.join("；")}` : "";
+  const finalSize = (reply: string) => replyLength([qualityPrefix, reply, backgroundNotice].filter(Boolean).join("\n\n"));
+  if (finalSize(rendered.wechat_reply) > INITIAL_REPLY_LIMIT) {
+    try {
+      // Keep validated metrics, full companion, and triage immutable during compression.
+      const response = await sendCompletionRequest([...messages,
+        { role: "assistant", content: JSON.stringify(parsed) },
+        { role: "user", content: `仅返回JSON {"wechat_reply":"压缩后的微信正文"}。保留脱水干货、观点碰撞、业务启发、边界、分诊模块和关键证据/验收条件；仅压缩脱水干货、观点碰撞中的重复解释；批注（如有）、业务、边界、分诊章节的原始文字和标题必须逐字保留。保留原validation_contract占位符及其位置，不改指标、门槛或分诊。最终插入统计段落和采集警告后不超过${INITIAL_REPLY_LIMIT}字符，正文通常需压到200–300字。不要截断句子，详细论证已有伴读保留。` },
+      ], preferJsonObjectFormat);
+      if (!response.ok) throw new Error("compression_http");
+      const data = await response.json() as any;
+      const candidate = parseJsonFromLlm(data.choices?.[0]?.message?.content || "");
+      if (typeof candidate.wechat_reply !== "string" || !candidate.wechat_reply.trim()) throw new Error("compression_empty");
+      if (!preservesReplyConditions(omitEmptyAnnotation(parsed.wechat_reply, keepAnnotation), omitEmptyAnnotation(candidate.wechat_reply, keepAnnotation))) throw new Error("compression_changed_conditions");
+      const compact = applyValidationContract({ ...parsed, wechat_reply: candidate.wechat_reply });
+      compact.wechat_reply = omitEmptyAnnotation(compact.wechat_reply, keepAnnotation);
+      for (const section of ["脱水干货", "观点碰撞", "业务", "边界", "分诊"]) {
+        if (rendered.wechat_reply.includes(section) && !compact.wechat_reply.includes(section)) throw new Error("compression_missing_section");
+      }
+      if (finalSize(compact.wechat_reply) <= INITIAL_REPLY_LIMIT) rendered.wechat_reply = compact.wechat_reply;
+    } catch { console.warn("[Analyzer] short reply compression unavailable; preserving complete analysis"); }
   }
 
   const validTriage: TriageLevel[] = [

@@ -220,6 +220,7 @@ export function sanitizeSharedLinkMessage(
         extractedTitle = caption.slice(0, 80);
       }
       remaining = afterUrl
+        .replace(/^\s*:\d{1,2}(?:am|pm)[ \t]+(?=\d{2}\/\d{2}[ \t]+[A-Za-z0-9._]+@[A-Za-z0-9._]+)/i, "")
         .replace(
           /^\s*\b\d{2}\/\d{2}\b(?:\s+[A-Za-z0-9@._:/-]+){1,4}\s*/g,
           ""

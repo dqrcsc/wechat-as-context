@@ -1843,7 +1843,7 @@ tags: [llm-wiki, karpathy, 知识库, 新手指南]
               {
                 message: {
                   content:
-                    "### [图 1]\n- **核心架构**：ReAct 循环与 Plan-and-Execute 树状状态机对比\n\n### [图 2]\n- **关键结论**：Ontology 显式约束能将长链路幻觉率降低 60%",
+                    JSON.stringify({pages:[{page:1,text:"ReAct 循环与 Plan-and-Execute 树状状态机对比"},{page:2,text:"Ontology 显式约束是待验证的工程假设"}]}),
                 },
               },
             ],
