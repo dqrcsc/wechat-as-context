@@ -1,5 +1,6 @@
 import { publicationDateFromTimestamp, validPublicationDate } from "./publication_date.ts";
 import { renderAsrTranscript } from "./transcript_text.ts";
+import { SystemTlsError } from "./system_tls.ts";
 import { declaredSocialPostId, matchingDouyinDetail, pageHasSocialIdentity, requestedSocialPostId, socialPostId, SocialIdentityError } from "./social_identity.ts";
 import { CdpSession, waitForDevToolsEndpoint } from "./cdp.ts";
 import { spawnSync } from "node:child_process";
@@ -470,11 +471,13 @@ export async function extractDouyinWork(
     } else acquisitionFailure = `http_${resp.status}`;
   } catch (err) {
     if (err instanceof UnsafeUrlError) throw err;
-    acquisitionFailure = /certificate|tls/i.test(String(err)) ? "tls_verification_failed" : "network_or_timeout";
+    acquisitionFailure = err instanceof SystemTlsError ? err.reason : /certificate/i.test(String(err)) ? "tls_verification_failed" : "network_or_timeout";
     console.warn(`[DouyinExtractor] mobile_fetch_${acquisitionFailure}`);
   }
 
-  if (!html && acquisitionFailure) throw new Error(`Douyin acquisition failed: ${acquisitionFailure}`);
+  if (!html && acquisitionFailure && !socialPostId(rawUrl, "douyin") && !socialPostId(finalUrl, "douyin")) {
+    throw new Error(`Douyin acquisition failed: ${acquisitionFailure}`);
+  }
 
   const awemeId = requestedSocialPostId(rawUrl, finalUrl, "douyin");
   let metadataVerified = pageHasSocialIdentity(html, finalUrl, awemeId, "douyin");
@@ -522,7 +525,10 @@ export async function extractDouyinWork(
     }
   }
 
-  if (!itemInfo && !seoMeta && !metadataVerified) throw new SocialIdentityError("Douyin content identity could not be verified");
+  if (!itemInfo && !seoMeta && !metadataVerified) {
+    if (acquisitionFailure) throw new Error(`Douyin acquisition failed: ${acquisitionFailure}; identity not verified after fallback`);
+    throw new SocialIdentityError("Douyin content identity could not be verified");
+  }
   // Do not supplement an identified object with unrelated page-level media.
   const metadataHtml = !itemInfo && !seoMeta && metadataVerified ? html : "";
 

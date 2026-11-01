@@ -101,6 +101,14 @@ export async function downloadMediaStream(
     await response.body?.cancel().catch(() => {});
     throw new MediaDownloadError(!response.ok ? `http_${response.status}` : !response.body ? "empty_body" : "size_limit");
   }
+  // A full-file Range request must not archive just the first server-selected chunk.
+  const range = response.status === 206 ? /^bytes 0-(\d+)\/(\d+)$/.exec(response.headers.get("content-range") || "") : null;
+  const expectedRangeBytes = range ? Number(range[2]) : undefined;
+  if (response.status === 206 && (!range || !Number.isSafeInteger(expectedRangeBytes) ||
+      Number(range[1]) + 1 !== expectedRangeBytes || expectedRangeBytes! > maxBytes)) {
+    await response.body.cancel().catch(() => {});
+    throw new MediaDownloadError(expectedRangeBytes! > maxBytes ? "size_limit" : "partial_response");
+  }
   const reader = response.body.getReader();
   const fd = openSync(target, "w", 0o600);
   let total = 0;
@@ -117,6 +125,7 @@ export async function downloadMediaStream(
     }
     signal.throwIfAborted();
     if (total < 256) throw new MediaDownloadError("empty_or_invalid");
+    if (expectedRangeBytes !== undefined && total !== expectedRangeBytes) throw new MediaDownloadError("incomplete_response");
     complete = true;
   } catch (err) {
     if (err instanceof MediaDownloadError) throw err;

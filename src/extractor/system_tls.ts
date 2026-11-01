@@ -4,6 +4,9 @@ const HOSTS = new Set(["v.douyin.com", "www.douyin.com", "www.iesdouyin.com"]);
 const MAX_BYTES = 8 * 1024 * 1024;
 type CurlRunner = (args: string[], signal?: AbortSignal) => Promise<Buffer>;
 let testRunner: CurlRunner | undefined;
+export class SystemTlsError extends Error {
+  constructor(public reason: string) { super(`Douyin system transport failed: ${reason}`); }
+}
 export function setSystemTlsTestRunner(runner?: CurlRunner): void {
   if (!process.env.WXCTX_TEST_ROOT) throw new Error("Test isolation required");
   testRunner = runner;
@@ -32,12 +35,17 @@ export async function fetchWithSystemTls(url: URL, init: RequestInit): Promise<R
       execFile("/usr/bin/curl", argv, { encoding: "buffer", timeout: 25_000,
         maxBuffer: MAX_BYTES + 65536, signal }, (error, stdout) => error ? reject(error) : resolve(stdout));
     })))(args, init.signal || undefined);
-  } catch {
+  } catch (error: any) {
     init.signal?.throwIfAborted();
-    throw new Error("douyin_system_tls_fetch_failed");
+    const reason = error?.code === "ENOENT" ? "system_tls_unavailable"
+      : error?.killed || error?.code === 28 ? "system_tls_timeout"
+      : error?.code === 63 || error?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" ? "system_tls_size_limit"
+      : error?.code === 60 ? "system_tls_certificate_rejected" : "system_tls_fetch_failed";
+    throw new SystemTlsError(reason);
   }
   init.signal?.throwIfAborted();
-  return parseSystemTlsResponse(output, url.toString());
+  try { return parseSystemTlsResponse(output, url.toString()); }
+  catch { throw new SystemTlsError("system_tls_invalid_response"); }
 }
 
 export function parseSystemTlsResponse(output: Buffer, url: string): Response {

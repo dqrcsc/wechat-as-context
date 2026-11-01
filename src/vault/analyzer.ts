@@ -1,5 +1,4 @@
-import { isDeepStrictEqual } from "node:util";
-import { preservesReplyConditions, hasSameReplySections, protectedReplyLength, INITIAL_REPLY_LIMIT, LONG_REPLY_NOTICE, replyLength, omitEmptyAnnotation, hasSubstantiveAnnotation } from "./initial_reply.ts";
+import { preservesReplyConditions, mergeCompactSections, INITIAL_REPLY_LIMIT, LONG_REPLY_NOTICE, replyLength, omitEmptyAnnotation, hasSubstantiveAnnotation } from "./initial_reply.ts";
 import { extractionNotice } from "../extractor/quality.ts";
 import { AppConfig } from "../config.ts";
 import { fetchWithTransientRetry, resolveModelEndpoint } from "../agent/llm.ts";
@@ -226,42 +225,29 @@ validation_contract 对象结构：{"metrics":[{"name":"指标短名","numerator
   const qualityPrefix = extractionNotice(article.extractionQuality);
   const backgroundNotice = background.warnings.length ? `⚠️ 背景材料未完整采用：${background.warnings.join("；")}` : "";
   const finalSize = (reply: string) => replyLength([qualityPrefix, reply, backgroundNotice].filter(Boolean).join("\n\n"));
-  let attemptedCompactDraft = false;
-  // Reject an over-budget first draft before it becomes the accepted pair of notes.
-  // Regenerate BOTH bodies together; never silently rewrite protected sections in an accepted reply.
-  if (finalSize(rendered.wechat_reply) > INITIAL_REPLY_LIMIT && protectedReplyLength(rendered.wechat_reply) > INITIAL_REPLY_LIMIT - 160) {
-    attemptedCompactDraft = true;
-    try {
-      const revised = await requestParsedOutput([...messages,
-        { role: "assistant", content: JSON.stringify(parsed) },
-        { role: "user", content: `首稿未通过手机篇幅验收，业务/边界/分诊已挤占正文预算。请重新编写完整JSON（微信与伴读一起重写），不是删掉业务条件。validation_contract与triage保持不变。微信非统计正文（含标题）最多300字：干货40字、碰撞40字、业务100字、边界25字、分诊45字。用紧凑短句保留假设、正常/异常样本、A/B等量条件及唯一变量、规则确认与独立复核；指标和失败判据只由占位符插入，不重复。不要新增与原试验不同的变量或已批准结论，伴读详细展开相同设计。` },
-      ]);
-      if (!isDeepStrictEqual(revised.parsed.validation_contract, parsed.validation_contract) || revised.parsed.triage !== parsed.triage) throw new Error("draft_changed_contract");
-      const candidate = applyValidationContract(revised.parsed);
-      candidate.wechat_reply = omitEmptyAnnotation(candidate.wechat_reply, keepAnnotation);
-      candidate.companion_note_markdown = omitEmptyAnnotation(candidate.companion_note_markdown, keepAnnotation);
-      if (!hasSameReplySections(rendered.wechat_reply, candidate.wechat_reply)) throw new Error("draft_changed_sections");
-      if (finalSize(candidate.wechat_reply) <= INITIAL_REPLY_LIMIT) { parsed = revised.parsed; rendered = candidate; }
-    } catch { console.warn("[Analyzer] compact draft rejected; preserving complete analysis"); }
-  }
-  if (!attemptedCompactDraft && finalSize(rendered.wechat_reply) > INITIAL_REPLY_LIMIT) {
+  if (finalSize(rendered.wechat_reply) > INITIAL_REPLY_LIMIT) {
     try {
       // Keep validated metrics, full companion, and triage immutable during compression.
+      const minimum = applyValidationContract({ ...parsed, wechat_reply: mergeCompactSections(parsed.wechat_reply, "", "") || parsed.wechat_reply });
+      const remaining = Math.max(0, INITIAL_REPLY_LIMIT - finalSize(minimum.wechat_reply));
       const response = await sendCompletionRequest([...messages,
         { role: "assistant", content: JSON.stringify(parsed) },
-        { role: "user", content: `当前渲染后总长${finalSize(rendered.wechat_reply)}字，至少需减少${finalSize(rendered.wechat_reply) - INITIAL_REPLY_LIMIT}字。仅返回JSON {"wechat_reply":"压缩后的微信正文"}。保留脱水干货、观点碰撞、业务启发、边界、分诊模块和关键证据/验收条件；仅压缩脱水干货、观点碰撞中的重复解释；批注（如有）、业务、边界、分诊章节的原始文字和标题必须逐字保留。保留原validation_contract占位符及其位置，不改指标、门槛或分诊。最终插入统计段落和采集警告后不超过${INITIAL_REPLY_LIMIT}字符，正文通常需压到200–300字。不要截断句子，详细论证已有伴读保留。` },
+        { role: "user", content: `仅返回JSON {"digest":"脱水干货的简短正文","collision":"观点碰撞的简短正文"}。两段合计最多${remaining}字（不含标题）；只提炼这两节中最重要的原文判断与已有观点增量，保留限定和证据边界，不另写业务/边界/分诊标题，不插入统计占位符。其余原始章节、指标和伴读由程序原样保留。不得为了短版编造结论。` },
       ], preferJsonObjectFormat);
       if (!response.ok) throw new Error("compression_http");
       const data = await response.json() as any;
       const candidate = parseJsonFromLlm(data.choices?.[0]?.message?.content || "");
-      if (typeof candidate.wechat_reply !== "string" || !candidate.wechat_reply.trim()) throw new Error("compression_empty");
-      if (!preservesReplyConditions(omitEmptyAnnotation(parsed.wechat_reply, keepAnnotation), omitEmptyAnnotation(candidate.wechat_reply, keepAnnotation))) throw new Error("compression_changed_conditions");
-      const compact = applyValidationContract({ ...parsed, wechat_reply: candidate.wechat_reply });
+      if (("digest" in candidate || "collision" in candidate) && (!candidate.digest?.trim() || !candidate.collision?.trim())) throw new Error("compression_empty_section");
+      const selected = typeof candidate.digest === "string" && typeof candidate.collision === "string"
+        ? mergeCompactSections(parsed.wechat_reply, candidate.digest, candidate.collision) : candidate.wechat_reply;
+      if (typeof selected !== "string" || !selected.trim()) throw new Error("compression_empty");
+      if (!preservesReplyConditions(omitEmptyAnnotation(parsed.wechat_reply, keepAnnotation), omitEmptyAnnotation(selected, keepAnnotation))) throw new Error("compression_changed_conditions");
+      const compact = applyValidationContract({ ...parsed, wechat_reply: selected });
       compact.wechat_reply = omitEmptyAnnotation(compact.wechat_reply, keepAnnotation);
       for (const section of ["脱水干货", "观点碰撞", "业务", "边界", "分诊"]) {
         if (rendered.wechat_reply.includes(section) && !compact.wechat_reply.includes(section)) throw new Error("compression_missing_section");
       }
-      if (finalSize(compact.wechat_reply) <= INITIAL_REPLY_LIMIT) rendered.wechat_reply = compact.wechat_reply;
+      if (finalSize(compact.wechat_reply) < finalSize(rendered.wechat_reply)) rendered.wechat_reply = compact.wechat_reply;
     } catch { console.warn("[Analyzer] short reply compression unavailable; preserving complete analysis"); }
   }
 

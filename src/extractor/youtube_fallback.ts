@@ -12,7 +12,7 @@ export function setYouTubeResolverTestRunner(runner?: ResolverRunner): void {
 }
 
 /** Optional maintained extractor, metadata only. Media still uses our bounded downloader. */
-export async function resolveYouTubeFallbackAudio(videoId: string): Promise<{ urls: string[]; reason?: string }> {
+export async function resolveYouTubeFallbackAudio(videoId: string): Promise<{ urls: string[]; headers?: Record<string, string>; reason?: string }> {
   if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) return { urls: [], reason: "resolver_invalid_id" };
   const binary = testRunner ? "fixture-yt-dlp" : [process.env.YT_DLP_BIN || "",
     join(homedir(), ".local/bin/yt-dlp"), "/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp", "/usr/bin/yt-dlp"]
@@ -30,14 +30,20 @@ export async function resolveYouTubeFallbackAudio(videoId: string): Promise<{ ur
     if (output.length > 2 * 1024 * 1024) return { urls: [], reason: "resolver_output_limit" };
     const info = JSON.parse(output);
     if (info.id !== videoId) return { urls: [], reason: "resolver_identity_mismatch" };
-    const urls = (Array.isArray(info.formats) ? info.formats : []).filter((format: any) =>
-      format.vcodec === "none" && format.acodec && format.acodec !== "none" && typeof format.url === "string")
+    const formats = (Array.isArray(info.formats) ? info.formats : []).filter((format: any) =>
+      format.protocol === "https" && format.vcodec === "none" && format.acodec && format.acodec !== "none" && typeof format.url === "string")
       .sort((a: any, b: any) => (Number(a.filesize) || Infinity) - (Number(b.filesize) || Infinity))
-      .map((format: any) => format.url).filter((raw: string) => {
-        try { const url = assertPublicUrl(raw); return url.protocol === "https:" && url.hostname.endsWith(".googlevideo.com"); }
+      .filter((format: any) => {
+        try { const url = assertPublicUrl(format.url); return url.protocol === "https:" && url.hostname.endsWith(".googlevideo.com"); }
         catch { return false; }
       });
-    return { urls: [...new Set<string>(urls)].slice(0, 3), ...(urls.length ? {} : { reason: "resolver_no_audio" }) };
+    const agent = formats[0]?.http_headers?.["User-Agent"];
+    const userAgent = typeof agent === "string" && agent.length <= 512 && !/[\r\n]/.test(agent) ? agent : "Mozilla/5.0";
+    const urls = formats.filter((format: any) => format.http_headers?.["User-Agent"] === agent).map((format: any) => format.url);
+    return { urls: [...new Set<string>(urls)].slice(0, 3), headers: { "User-Agent": userAgent,
+      Referer: `https://www.youtube.com/watch?v=${videoId}`, Range: "bytes=0-" },
+      ...(urls.length ? {} : { reason: "resolver_no_audio" }) };
+
   } catch (error) {
     return { urls: [], reason: String(error).includes("resolver_timeout") ? "resolver_timeout" : "resolver_failed" };
   }

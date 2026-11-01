@@ -30,9 +30,8 @@ export function preservesReplyConditions(original: string, candidate: string): b
   return true;
 }
 
-function sectionReader() {
+function sections(text: string) {
   const heading = /^\s*(?:#{1,6}\s*)?(?:\d+[.、]\s*)?(?:[🎯💧💡🏢🔍🚦]\s*)?(?:\*\*)?(批注回应|脱水干货|观点碰撞|业务(?:与规划启发|验证|启发)?|边界(?:与待验证)?|分诊(?:与下一步)?)(?:\*\*)?(?=[:：\s]|$)/u;
-  return (text: string) => {
     const result = new Map<string, string>();
     let current = '';
     for (const line of text.split('\n')) {
@@ -45,17 +44,14 @@ function sectionReader() {
       else if (line.trim()) return null;
     }
     return result;
-  };
 }
 
-const sections = sectionReader();
-export function protectedReplyLength(text: string): number {
-  const parsed = sections(text);
-  if (!parsed) return replyLength(text);
-  return replyLength([...parsed].filter(([name]) => /^(?:批注|业务|边界|分诊)/.test(name)).map(([,body]) => body.trim()).join("\n\n"));
-}
-
-export function hasSameReplySections(original: string, candidate: string): boolean {
-  const before = sections(original), after = sections(candidate);
-  return Boolean(before && after && JSON.stringify([...before.keys()]) === JSON.stringify([...after.keys()]));
+/** Only these two summaries can change; protected sections are copied from the source. */
+export function mergeCompactSections(original: string, digest: string, collision: string): string | null {
+  const parsed = sections(original);
+  if (!parsed || !parsed.has('脱水干货') || !parsed.has('观点碰撞')) return null;
+  for (const value of [digest, collision]) {
+    if (value.includes('\n') || value.includes('{{VALIDATION_CONTRACT}}') || /[🎯💧💡🏢🔍🚦]/u.test(value)) return null;
+  }
+  return [...parsed].map(([name, body]) => name === '脱水干货' ? `💧 脱水干货：${digest}` : name === '观点碰撞' ? `💡 观点碰撞：${collision}` : body.trim()).join('\n');
 }

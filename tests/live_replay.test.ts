@@ -50,11 +50,11 @@ test('Douyin preserves network and HTTP failures before identity checks',async()
  await expect(extractDouyinWork('https://v.douyin.com/a')).rejects.toThrow('network_or_timeout');
  globalThis.fetch=(async()=>new Response('',{status:429})) as any;
  await expect(extractDouyinWork('https://v.douyin.com/a')).rejects.toThrow('http_429');
- globalThis.fetch=tlsError as any;setSystemTlsTestRunner(async()=>{throw new Error('missing curl');});
- await expect(extractDouyinWork('https://v.douyin.com/a')).rejects.toThrow('tls_verification_failed');
+ globalThis.fetch=tlsError as any;setSystemTlsTestRunner(async()=>{throw Object.assign(new Error('missing curl'),{code:'ENOENT'});});
+ await expect(extractDouyinWork('https://v.douyin.com/a')).rejects.toThrow('system_tls_unavailable');
 });
 const audio='https://r1.googlevideo.com/videoplayback?fixture=1';
-function resolverData(id='abcdefghijk',url=audio){return JSON.stringify({id,formats:[{vcodec:'none',acodec:'opus',url}]});}
+function resolverData(id='abcdefghijk',url=audio){return JSON.stringify({id,formats:[{protocol:'https',vcodec:'none',acodec:'opus',url,http_headers:{'User-Agent':'fixture-agent',Cookie:'must-not-send'}}]});}
 test('YouTube resolver validates target and allows only public Google video media',async()=>{
  setYouTubeResolverTestRunner(async(_binary,args)=>{expect(args).toContain('--ignore-config');expect(args).toContain('--no-cookies-from-browser');expect(args).toContain('--skip-download');expect(args.at(-1)).toBe('https://www.youtube.com/watch?v=abcdefghijk');return resolverData();});
  expect((await resolveYouTubeFallbackAudio('abcdefghijk')).urls).toEqual([audio]);
@@ -65,7 +65,7 @@ test('YouTube resolver validates target and allows only public Google video medi
 });
 function ytPage(captions=false){const player:any={videoDetails:{title:'Fixture',shortDescription:'Source description.'},streamingData:{adaptiveFormats:[{mimeType:'audio/mp4',url:'https://old.googlevideo.com/a'}]}};if(captions)player.captions={playerCaptionsTracklistRenderer:{captionTracks:[{languageCode:'en',baseUrl:'https://caption.example.test/a'}]}};globalThis.fetch=(async(url:any)=>String(url).includes('watch?')?new Response(`<script>var ytInitialPlayerResponse = ${JSON.stringify(player)};</script>`):new Response('<transcript><text start="0" dur="1">Native captions.</text></transcript>')) as any;}
 test('YouTube native audio 403 recovers using fresh resolver media and preserves diagnosis',async()=>{
- ytPage();setYouTubeResolverTestRunner(async()=>resolverData());let calls=0;setAsrTestRunner(async req=>{calls++;if(calls===1)throw new MediaDownloadError('http_403');expect(req.mediaUrls).toEqual([audio]);return{transcript:'Actual recovered speech.',engineUsed:'fixture_asr'};});
+ ytPage();setYouTubeResolverTestRunner(async()=>resolverData());let calls=0;setAsrTestRunner(async req=>{calls++;if(calls===1)throw new MediaDownloadError('http_403');expect(req.mediaUrls).toEqual([audio]);expect(req.headers?.Range).toBe('bytes=0-');expect(req.headers?.['User-Agent']).toBe('fixture-agent');expect(req.headers?.Cookie).toBeUndefined();return{transcript:'Actual recovered speech.',engineUsed:'fixture_asr'};});
  const r=await extractYouTubeVideo('https://youtu.be/abcdefghijk');expect(r.extractionQuality?.status).toBe('complete');expect(r.extractionQuality?.reasons).toContain('audio_http_403');expect(r.markdownBody).toContain('Actual recovered speech.');expect(r.transcriptEngine).toContain('yt-dlp');
 });
 test('resolver failure retains metadata-only and observed errors; native captions skip resolver',async()=>{
@@ -75,8 +75,9 @@ test('resolver failure retains metadata-only and observed errors; native caption
 });
 const tail='**微信扫一扫赞赏作者**喜欢作者\n\n关闭\n\n**0人付费**\n\n更多\n\n正在加载...\n\n原文示例标题\n\n 收录于示例集合\n\n山东,9月17日,';
 test('observed reward/navigation suffix is removed but prose and unknown content survive',()=>{
- expect(stripWeChatRewardTail('文章正文。\n\n'+tail)).toBe('文章正文。');
- expect(stripWeChatRewardTail('文章正文。\n\n'+tail+'\n作者补充证据。')).toContain('作者补充证据。');
+ expect(stripWeChatRewardTail('文章正文。\n\n'+tail,'示例标题')).toBe('文章正文。');
+ expect(stripWeChatRewardTail('文章正文。\n\n'+tail+'\n作者补充证据。','示例标题')).toContain('作者补充证据。');
+ expect(stripWeChatRewardTail('正文\n'+tail+'\n原文的结论仅适用于特定硬件','示例标题')).toContain('原文的结论');
  expect(stripWeChatRewardTail('作者讨论微信扫一扫赞赏作者与正在加载的交互。')).toContain('赞赏作者');
 });
 for(const prefix of ['我有个想法：','我有一个想法：','想法：'])test(`offline idea capture is idempotent: ${prefix}`,async()=>{
@@ -96,14 +97,29 @@ test('compact metric rendering remains identical in both outputs and retains acc
 
 import {analyzeArticleWithVault} from '../src/vault/analyzer.ts';
 const shortDraft='💧 脱水干货：作者建议规范表达。\n💡 观点碰撞：只测表达增量。\n🏢 业务与规划启发：建议离线验证：正常与异常样本，两组同规则同模型，仅改表达形式，由业务确认规则并独立复核。\n🔍 边界与待验证：尚未验证。\n🚦 分诊与下一步：阅读价值低，场景验证待做，process_later。';
-for(const mode of ['valid','triage','contract','sections','still_long'] as const)test(`over-budget first draft regenerates paired notes safely: ${mode}`,async()=>{
- const root=mkdtempSync(join(tmpdir(),'compact-draft-'));const cfg=loadConfig({IGNORE_HOME_DOTENV:'true',VAULT_ROOT:'none',WECHAT_CONTEXT_DATA_DIR:root,LLM_PROVIDER:'custom',LLM_API_KEY:'fixture',LLM_BASE_URL:'https://model.example.test',LLM_MODEL:'fixture'},root);
- const first={english_slug:'fixture',triage:'process_later',validation_contract:null,wechat_reply:shortDraft.replace('建议离线验证：','建议离线验证：'+'完整设计。'.repeat(150)),companion_note_markdown:'旧完整伴读'};
- const candidate={...first,wechat_reply:shortDraft,companion_note_markdown:'新的完整伴读，与短版一起生成。'};
- if(mode==='triage')candidate.triage='reference';if(mode==='contract')(candidate as any).validation_contract={metrics:[]};if(mode==='sections')candidate.wechat_reply='没有业务章节。';if(mode==='still_long')candidate.wechat_reply=first.wechat_reply;
- let calls=0;globalThis.fetch=(async (_u:any,init:any)=>{calls++;if(calls===2)expect(JSON.parse(init.body).messages.at(-1).content).toContain('微信与伴读一起重写');return Response.json({choices:[{message:{content:JSON.stringify(calls===1?first:candidate)}}]});}) as any;
+test('compact fields cannot overwrite protected conditions or the companion, even when still long',async()=>{
+ const root=mkdtempSync(join(tmpdir(),'compact-safe-'));const cfg=loadConfig({IGNORE_HOME_DOTENV:'true',VAULT_ROOT:'none',WECHAT_CONTEXT_DATA_DIR:root,LLM_PROVIDER:'custom',LLM_API_KEY:'fixture',LLM_BASE_URL:'https://model.example.test',LLM_MODEL:'fixture'},root);
+ const first={english_slug:'fixture',triage:'process_later',validation_contract:null,wechat_reply:shortDraft.replace('作者建议规范表达。','作者建议规范表达。'+'可精简解释。'.repeat(100)).replace('建议离线验证：','建议离线验证：'+'必须独立复核，不可上线。'.repeat(50)),companion_note_markdown:'完整伴读不可替换'};
+ let calls=0;globalThis.fetch=(async()=>Response.json({choices:[{message:{content:JSON.stringify(++calls===1?first:{digest:'作者建议规范表达。',collision:'仅测表达增量。',wechat_reply:'可直接上线',companion_note_markdown:'伪造替换',triage:'reference'})}}]})) as any;
  const result=await analyzeArticleWithVault({config:cfg,article:{url:'https://source.example.test/article',title:'Fixture',author:'Author',publishDate:'',digest:'Evidence',markdownBody:'Evidence',imageUrls:[],extractorUsed:'native_http'},userNotes:'',vaultContext:{nowSummary:'',queueSummary:'',topicsOverview:'',matchedNotes:[]}});
- expect(calls).toBe(2);expect(result.triage).toBe('process_later');
- if(mode==='valid'){expect(result.wechat_reply.length).toBeLessThanOrEqual(650);expect(result.companion_note_markdown).toContain('新的完整伴读');}
- else{expect(result.companion_note_markdown).toBe('旧完整伴读');expect(result.wechat_reply).toContain('未压缩到手机短版');}
+ expect(calls).toBe(2);expect(result.triage).toBe('process_later');expect(result.companion_note_markdown).toBe('完整伴读不可替换');expect(result.wechat_reply).toContain('必须独立复核，不可上线。'.repeat(50));expect(result.wechat_reply).not.toContain('可直接上线');expect(result.wechat_reply).not.toContain('可精简解释');expect(result.wechat_reply).toContain('未压缩到手机短版');
+});
+
+for(const [code,reason] of [[28,'system_tls_timeout'],[63,'system_tls_size_limit'],[60,'system_tls_certificate_rejected'],['ENOENT','system_tls_unavailable']] as const)test(`system TLS preserves sanitized failure: ${reason}`,async()=>{
+ globalThis.fetch=tlsError as any;setSystemTlsTestRunner(async()=>{throw Object.assign(new Error('private curl stderr'),{code});});await expect(fetchPublicResource('https://v.douyin.com/a')).rejects.toThrow(reason);
+});
+test('known Douyin ID preserves mobile fallback after first-page HTTP failure',async()=>{
+ const id='7381234567890123456';let calls=0;const data={loaderData:{video:{videoInfoRes:{item_list:[{aweme_id:id,desc:'Fixture valid content',author:{nickname:'Author'},video:{play_addr:{url_list:[]}}}]}}}};
+ globalThis.fetch=(async()=>++calls===1?new Response('',{status:403}):new Response(`<script>window._ROUTER_DATA=${JSON.stringify(data)}</script>`)) as any;
+ const result=await extractDouyinWork(`https://www.douyin.com/video/${id}`);expect(calls).toBeGreaterThan(1);expect(result.markdownBody).toContain('Fixture valid content');
+});
+
+import {downloadMediaStream} from '../src/extractor/asr.ts';
+import {existsSync} from 'node:fs';
+for(const [range,size,reason] of [['bytes 0-511/512',512,''],['bytes 0-511/1024',512,'partial_response'],['bytes 1-512/513',512,'partial_response'],['',512,'partial_response'],['bytes 0-511/512',300,'incomplete_response']] as const)test(`Range media requires a complete object: ${range}/${size}`,async()=>{
+ const root=mkdtempSync(join(tmpdir(),'range-complete-'));const path=join(root,'audio.bin');globalThis.fetch=(async()=>new Response(new Uint8Array(size),{status:206,headers:{'content-range':range}})) as any;
+ const pending=downloadMediaStream(audio,path,{Range:'bytes=0-'});if(reason){await expect(pending).rejects.toThrow(reason);expect(existsSync(path)).toBe(false);}else{await pending;expect(readFileSync(path).length).toBe(size);}
+});
+test('resolver ignores HLS playlists even if they use a Googlevideo hostname',async()=>{
+ setYouTubeResolverTestRunner(async()=>JSON.stringify({id:'abcdefghijk',formats:[{protocol:'m3u8_native',vcodec:'none',acodec:'opus',url:audio}]}));expect((await resolveYouTubeFallbackAudio('abcdefghijk')).reason).toBe('resolver_no_audio');
 });

@@ -319,7 +319,7 @@ export async function extractYouTubeVideo(
     if (fallback.reason) acquisitionReasons.add(fallback.reason);
     if (fallback.urls.length) {
       try {
-        const result = await transcribeAudioFromMedia({ mediaUrls: fallback.urls, config: options?.config, hintTitle: title });
+        const result = await transcribeAudioFromMedia({ mediaUrls: fallback.urls, headers: fallback.headers, config: options?.config, hintTitle: title });
         asrTranscript = result.transcript.trim();
         if (asrTranscript) transcriptSourceLabel = `音频自动转写 (${result.engineUsed}; yt-dlp)`;
         else acquisitionReasons.add("resolver_asr_empty");
