@@ -86,21 +86,42 @@ export async function downloadAndDecryptCdnMedia(params: {
   saveDir: string;
   suggestedFileName?: string;
   cdnBaseUrl?: string;
+  /** Limit applies to downloaded (encrypted, if applicable) bytes. */
+  maxBytes?: number;
 }): Promise<{
   filePath: string;
   buffer: Buffer;
   mimeType: string;
   ext: string;
 }> {
+  const maxBytes = params.maxBytes ?? 128 * 1024 * 1024;
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new Error("Invalid CDN size limit");
   const url = buildCdnDownloadUrl(params.media, params.cdnBaseUrl);
   const resp = await fetchPublicResource(url, {
     method: "GET",
     signal: AbortSignal.timeout(45_000),
   });
-  if (!resp.ok) {
-    throw new Error(`CDN download HTTP ${resp.status}`);
+  if (!resp.ok || !resp.body || Number(resp.headers.get("content-length")) > maxBytes) {
+    await resp.body?.cancel().catch(() => {});
+    throw new Error(!resp.ok ? `CDN download HTTP ${resp.status}` : !resp.body ? "Empty CDN response" : "CDN download exceeds size limit");
   }
-  const encryptedBuf = Buffer.from(await resp.arrayBuffer());
+  const reader = resp.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > maxBytes) throw new Error("CDN download exceeds size limit");
+      chunks.push(value);
+    }
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  if (!size) throw new Error("Empty CDN response");
+  const encryptedBuf = Buffer.concat(chunks, size);
   const hasKey = Boolean(params.media.aes_key || params.hexAesKeyFallback);
   const plainBuf = hasKey
     ? decryptAes128Ecb(

@@ -619,6 +619,15 @@ export function saveCompanionLightNote(params: {
   return noteMdPath;
 }
 
+/** Paths are relative to the note directory. Escape labels and URL path syntax separately. */
+function attachmentLinkLines(paths: string[]): string[] {
+  return [...new Set(paths)].map(path => {
+    const label = basename(path).replace(/[\\[\]`]/g, char => `\\${char}`).replace(/[\r\n]/g, ' ');
+    const url = path.split('/').map(segment => encodeURIComponent(segment).replace(/[!'()*]/g, char => `%${char.charCodeAt(0).toString(16).toUpperCase()}`)).join('/');
+    return `- **关联附件 / 图片**：[${label}](${url})`;
+  });
+}
+
 export function createIdeaSeedInVault(params: {
   ideasSeedsDir: string;
   thoughtText: string;
@@ -628,6 +637,7 @@ export function createIdeaSeedInVault(params: {
   relatedVaultNodes?: string[];
   captureId?: string;
   extractionQuality?: ExtractionQuality;
+  attachedAssetRelPaths?: string[];
 }): string {
   mkdirSync(params.ideasSeedsDir, { recursive: true });
   const datePrefix = new Date()
@@ -669,6 +679,7 @@ export function createIdeaSeedInVault(params: {
     "",
     "## 来源与关联",
     "",
+    ...attachmentLinkLines(params.attachedAssetRelPaths || []),
     ...(sourceWiki
       ? [
           `- 触发来源：${sourceWiki}${
@@ -693,6 +704,7 @@ export function createInboxCaptureInVault(params: {
   slug?: string;
   captureId?: string;
   extractionQuality?: ExtractionQuality;
+  attachedAssetRelPaths?: string[];
   attachedAssetRelPath?: string;
   tags?: string[];
 }): string {
@@ -721,14 +733,8 @@ export function createInboxCaptureInVault(params: {
     "",
     `# ${params.title || "WeChat Capture"}`,
     "",
-    ...(params.attachedAssetRelPath
-      ? [
-          `- **关联附件 / 图片**：[${basename(params.attachedAssetRelPath)}](${
-            params.attachedAssetRelPath
-          })`,
-          "",
-        ]
-      : []),
+    ...attachmentLinkLines([...(params.attachedAssetRelPaths || []), ...(params.attachedAssetRelPath ? [params.attachedAssetRelPath] : [])]),
+    "",
     params.bodyText.trim(),
     "",
   ];

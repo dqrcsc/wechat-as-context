@@ -1,7 +1,7 @@
 import { extractionNotice, type ExtractionQuality } from "../extractor/quality.ts";
 import { normalizeTranscriptPunctuation, renderAsrTranscript } from "../extractor/transcript_text.ts";
 import { decodeArtifactPaths } from "../storage.ts";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { basename, extname, join, relative, resolve } from "node:path";
 import { AppConfig, notifyExternalWebhookIfConfigured } from "../config.ts";
@@ -806,6 +806,7 @@ ${vaultCtx.nowSummary}`,
     const downloadedPaths: string[] = [];
     const imageInputs: MultimodalImageInput[] = [];
     const textSnippets: string[] = [];
+    const previewWarnings: string[] = [];
     const unreadableApiFiles: string[] = [];
     const containsVideo = ctx.unpacked.mediaItems.some(item => item.kind === "video");
     const attachmentWarnings: string[] = [];
@@ -833,7 +834,7 @@ ${vaultCtx.nowSummary}`,
             media: item.media,
             hexAesKeyFallback: item.hexAesKeyFallback,
             saveDir: join(this.config.dataDir, "tmp_video"),
-            suggestedFileName: item.fileName || "wechat_video.mp4",
+            suggestedFileName: `video_${randomUUID()}.mp4`,
           });
           videoPath = downloaded.filePath;
           const asrRes = await transcribeAudioFromMedia({
@@ -888,11 +889,9 @@ ${vaultCtx.nowSummary}`,
         ["md", "txt", "json"].includes(downloaded.ext) &&
         downloaded.buffer.length < 200_000
       ) {
-        textSnippets.push(
-          `文件《${basename(downloaded.filePath)}》内容：\n${downloaded.buffer
-            .toString("utf-8")
-            .slice(0, 8000)}`
-        );
+        const text = downloaded.buffer.toString("utf-8");
+        if (text.length > 8000) previewWarnings.push(`⚠️ 文件《${basename(downloaded.filePath)}》内嵌预览仅含前 8000/${text.length} 个 UTF-16 码元，不能据此认定已读全文；原文件已保存，本地 CLI 可另行读取全文。`);
+        textSnippets.push(`文件《${basename(downloaded.filePath)}》内容：\n${text.slice(0, 8000)}`);
       } else {
         unreadableApiFiles.push(basename(downloaded.filePath));
       }
@@ -908,7 +907,7 @@ ${vaultCtx.nowSummary}`,
       missingVideos: Array.from({ length: videoCount }, (_, i) => i + 1).filter(i => !processedVideos.includes(i)),
     } : undefined;
     const qualityNotice = extractionNotice(videoQuality);
-    const modelSnippets = [qualityNotice, ...attachmentWarnings, ...textSnippets, ...modelVideoSnippets].filter(Boolean).join("\n\n");
+    const modelSnippets = [qualityNotice, ...attachmentWarnings, ...previewWarnings, ...textSnippets, ...modelVideoSnippets].filter(Boolean).join("\n\n");
     const archiveSnippets = [...attachmentWarnings, ...textSnippets, ...videoSourceSnippets].join("\n\n");
 
     let extractedAnalysis = "";
@@ -960,9 +959,6 @@ ${modelSnippets}`,
       modelUsed = "local_archive";
     }
 
-    const firstAssetRel = downloadedPaths[0]
-      ? relative(inboxDir, downloadedPaths[0])
-      : undefined;
     const targetMode = ctx.decision.slots.multimodalTarget || "inbox";
     let depositedPath = downloadedPaths[0] || "";
 
@@ -1006,12 +1002,11 @@ ${modelSnippets}`,
           qualityNotice,
           archiveSnippets,
           analysisWarning,
-          ...(downloadedPaths[0]
-            ? [`\n关联媒体文件：\`${relative(this.config.vaultRoot, downloadedPaths[0])}\``]
-            : []),
+          ...previewWarnings,
         ]
           .filter(Boolean)
           .join("\n\n"),
+        attachedAssetRelPaths: downloadedPaths.map(path => relative(this.config.ideasSeedsDir, path)),
         slug: "wechat_multimodal_idea",
         captureId: ctx.messageKey,
         extractionQuality: videoQuality,
@@ -1024,7 +1019,7 @@ ${modelSnippets}`,
           (downloadedPaths[0]
             ? `微信多媒体采集 (${basename(downloadedPaths[0])})`
             : "微信视频采集"),
-        bodyText:
+        bodyText: [previewWarnings.join("\n"), (
           (videoCount ? [qualityNotice, analysisWarning, extractedAnalysis, archiveSnippets, ctx.unpacked.userText].filter(Boolean).join("\n\n") : extractedAnalysis) ||
           [analysisWarning, textSnippets.join("\n\n"), ctx.unpacked.userText]
             .filter(Boolean)
@@ -1032,11 +1027,12 @@ ${modelSnippets}`,
           ctx.unpacked.userText ||
           (downloadedPaths[0]
             ? `已解密保存附件：${basename(downloadedPaths[0])}`
-            : "已接收媒体附件"),
+            : "已接收媒体附件")
+        )].filter(Boolean).join("\n\n"),
         slug: "wechat_media_capture",
         captureId: ctx.messageKey,
         extractionQuality: videoQuality,
-        attachedAssetRelPath: firstAssetRel,
+        attachedAssetRelPaths: downloadedPaths.map(path => relative(inboxDir, path)),
       });
     }
 
@@ -1048,6 +1044,7 @@ ${modelSnippets}`,
           : `🖼️ 已解密并归档媒体文件：\`${relSaved}\``,
         qualityNotice,
         ...attachmentWarnings,
+        ...previewWarnings,
         extractedAnalysis ? `\n📋 内容提炼（${modelUsed}）：\n${extractedAnalysis}` : "",
         analysisWarning ? `\n⚠️ ${analysisWarning}` : "",
       ]
