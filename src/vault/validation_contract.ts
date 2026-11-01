@@ -55,11 +55,11 @@ export function applyValidationContract(input: {
   });
   // These are proposed business gates, never estimated sampling noise or a significance test.
   const block = [
-    "指标与验收（建议阈值、待确认）：A为基线、B为试验，比率取0–1。",
+    "指标（建议阈值、待确认）：A基线/B试验，比率0–1。",
     ...metrics,
-    "分母为 0 不判定；A = 0 时相对变化不可计算。门槛待定或未确认，不能判定通过。",
-    "有效试验须全部达到已确认门槛才通过；未达仅指本次样本、模型、规则与配置下未达业务目标。",
-    "固定门槛不是波动范围；波动尚未估计，不作统计显著性判断，证据不足时继续取样复核。",
+    "分母为 0 不判定；A = 0 时相对变化不可计算。",
+    "有效试验须全达已确认门槛才通过；未定/未确认不能判定通过。未达仅限本次样本、模型、规则与配置。",
+    "门槛不是波动范围；波动尚未估计，不作统计显著性判断；证据不足需复核。",
   ].join("\n");
   return {
     wechat_reply: bodies[0].replace(VALIDATION_SLOT, () => block),

@@ -19,8 +19,20 @@ export function omitEmptyAnnotation(text: string, keep: boolean): string {
 
 /** Only redundant explanation may shrink; business conditions and decisions stay verbatim. */
 export function preservesReplyConditions(original: string, candidate: string): boolean {
+  const before = sections(original), after = sections(candidate);
+  if (!before || !after || JSON.stringify([...before.keys()]) !== JSON.stringify([...after.keys()])) return false;
+  // An unrecognized structure cannot safely prove preservation.
+  if (!['业务', '边界', '分诊'].every(prefix => [...before.keys()].some(k => k.startsWith(prefix)))) return false;
+  for (const [name, text] of before) {
+    if (!after.has(name)) return false;
+    if (/^(?:批注|业务|边界|分诊)/.test(name) && text.trim() !== after.get(name)!.trim()) return false;
+  }
+  return true;
+}
+
+function sectionReader() {
   const heading = /^\s*(?:#{1,6}\s*)?(?:\d+[.、]\s*)?(?:[🎯💧💡🏢🔍🚦]\s*)?(?:\*\*)?(批注回应|脱水干货|观点碰撞|业务(?:与规划启发|验证|启发)?|边界(?:与待验证)?|分诊(?:与下一步)?)(?:\*\*)?(?=[:：\s]|$)/u;
-  const sections = (text: string) => {
+  return (text: string) => {
     const result = new Map<string, string>();
     let current = '';
     for (const line of text.split('\n')) {
@@ -34,13 +46,16 @@ export function preservesReplyConditions(original: string, candidate: string): b
     }
     return result;
   };
+}
+
+const sections = sectionReader();
+export function protectedReplyLength(text: string): number {
+  const parsed = sections(text);
+  if (!parsed) return replyLength(text);
+  return replyLength([...parsed].filter(([name]) => /^(?:批注|业务|边界|分诊)/.test(name)).map(([,body]) => body.trim()).join("\n\n"));
+}
+
+export function hasSameReplySections(original: string, candidate: string): boolean {
   const before = sections(original), after = sections(candidate);
-  if (!before || !after || JSON.stringify([...before.keys()]) !== JSON.stringify([...after.keys()])) return false;
-  // An unrecognized structure cannot safely prove preservation.
-  if (!['业务', '边界', '分诊'].every(prefix => [...before.keys()].some(k => k.startsWith(prefix)))) return false;
-  for (const [name, text] of before) {
-    if (!after.has(name)) return false;
-    if (/^(?:批注|业务|边界|分诊)/.test(name) && text.trim() !== after.get(name)!.trim()) return false;
-  }
-  return true;
+  return Boolean(before && after && JSON.stringify([...before.keys()]) === JSON.stringify([...after.keys()]));
 }

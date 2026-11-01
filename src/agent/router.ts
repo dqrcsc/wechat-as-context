@@ -151,7 +151,7 @@ export async function classifyMessageIntent(params: {
   }
 
   // 3. Explicit deterministic prefixes (zero latency)
-  const explicitIdea = text.match(/^(?:想法|灵感|观点|我有一个想法|idea)\s*[:：]\s*([\s\S]+)$/i);
+  const explicitIdea = text.match(/^(?:想法|灵感|观点|我有(?:一)?个想法|idea)\s*[:：]\s*([\s\S]+)$/i);
   if (explicitIdea) {
     const body = explicitIdea[1].trim();
     const isComplex = body.length > 260 || /(?:帮我推演|展开分析|深度思考|结合知识库)/i.test(body);

@@ -292,7 +292,7 @@ export class WeChatAgentRuntime {
     ctx: IntentExecutionContext
   ): Promise<IntentExecutionResult> {
     const verbatimThought = ctx.unpacked.userText
-      .replace(/^(?:想法|灵感|观点|我有一个想法|idea)\s*[:：]\s*/i, "")
+      .replace(/^(?:想法|灵感|观点|我有(?:一)?个想法|idea)\s*[:：]\s*/i, "")
       .trim();
     const coreSummary = ctx.decision.slots.coreContent?.trim() || "";
     const refQuote =

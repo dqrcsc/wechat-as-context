@@ -1,4 +1,5 @@
-import { preservesReplyConditions, INITIAL_REPLY_LIMIT, LONG_REPLY_NOTICE, replyLength, omitEmptyAnnotation, hasSubstantiveAnnotation } from "./initial_reply.ts";
+import { isDeepStrictEqual } from "node:util";
+import { preservesReplyConditions, hasSameReplySections, protectedReplyLength, INITIAL_REPLY_LIMIT, LONG_REPLY_NOTICE, replyLength, omitEmptyAnnotation, hasSubstantiveAnnotation } from "./initial_reply.ts";
 import { extractionNotice } from "../extractor/quality.ts";
 import { AppConfig } from "../config.ts";
 import { fetchWithTransientRetry, resolveModelEndpoint } from "../agent/llm.ts";
@@ -111,7 +112,7 @@ validation_contract 对象结构：{"metrics":[{"name":"指标短名","numerator
 4. 🏢 业务与规划启发：正在解决的问题→文章启发→可能的方案调整→最小验证动作；明确是分析建议，不冒充已批准任务。按共享规范展示验证六项，先选被测变量，再交代两组信息、唯一差异、验收判据及失败结论范围。无直接关联时简短说明，不强行写业务启发。
 5. 🔍 边界与待验证：证据强弱、实施前提、反例、可能失效的情形。
 6. 🚦 分诊与下一步：固定分成“逐段精读价值”“场景验证价值”“分诊与下一步”三项，分别给理由。先判断是否有与当前业务相关的实质未决问题，再决定 triage；若上文提出值得继续检验的业务假设，默认 process_later，不能在结尾又以篇幅短/细节浅降为 reference。若认为试验不值得做，须解释为何没有实质后续价值。process_now 还须明确即时请求、决策期限或可追溯紧迫性。
-微信精简（尽量提炼压缩，非刚性指标）：观点碰撞只留一组已有判断→增量/边界；业务只选一个候选，将验证假设、样本与反例、A/B等量信息和唯一改动、规则确认与独立复核尽量压成2–3句连贯短文（无需拆成编号子标题），指标和通过/失败条件交给占位符。边界一句，分诊三项合成一句。统计段落之外尽量控制在200–300字左右；详细样本分层、推演和解释放伴读，不重复铺陈。
+微信精简（尽量提炼压缩，非刚性指标）：观点碰撞只留一组已有判断→增量/边界；业务只选一个候选，将验证假设、样本与反例、A/B等量信息和唯一改动、规则确认与独立复核尽量压成2–3句连贯短文（无需拆成编号子标题），指标和通过/失败条件交给占位符。正文预算：脱水干货约60字、观点碰撞约60字、业务实验约120字、边界约30字、分诊三项合计约60字；标题及统计段落也计入650字目标。有批注或采集警告时进一步减少重复解释。统计段落之外尽量控制在200–300字左右；详细样本分层、推演和解释放伴读，不重复铺陈。业务段不重复占位符已涵盖的指标、门槛与失败判定。
 采集质量为partial/metadata_only/unavailable时，说明未取得的材料；未取得字幕不等于源站无字幕，缺页不代表原作者未展开。
 初筛微信和伴读正文不得输出具体笔记标题、文件路径、Markdown 笔记链接或 [[WikiLink]]，不得宣称已建立知识关系。具体笔记链接留到精读查证全文后。候选片段仅供比较观点，不等于用户认可的观点或现行公司规划。
 输出前逐项核对：转述是否保留原文“往往/可能/在某范围”等限定，是否把未展开推成做错；微信和伴读两份正文是否都能逐项核对A/B信息与被测变量，验收是否有明确判据，失败是否只涉及已测试范围；两种阅读价值及 triage 是否自洽。发现问题先修正输出，不要仅声称已遵守规则。`;
@@ -225,12 +226,30 @@ validation_contract 对象结构：{"metrics":[{"name":"指标短名","numerator
   const qualityPrefix = extractionNotice(article.extractionQuality);
   const backgroundNotice = background.warnings.length ? `⚠️ 背景材料未完整采用：${background.warnings.join("；")}` : "";
   const finalSize = (reply: string) => replyLength([qualityPrefix, reply, backgroundNotice].filter(Boolean).join("\n\n"));
-  if (finalSize(rendered.wechat_reply) > INITIAL_REPLY_LIMIT) {
+  let attemptedCompactDraft = false;
+  // Reject an over-budget first draft before it becomes the accepted pair of notes.
+  // Regenerate BOTH bodies together; never silently rewrite protected sections in an accepted reply.
+  if (finalSize(rendered.wechat_reply) > INITIAL_REPLY_LIMIT && protectedReplyLength(rendered.wechat_reply) > INITIAL_REPLY_LIMIT - 160) {
+    attemptedCompactDraft = true;
+    try {
+      const revised = await requestParsedOutput([...messages,
+        { role: "assistant", content: JSON.stringify(parsed) },
+        { role: "user", content: `首稿未通过手机篇幅验收，业务/边界/分诊已挤占正文预算。请重新编写完整JSON（微信与伴读一起重写），不是删掉业务条件。validation_contract与triage保持不变。微信非统计正文（含标题）最多300字：干货40字、碰撞40字、业务100字、边界25字、分诊45字。用紧凑短句保留假设、正常/异常样本、A/B等量条件及唯一变量、规则确认与独立复核；指标和失败判据只由占位符插入，不重复。不要新增与原试验不同的变量或已批准结论，伴读详细展开相同设计。` },
+      ]);
+      if (!isDeepStrictEqual(revised.parsed.validation_contract, parsed.validation_contract) || revised.parsed.triage !== parsed.triage) throw new Error("draft_changed_contract");
+      const candidate = applyValidationContract(revised.parsed);
+      candidate.wechat_reply = omitEmptyAnnotation(candidate.wechat_reply, keepAnnotation);
+      candidate.companion_note_markdown = omitEmptyAnnotation(candidate.companion_note_markdown, keepAnnotation);
+      if (!hasSameReplySections(rendered.wechat_reply, candidate.wechat_reply)) throw new Error("draft_changed_sections");
+      if (finalSize(candidate.wechat_reply) <= INITIAL_REPLY_LIMIT) { parsed = revised.parsed; rendered = candidate; }
+    } catch { console.warn("[Analyzer] compact draft rejected; preserving complete analysis"); }
+  }
+  if (!attemptedCompactDraft && finalSize(rendered.wechat_reply) > INITIAL_REPLY_LIMIT) {
     try {
       // Keep validated metrics, full companion, and triage immutable during compression.
       const response = await sendCompletionRequest([...messages,
         { role: "assistant", content: JSON.stringify(parsed) },
-        { role: "user", content: `仅返回JSON {"wechat_reply":"压缩后的微信正文"}。保留脱水干货、观点碰撞、业务启发、边界、分诊模块和关键证据/验收条件；仅压缩脱水干货、观点碰撞中的重复解释；批注（如有）、业务、边界、分诊章节的原始文字和标题必须逐字保留。保留原validation_contract占位符及其位置，不改指标、门槛或分诊。最终插入统计段落和采集警告后不超过${INITIAL_REPLY_LIMIT}字符，正文通常需压到200–300字。不要截断句子，详细论证已有伴读保留。` },
+        { role: "user", content: `当前渲染后总长${finalSize(rendered.wechat_reply)}字，至少需减少${finalSize(rendered.wechat_reply) - INITIAL_REPLY_LIMIT}字。仅返回JSON {"wechat_reply":"压缩后的微信正文"}。保留脱水干货、观点碰撞、业务启发、边界、分诊模块和关键证据/验收条件；仅压缩脱水干货、观点碰撞中的重复解释；批注（如有）、业务、边界、分诊章节的原始文字和标题必须逐字保留。保留原validation_contract占位符及其位置，不改指标、门槛或分诊。最终插入统计段落和采集警告后不超过${INITIAL_REPLY_LIMIT}字符，正文通常需压到200–300字。不要截断句子，详细论证已有伴读保留。` },
       ], preferJsonObjectFormat);
       if (!response.ok) throw new Error("compression_http");
       const data = await response.json() as any;

@@ -14,7 +14,7 @@ import { savedPublicationDate } from '../src/extractor/publication_date.ts';
 import { extractDouyinWork, extractXiaohongshuNote } from '../src/extractor/social_media.ts';
 const savedFetch=globalThis.fetch;
 afterEach(()=>{globalThis.fetch=savedFetch;setAsrTestRunner(null);setSubagentTestRunner(null);});
-const raw='专名 Codeex 15%。，原始口播结束。';
+const raw='？专名 Codeex 15%。，原始口播结束。 20%。';
 async function native(options:{outcomes:string[];mixed?:boolean;idea?:boolean;modelFails?:boolean;fileFails?:boolean;fileFirst?:boolean}){
  const root=mkdtempSync(join(tmpdir(),'video-entry-'));
  const config=loadConfig({IGNORE_HOME_DOTENV:'true',VAULT_ROOT:'none',WECHAT_CONTEXT_DATA_DIR:root},root);
@@ -43,7 +43,7 @@ async function native(options:{outcomes:string[];mixed?:boolean;idea?:boolean;mo
 }
 for(const mode of ['video','mixed','idea'] as const){test(`native ${mode} preserves raw transcript, unknown publication and quality`,async()=>{
  const r=await native({outcomes:['ok'],mixed:mode==='mixed',idea:mode==='idea'});
- expect(r.source).toContain('Codeex 15%。原始口播结束');expect(r.source).toContain(raw);
+ expect(r.source).toContain('Codeex 15%。原始口播结束');expect(r.source).toContain(raw);expect(r.source).toContain('非时间戳');
  expect(readSavedExtractionQuality(r.source)?.status).toBe('complete');expect(readSavedExtractionQuality(r.source)?.totalVideos).toBe(1);
  if(mode==='video'){expect(savedPublicationDate(r.source)).toBe('');expect(r.source).toContain('发布时间**：未知');}
  expect(r.prompts).toHaveLength(1);expect(r.prompts[0]).not.toContain('data-asr-raw');expect(r.prompts[0]).not.toContain(raw);expect(r.prompts[0]).toContain('Codeex 15%。原始口播结束');

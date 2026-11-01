@@ -212,7 +212,7 @@ export function parseWeChatHtmlToArticle(
   const converted = htmlToCleanMarkdownWithImages(jsContentHtml);
   const imageUrls = converted.imageUrls;
   // Only a standalone trailing platform reward panel is removed, never prose mentions.
-  const markdown = converted.markdown.replace(/(?:^|\n)\s*(?:\*\*)?微信扫一扫赞赏作者(?:\*\*)?(?:喜欢作者)?[ \t]*\n\s*(?:(?:关闭|(?:\*\*)?\d+人付费|正在加载)[ \t.。…*]*(?:\n\s*|$))+$/, "").trim();
+  const markdown = stripWeChatRewardTail(converted.markdown);
   if (!markdown || markdown.trim().length < 40) return null;
 
   return {
@@ -595,4 +595,14 @@ export function sanitizeSlug(raw: string): string {
 
 export function yamlQuote(val: string): string {
   return JSON.stringify(val.replace(/\r?\n/g, " ").trim());
+}
+
+/** Remove only a recognizable platform suffix; unknown prose after the panel prevents removal. */
+export function stripWeChatRewardTail(markdown: string): string {
+  const start = /(?:^|\n)[ \t]*(?:\*\*)?微信扫一扫赞赏作者(?:\*\*)?(?:喜欢作者)?[ \t]*\n/.exec(markdown);
+  if (!start) return markdown.trim();
+  const tail = markdown.slice(start.index + start[0].length).split('\n').map(line => line.trim()).filter(Boolean);
+  const panelLine = /^(?:关闭|(?:\*\*)?\d+人付费(?:\*\*)?|更多|正在加载[.。…]*|原文[^\n]{1,180}|收录于[^\n]{1,100}|[\p{Script=Han}]{2,8}[,，]\d{1,2}月\d{1,2}日[,，]?)$/u;
+  if (!tail.length || !tail.every(line => panelLine.test(line)) || !tail.some(line => /人付费|正在加载/.test(line))) return markdown.trim();
+  return markdown.slice(0, start.index).trim();
 }

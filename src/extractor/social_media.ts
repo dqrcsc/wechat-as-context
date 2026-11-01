@@ -450,6 +450,7 @@ export async function extractDouyinWork(
 ): Promise<ExtractedWeChatArticle> {
   let finalUrl = rawUrl;
   let html = "";
+  let acquisitionFailure = "";
 
   // Step 1: Resolve short URL (v.douyin.com) with Mobile User-Agent so Douyin serves SSR _ROUTER_DATA
   try {
@@ -466,11 +467,14 @@ export async function extractDouyinWork(
     if (resp.url) finalUrl = resp.url;
     if (resp.ok) {
       html = await resp.text();
-    }
+    } else acquisitionFailure = `http_${resp.status}`;
   } catch (err) {
     if (err instanceof UnsafeUrlError) throw err;
-    console.warn(`[DouyinExtractor] Mobile fetch warning for ${rawUrl}:`, err);
+    acquisitionFailure = /certificate|tls/i.test(String(err)) ? "tls_verification_failed" : "network_or_timeout";
+    console.warn(`[DouyinExtractor] mobile_fetch_${acquisitionFailure}`);
   }
+
+  if (!html && acquisitionFailure) throw new Error(`Douyin acquisition failed: ${acquisitionFailure}`);
 
   const awemeId = requestedSocialPostId(rawUrl, finalUrl, "douyin");
   let metadataVerified = pageHasSocialIdentity(html, finalUrl, awemeId, "douyin");

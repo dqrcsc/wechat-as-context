@@ -1,5 +1,6 @@
 import { validPublicationDate } from "./publication_date.ts";
 import { renderAsrTranscript } from "./transcript_text.ts";
+import { resolveYouTubeFallbackAudio } from "./youtube_fallback.ts";
 import type { AppConfig } from "../config.ts";
 import { fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
 import { MediaDownloadError, transcribeAudioFromMedia } from "./asr.ts";
@@ -309,6 +310,21 @@ export async function extractYouTubeVideo(
         const reason = err instanceof MediaDownloadError ? `audio_${err.reason}` : "asr_failed";
         acquisitionReasons.add(reason);
         console.warn(`[YouTubeExtractor] ${reason}`);
+      }
+    }
+  }
+
+  if (!snippets.length && !asrTranscript) {
+    const fallback = await resolveYouTubeFallbackAudio(videoId);
+    if (fallback.reason) acquisitionReasons.add(fallback.reason);
+    if (fallback.urls.length) {
+      try {
+        const result = await transcribeAudioFromMedia({ mediaUrls: fallback.urls, config: options?.config, hintTitle: title });
+        asrTranscript = result.transcript.trim();
+        if (asrTranscript) transcriptSourceLabel = `音频自动转写 (${result.engineUsed}; yt-dlp)`;
+        else acquisitionReasons.add("resolver_asr_empty");
+      } catch (error) {
+        acquisitionReasons.add(error instanceof MediaDownloadError ? `resolver_audio_${error.reason}` : "resolver_asr_failed");
       }
     }
   }

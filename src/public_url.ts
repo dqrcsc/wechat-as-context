@@ -1,4 +1,5 @@
 import { BlockList, isIP } from "node:net";
+import { canRetryWithSystemTls, fetchWithSystemTls } from "./extractor/system_tls.ts";
 
 const blocked = new BlockList();
 for (const [address, prefix] of [
@@ -30,7 +31,12 @@ export function assertPublicUrl(raw: string): URL {
 export async function fetchPublicResource(raw: string, init: RequestInit = {}): Promise<Response> {
   let url = assertPublicUrl(raw);
   for (let redirects = 0; redirects <= 5; redirects++) {
-    const response = await fetch(url.toString(), { ...init, redirect: "manual" });
+    let response: Response;
+    try { response = await fetch(url.toString(), { ...init, redirect: "manual" }); }
+    catch (error) {
+      if (!canRetryWithSystemTls(url, init, error)) throw error;
+      response = await fetchWithSystemTls(url, init);
+    }
     if (![301,302,303,307,308].includes(response.status)) return response;
     const location = response.headers.get("location");
     if (!location) return response;
