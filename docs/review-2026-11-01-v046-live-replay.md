@@ -8,7 +8,7 @@
 
 - 抖音三个页面域名（v.douyin.com、www.iesdouyin.com、www.douyin.com）的 HTTPS GET 遇到证书校验错误时，允许调用 `/usr/bin/curl` 使用系统证书继续获取。不扩大到任意网站、POST 或其他网络错误；不使用 `-k`，不加载 curlrc、Cookie 或凭据请求头。20 秒网络/25 秒进程期限、8 MiB 正文限制；重定向由原公共 URL 检查逐跳处理。系统 curl 缺失/失败仍返回具体获取错误，不误报为作品身份错误。DNS 解析钉扎仍不在本次范围内。
 - YouTube 在原生字幕/音频都未成功时，尝试本机已有的 yt-dlp，仅解析当前标准 YouTube ID 的媒体地址；不自动安装、不加载配置、插件目录、浏览器 Cookie 或远程组件。只接收一致视频 ID 的 HTTPS 直流 Googlevideo 音频（排除HLS等播放清单），最多 3 条候选；保留来源 User-Agent 并发送完整 Range。206必须声明覆盖完整文件且实际字节数一致，否则拒绝；实际下载沿用 128 MiB 上限及 ASR。原生 403 诊断保留，回退未安装/超时/失败/没有音频各有原因；全部失败仍为 metadata_only。
-- 可选工具安装由用户管理。常见安装方式为专用环境 `python -m pip install 'yt-dlp[default]'`，再提供可执行文件路径到系统环境 `YT_DLP_BIN`；默认也查找 ~/.local/bin、/opt/homebrew/bin、/usr/local/bin、/usr/bin。需可用的 Node JS 运行时及与 yt-dlp 匹配的 EJS。项目不会代用户更新下载器，也不会自动安装插件或使用登录 Cookie。参考 [官方 EJS 文档](https://github.com/yt-dlp/yt-dlp/wiki/EJS)。本次可选依赖不是服务升级的一部分。
+- 可选工具安装由用户管理。常见安装方式为专用环境 `python -m pip install 'yt-dlp[default]'`（或 `pipx install yt-dlp && pipx inject yt-dlp certifi requests`），再提供可执行文件路径到系统环境 `YT_DLP_BIN`；默认也查找 ~/.local/bin、/opt/homebrew/bin、/usr/local/bin、/usr/bin。子进程执行时仅传递清洗后的系统环境（自动补齐 `/usr/local/bin` 与 `/opt/homebrew/bin` 的 `PATH`，并在 macOS/Linux 存在 `/etc/ssl/cert.pem` 且未显式配置 `SSL_CERT_FILE` 时自动挂载系统根证书包，不向外部下载器透传模型 API 密钥）。需可用的 Node JS 运行时及与 yt-dlp 匹配的 EJS。项目不会代用户更新下载器，也不会自动安装插件或使用登录 Cookie。参考 [官方 EJS 文档](https://github.com/yt-dlp/yt-dlp/wiki/EJS)。本次可选依赖不是服务升级的一部分。
 - ASR 只标出疑似句首标点、断句后数字的原始短片段和 UTF-16 字符位置，最多 3 处；不是时间戳，不是置信度，不推断专名或同音词的正确写法。原始转写仍保留，complete 只表示已取得材料。
 
 ## 清理、篇幅与分流

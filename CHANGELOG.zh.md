@@ -1,5 +1,13 @@
 # 更新日志
 
+## 0.4.7 - 2026-11-02
+
+### 运行态证书环境加固与文档对齐
+
+- YouTube 可选 `yt-dlp` 解析器子进程改为使用脱敏环境（`buildYouTubeResolverEnv`）：不向外部进程透传 `LLM_API_KEY` / `GEMINI_API_KEY` 等密钥，自动补齐 `/usr/local/bin` 与 `/opt/homebrew/bin` 的 `PATH` 以确保后台守护进程定位 `node`，并在系统存在 `/etc/ssl/cert.pem` 且未设置 `SSL_CERT_FILE` 时自动注入系统根证书路径，消除 macOS Python 独立虚拟环境缺失 `certifi` 时的 `SSL: CERTIFICATE_VERIFY_FAILED` 异常。
+- 全面对齐 `README.md`、`.env.example` 与 `skills/wechat-as-context/SKILL.md`：补全跨平台内容采集（公众号、Medium、YouTube、小红书、抖音、微信原生视频）及 `01_inputs/video/` 存储说明，补齐 CLI 命令表（`reanalyze`、`recent`、`inbox`、`schedule`、`tasks`）、HTTP `/api/schedules` 接口以及音视频工具链环境变量（`VAULT_VIDEO_DIR`、`FFMPEG_BIN`、`LOCAL_ASR_BIN`、`YT_DLP_BIN`）。
+- 新增脱敏环境与系统 CA 证书回归测试，全量 **501 通过 / 0 失败 / 2334 断言**，隔离审计 **7 通过 / 40 断言**，TypeScript 类型检查通过。
+
 ## 0.4.6 - 2026-11-01
 
 ### 真实复验问题修复

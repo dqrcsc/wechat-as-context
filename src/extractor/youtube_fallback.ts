@@ -11,6 +11,27 @@ export function setYouTubeResolverTestRunner(runner?: ResolverRunner): void {
   testRunner = runner;
 }
 
+export function buildYouTubeResolverEnv(
+  baseEnv: NodeJS.ProcessEnv = process.env,
+  hasSystemCertPem: boolean = existsSync("/etc/ssl/cert.pem")
+): NodeJS.ProcessEnv {
+  const pathParts = (baseEnv.PATH || "").split(":").filter(Boolean);
+  for (const dir of ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"]) {
+    if (!pathParts.includes(dir)) pathParts.push(dir);
+  }
+  const env: NodeJS.ProcessEnv = {
+    PATH: pathParts.join(":"),
+    HOME: baseEnv.HOME || homedir(),
+    TMPDIR: baseEnv.TMPDIR || "/tmp",
+    LANG: baseEnv.LANG || "en_US.UTF-8",
+  };
+  if (baseEnv.LC_ALL) env.LC_ALL = baseEnv.LC_ALL;
+  if (baseEnv.SSL_CERT_FILE) env.SSL_CERT_FILE = baseEnv.SSL_CERT_FILE;
+  else if (hasSystemCertPem) env.SSL_CERT_FILE = "/etc/ssl/cert.pem";
+  if (baseEnv.SSL_CERT_DIR) env.SSL_CERT_DIR = baseEnv.SSL_CERT_DIR;
+  return env;
+}
+
 /** Optional maintained extractor, metadata only. Media still uses our bounded downloader. */
 export async function resolveYouTubeFallbackAudio(videoId: string): Promise<{ urls: string[]; headers?: Record<string, string>; reason?: string }> {
   if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) return { urls: [], reason: "resolver_invalid_id" };
@@ -24,7 +45,7 @@ export async function resolveYouTubeFallbackAudio(videoId: string): Promise<{ ur
     "--extractor-retries", "0", "--js-runtimes", "node", "--", `https://www.youtube.com/watch?v=${videoId}`];
   try {
     const output = await (testRunner ?? ((bin, argv) => new Promise<string>((resolve, reject) => {
-      execFile(bin, argv, { encoding: "utf8", timeout: 45_000, maxBuffer: 2 * 1024 * 1024 },
+      execFile(bin, argv, { encoding: "utf8", timeout: 45_000, maxBuffer: 2 * 1024 * 1024, env: buildYouTubeResolverEnv() },
         (error, stdout) => error ? reject(new Error(error.killed ? "resolver_timeout" : "resolver_failed")) : resolve(stdout));
     })))(binary, args);
     if (output.length > 2 * 1024 * 1024) return { urls: [], reason: "resolver_output_limit" };

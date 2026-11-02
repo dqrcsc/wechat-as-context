@@ -5,7 +5,7 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fetchPublicResource} from '../src/public_url.ts';
 import {setSystemTlsTestRunner,parseSystemTlsResponse} from '../src/extractor/system_tls.ts';
-import {setYouTubeResolverTestRunner,resolveYouTubeFallbackAudio} from '../src/extractor/youtube_fallback.ts';
+import {setYouTubeResolverTestRunner,resolveYouTubeFallbackAudio,buildYouTubeResolverEnv} from '../src/extractor/youtube_fallback.ts';
 import {extractYouTubeVideo} from '../src/extractor/youtube.ts';
 import {setAsrTestRunner,MediaDownloadError} from '../src/extractor/asr.ts';
 import {extractDouyinWork} from '../src/extractor/social_media.ts';
@@ -122,4 +122,14 @@ for(const [range,size,reason] of [['bytes 0-511/512',512,''],['bytes 0-511/1024'
 });
 test('resolver ignores HLS playlists even if they use a Googlevideo hostname',async()=>{
  setYouTubeResolverTestRunner(async()=>JSON.stringify({id:'abcdefghijk',formats:[{protocol:'m3u8_native',vcodec:'none',acodec:'opus',url:audio}]}));expect((await resolveYouTubeFallbackAudio('abcdefghijk')).reason).toBe('resolver_no_audio');
+});
+test('buildYouTubeResolverEnv strips secret keys, preserves node PATH directories, and supplies macOS system CA bundle',()=>{
+ const env=buildYouTubeResolverEnv({PATH:'/custom/bin',HOME:'/tmp/home',LLM_API_KEY:'secret',GEMINI_API_KEY:'secret'},true);
+ expect(env.LLM_API_KEY).toBeUndefined();
+ expect(env.GEMINI_API_KEY).toBeUndefined();
+ expect(env.PATH).toContain('/usr/local/bin');
+ expect(env.PATH).toContain('/opt/homebrew/bin');
+ expect(env.SSL_CERT_FILE).toBe('/etc/ssl/cert.pem');
+ const customCa=buildYouTubeResolverEnv({PATH:'/bin',SSL_CERT_FILE:'/custom/ca.pem'},true);
+ expect(customCa.SSL_CERT_FILE).toBe('/custom/ca.pem');
 });

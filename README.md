@@ -11,12 +11,12 @@
 
 `wechat-as-context` 不是又一个孤立的「稍后读」收藏夹。它通过微信官方 **ClawBot iLink 长轮询协议**，将你个人微信置顶的 **`微信ClawBot [AI]`** 变成连接手机端与本地电脑的**双向智能体上下文网关**：
 
-- 📱 **在手机微信端**：顺手转发公众号文章或外部网页、追加语音/文字批注、记录灵感闪念、发送截图/PDF、向本地知识库提问、或遥控本机 AI Agent（`agy` / `codex` / `opencode` / `claude`）执行深度研究并回传 `.md` / `.html` / `.pdf` 文件或架构配图。
+- 📱 **在手机微信端**：顺手转发公众号文章、Medium 深度专栏、YouTube 视频、小红书图文/视频、抖音作品、任意外部网页或微信原生视频（`type=5`），10 秒内追加语音/文字批注、记录灵感闪念、设置定时提醒与周期早报、发送截图/PDF、向本地知识库提问、或遥控本机 AI Agent（`agy` / `codex` / `opencode` / `claude`）执行深度研究并回传 `.md` / `.html` / `.pdf` 文件或架构配图。
 - 💻 **在电脑桌面端**：在 Codex、AntiGravity、Claude Code、OpenCode 中一句指令即可接力深读刚转发的文章，或通过 `bun run push` 将桌面端产出的报告、图表、文档主动推送到手机微信，且自动注入微信对话上下文，手机端直接回复即可无缝追问。
 
 ---
 
-**v0.4.6 真实复验修复**：抖音证书错误可用受限系统 TLS 回退；YouTube 原生抓取失败后可选用本机 yt-dlp 解析音频，工具缺失或仍受限时明确降级，不自动安装。公众号尾部清理、手机初筛预算、离线想法前缀与 ASR 待核对定位同步修复。依赖、验证结果和边界见 [真实复验修复说明](./docs/review-2026-11-01-v046-live-replay.md)。仅更新代码或技能不会升级本机服务，也不会重试历史失败。
+**v0.4.7 / v0.4.6 真实复验与运行态加固**：抖音证书错误可用受限系统 TLS 回退；YouTube 原生抓取失败后可选用本机 `yt-dlp` 解析音频（子进程使用脱敏环境并自动挂载系统 `/etc/ssl/cert.pem` 根证书与 `/usr/local/bin`、`/opt/homebrew/bin` 路径，消除 macOS Python 虚拟环境缺少 `certifi` 时的证书校验失败），工具缺失或仍受限时明确降级，不自动安装。公众号尾部清理、手机初筛预算、离线想法前缀与 ASR 待核对定位同步修复。依赖、验证结果和边界见 [真实复验修复说明](./docs/review-2026-11-01-v046-live-replay.md)。仅更新代码或技能不会升级本机服务，也不会重试历史失败。
 
 **v0.2.4 升级与使用边界声明**：
 - **测试隔离修复**：测试改用 `bun run test`，在不含 `.env` 和业务数据的临时源码副本中执行，父子进程统一阻断越界数据库与未模拟网络请求。直接 `bun test` 会提前拒绝运行。原因与验收见 [测试隔离说明](./docs/test-isolation.md)。生产配置优先级不变。
@@ -203,9 +203,9 @@ flowchart TB
 
 | 模式 | 配置方式 | 适用人群与行为说明 |
 | :--- | :--- | :--- |
-| **1. 无知识库独立模式 (`standalone`)** | `VAULT_ROOT=none`（或 `VAULT_ENABLED=false`） | 无需 Obsidian 或外部知识库。资料默认归档在 `data/archive/{wechat,web,ideas,inbox,papers}/`；模型、CLI 与 PDF 浏览器能力仍取决于本机配置。 |
+| **1. 无知识库独立模式 (`standalone`)** | `VAULT_ROOT=none`（或 `VAULT_ENABLED=false`） | 无需 Obsidian 或外部知识库。资料默认归档在 `data/archive/{wechat,web,video,ideas,inbox,papers,digests}/`；模型、CLI 与 PDF 浏览器能力仍取决于本机配置。 |
 | **2. 通用文件夹模式 (`generic_folder`)** | `VAULT_ROOT=/path/to/any/folder` | **适配任意现有 Obsidian 库或普通笔记目录**：无需 `00_home`、`01_inputs` 等编号子目录。系统直接在你指定的文件夹下按需检索 `.md` 上下文，不会强行改写你原有的目录结构。 |
-| **3. 结构化知识库模式 (`structured_vault`)** | `VAULT_ROOT=./vault`（或指向含编号体系的知识库） | **深度第二大脑工作流**：支持 `00_home/now.md`（近期主线）、`01_inputs/articles/{wechat,web}/`、`01_inputs/inbox/`、`03_ideas/seeds/`、`04_topics/`、`05_outputs/` 等分层结构，自动提取近期关注主题词并生成双向 `[[WikiLink]]` 关联。 |
+| **3. 结构化知识库模式 (`structured_vault`)** | `VAULT_ROOT=./vault`（或指向含编号体系的知识库） | **深度第二大脑工作流**：支持 `00_home/{now,queue,topics}.md`、`01_inputs/articles/{wechat,web}/`、`01_inputs/video/`、`01_inputs/inbox/`、`03_ideas/seeds/`、`04_topics/`、`05_outputs/` 等分层结构，自动提取近期关注主题词并生成双向 `[[WikiLink]]` 关联。 |
 
 ---
 
@@ -264,12 +264,12 @@ bash scripts/install_daemon.sh
 
 绑定完成后，直接打开手机微信里的 **`微信ClawBot [AI]`** 即可使用以下全部能力（处理期间微信顶部会实时显示 **「对方正在输入...」**）：
 
-### 1. 转发公众号或外部网页 + 语音/文字批注 (`ingest_link`)
-- **操作**：在微信看到好文章 $\rightarrow$ 转发给 `微信ClawBot [AI]`（支持 `mp.weixin.qq.com` 公众号链接，以及 ArXiv、Substack、技术博客、X/Twitter 等任意外部网页 URL）$\rightarrow$ **10 秒内可紧接着发一条语音或文字批注**（如 *“这篇文章对 Agent 记忆架构的拆解很值得参考”*）。
+### 1. 转发公众号、Medium、YouTube、小红书、抖音或外部网页 + 语音/文字批注 (`ingest_link`)
+- **操作**：在微信看到好内容 $\rightarrow$ 转发链接或分享卡片给 `微信ClawBot [AI]`（原生支持微信公众号 `mp.weixin.qq.com`、Medium 专栏、YouTube 视频、小红书图文/视频、抖音视频/图集，以及 ArXiv、Substack、技术博客等外部网页 URL）$\rightarrow$ **10 秒内可紧接着发一条语音或文字批注**（如 *“这篇文章对 Agent 记忆架构的拆解很值得参考”*）。
 - **效果**：
-  1. 自动清洗广告与无关脚本，将正文与全部防盗链图片下载至本地 `<slug>.md` 及 `assets/`；
+  1. **多模态自适应提取**：公众号与网页净化提取正文并下载防盗链图片至 `assets/`；Medium 支持本机 Chrome 会话与镜像回退；小红书/抖音图集支持每批 6 张（最高 60 张）Vision OCR 结构化提取；YouTube（原生字幕 $\rightarrow$ ANDROID InnerTube 音频 $\rightarrow$ 可选本机 `yt-dlp` 兜底）、小红书视频、抖音视频及微信原生视频自动通过 `ffmpeg` + 本机 `local-asr`（或云端多模态音频）完成口播转写并存入 `01_inputs/video/`，同时在 frontmatter 记录结构化 `extraction_quality`；
   2. 将你的语音/文字批注置顶写入 `<slug>_note.md` 的 `## 我的转发批注`；
-  3. 结合可选知识库片段及显式观点/业务背景，在微信回复紧凑初筛（v0.4.0 起约 450–650 字，恢复“脱水干货”；详细论证留在伴读，超长沿用分段）。初筛比较观点增量、当前业务问题和验证动作，不罗列具体笔记链接；没有背景或没有关联时如实说明。
+  3. 结合可选知识库片段及显式观点/业务背景，在微信回复紧凑初筛（v0.4.0 起目标约 450–650 字，恢复“脱水干货”；无实质批注不显示空回应；详细论证留在伴读）。初筛比较观点增量、当前业务问题和验证动作，不罗列具体笔记链接；没有背景或没有关联时如实说明。
 
 ### 2. 随时语音/文字记录灵感闪念 (`capture_idea`)
 - **操作**：直接发送自然语言灵感（如 *“我突然想到可以用知识图谱约束 Agent 的长程状态漂移”*）或带前缀（`💡 ...`、`想法：...`）。
@@ -360,8 +360,13 @@ Web 配置工作台支持：
 | `login` | `bun run login` | 在终端生成微信 iLink 授权二维码，手机微信扫码绑定 `微信ClawBot [AI]` |
 | `doctor` | `bun run doctor` | 全面诊断知识库状态、LLM 配置、SQLite 队列计数与微信绑定状态（支持 `--json`） |
 | `list` | `bun run src/cli.ts list --status light_done` | 列出已抓取的文章列表（支持 `--status pending_extract\|extracting\|analyzing\|light_done\|deep_done\|failed` 与 `--limit N`） |
-| `show` | `bun run src/cli.ts show 1` | 查看元数据、伴读笔记和原文路径；需要全文时读取返回的 `source_md_path` |
-| `ingest` | `bun run src/cli.ts ingest "https://mp.weixin.qq.com/s/..." --note "批注"` | 从命令行抓取文章并生成伴读笔记；展示回执预览，不发送微信回执 |
+| `show` | `bun run src/cli.ts show 1 --json` | 查看元数据、`extractionQuality`、伴读笔记和原文路径；需要全文时读取返回的 `source_md_path` |
+| `reanalyze` | `bun run src/cli.ts reanalyze 1 --force [--send]` | 重新执行单篇文章/视频的模型初筛（可将本地回退摘录或 `metadata_only` 视频重新提取并升级为完整初筛） |
+| `recent` | `bun run src/cli.ts recent --json` | 查看最近的非文章类微信对话、收集箱速记、灵感闪念、定时任务与 Agent 异步任务记录 |
+| `inbox` | `bun run src/cli.ts inbox --limit 20 --json` | 仅查看最近通过微信转发存入 `01_inputs/inbox/` 的速记与备忘记录 |
+| `schedule` | `bun run src/cli.ts schedule [list\|add\|run\|done\|cancel]` | 查看和管理微信待办提醒与周期性早报/信息收集定时任务（结构化模式下自动同步 `00_home/queue.md`） |
+| `tasks` | `bun run src/cli.ts tasks --json` | 查看最近后台 Agent 异步长任务状态 |
+| `ingest` | `bun run src/cli.ts ingest "https://mp.weixin.qq.com/s/..." --note "批注"` | 从命令行抓取公众号/跨平台文章或视频并生成伴读笔记；展示回执预览，不发送微信回执 |
 | `sync` | `bun run src/cli.ts sync` | 手动触发一次微信入站消息拉取、队列处理与回执发送 |
 | `push` | `bun run push -- "消息内容" --file ./note.md --formats md,html,pdf` | 从电脑端主动向手机微信推送文本、图片 (`--image`)、文件 (`--file`) 或多格式渲染文档 (`--file` + `--formats`) |
 | `triage` | `bun run src/cli.ts triage 1 process_now --level deep` | 更新分诊 `keep_raw/reference/process_later/process_now` 和可选加工深度 `raw/light/deep`，不执行深读；保留正文 |
@@ -381,8 +386,10 @@ Web 配置工作台支持：
 | `POST /api/config` | 更新 `.env` 并刷新模型等内存配置；端口/数据目录变更需重启或迁移，保留原有注释与排版 |
 | `POST /api/config/test-llm` | 实时测试指定模型供应商与 Model ID 的 API 连通性及响应耗时 |
 | `GET /api/config/scan-cli` | 实时重新扫描本机已安装的 AI Agent CLI 工具 |
-| `POST /api/ingest` | 提交公众号链接抓取任务：`{"url": "https://mp.weixin.qq.com/s/...", "note": "可选批注"}` |
+| `POST /api/ingest` | 提交公众号或外部网页/视频链接抓取任务：`{"url": "https://mp.weixin.qq.com/s/...", "note": "可选批注"}` |
 | `POST /api/push` | 主动向手机微信推送消息与多格式文件：`{"text": "...", "files": ["/absolute/note.md"], "formats": ["md","html","pdf"]}` |
+| `GET /api/schedules` | 获取所有定时提醒与周期性早报任务列表 |
+| `POST /api/schedules` | 创建、立即运行、完成或取消定时任务 |
 
 ---
 
@@ -407,12 +414,20 @@ ALLOW_CODEX_FALLBACK=true
 # 3. 本地服务与知识库模式
 PORT=8787
 ANNOTATION_WAIT_SECONDS=10
+TASK_HEARTBEAT_SECONDS=25
 # 默认关闭第三方抓取；启用会将完整原 URL 发送给 Jina
 ALLOW_JINA_FALLBACK=false
 # 填 `none` 开启无知识库独立模式；填任意路径指向 Obsidian 库或结构化知识库
 VAULT_ROOT=./vault
+# 可选观点与业务背景快照（格式见 docs/article-analysis.md）
+# ANALYSIS_CONTEXT_FILE=./data/analysis-context.json
 
-# 4. 可选：外部通知 Webhook（支持飞书 / 钉钉 / 通用 JSON Webhook）
+# 4. 可选：本机音视频转写与 YouTube 兜底工具路径覆盖
+# FFMPEG_BIN=/opt/homebrew/bin/ffmpeg
+# LOCAL_ASR_BIN=~/.local/bin/local-asr
+# YT_DLP_BIN=~/.local/bin/yt-dlp
+
+# 5. 可选：外部通知 Webhook（支持飞书 / 钉钉 / 通用 JSON Webhook）
 NOTIFY_WEBHOOK_URL=
 NOTIFY_ON_EVENTS=article,idea,plan
 ```
