@@ -750,7 +750,7 @@ export function renderConfigPageHtml(): string {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <!-- MANDATORY: Declare support for both light and dark themes -->
   <meta name="color-scheme" content="light dark">
-  <title>wechat-as-context · 配置与智能体路由工作台</title>
+  <title>青简·尺素 (wechat-as-context) · 配置与智能体路由工作台</title>
   <style>
     /* MANDATORY: Apply color-scheme to :root or html for viewport-wide theming */
     :root {
@@ -1725,8 +1725,8 @@ export function renderConfigPageHtml(): string {
   <div class="container">
     <header class="page-header">
       <div>
-        <h1>⚙️ wechat-as-context 配置中心</h1>
-        <p>管理模型密钥、本机 Agent CLI 优先级与本地知识库路径</p>
+        <h1>⚙️ 青简·尺素 (wechat-as-context) 配置中心</h1>
+        <p>尺素传书，立化青简 —— 管理模型密钥、本机 Agent CLI 优先级与本地知识库路径</p>
         <div class="status-strip" id="status-strip" aria-live="polite">
           <span class="badge">加载中...</span>
         </div>

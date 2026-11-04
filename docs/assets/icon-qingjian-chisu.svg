@@ -1,0 +1,122 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- Deep Ink-Celadon Background Gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#122824" />
+      <stop offset="55%" stop-color="#1A3A34" />
+      <stop offset="100%" stop-color="#0E201D" />
+    </linearGradient>
+
+    <!-- Luminous Bamboo Slip Gradient (Center) -->
+    <linearGradient id="slipMain" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#B9EBD7" />
+      <stop offset="50%" stop-color="#76C8A8" />
+      <stop offset="100%" stop-color="#489E80" />
+    </linearGradient>
+
+    <!-- Secondary Bamboo Slip Gradient (Side Slips) -->
+    <linearGradient id="slipSide" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8FD8BC" stop-opacity="0.92" />
+      <stop offset="100%" stop-color="#388269" stop-opacity="0.92" />
+    </linearGradient>
+
+    <!-- Warm Rice Paper / Gold Thread Accent ("尺素" & "韦编") -->
+    <linearGradient id="goldCord" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#E5D3B3" />
+      <stop offset="50%" stop-color="#FFF5E1" />
+      <stop offset="100%" stop-color="#D4B886" />
+    </linearGradient>
+
+    <!-- Glowing AI Spark & Leaf Highlight -->
+    <linearGradient id="leafGrad" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#52B793" />
+      <stop offset="60%" stop-color="#A6F0D2" />
+      <stop offset="100%" stop-color="#E8FFF5" />
+    </linearGradient>
+
+    <!-- Subtle Drop Shadow for Depth -->
+    <filter id="softShadow" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#071210" flood-opacity="0.55" />
+    </filter>
+
+    <filter id="glow" x="-30%" y="-30%" width="160%" height="160%">
+      <feGaussianBlur stdDeviation="6" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over" />
+    </filter>
+  </defs>
+
+  <!-- Square Avatar Canvas with WeChat-friendly Rounded Corners -->
+  <rect width="512" height="512" rx="96" fill="url(#bgGrad)" />
+
+  <!-- Subtle Song-Celadon Inner Halo Ring -->
+  <circle cx="256" cy="252" r="192" fill="none" stroke="#68B69E" stroke-width="1.5" stroke-opacity="0.18" stroke-dasharray="6 8" />
+  <circle cx="256" cy="252" r="164" fill="#489E80" fill-opacity="0.07" />
+
+  <!-- WeChat Bubble / Silk Letter ("尺素") Aura Silhouette behind the Bamboo Slips -->
+  <path d="M 136 168
+           C 136 128, 168 104, 212 104
+           L 300 104
+           C 344 104, 376 128, 376 168
+           L 376 316
+           C 376 356, 344 380, 300 380
+           L 236 380
+           L 178 418
+           C 170 423, 162 416, 165 406
+           L 174 378
+           C 148 369, 136 346, 136 316 Z"
+        fill="#244E46" fill-opacity="0.45" stroke="#5AB396" stroke-width="2" stroke-opacity="0.28" />
+
+  <!-- Group: Three Bamboo Slips ("青简" - Knowledge & Living Context) -->
+  <g filter="url(#softShadow)">
+    <!-- Left Bamboo Slip -->
+    <rect x="162" y="138" width="50" height="224" rx="16" fill="url(#slipSide)" />
+    <line x1="172" y1="212" x2="202" y2="212" stroke="#16352F" stroke-width="2.5" stroke-opacity="0.35" stroke-linecap="round" />
+    <line x1="172" y1="292" x2="202" y2="292" stroke="#16352F" stroke-width="2.5" stroke-opacity="0.35" stroke-linecap="round" />
+
+    <!-- Right Bamboo Slip -->
+    <rect x="300" y="138" width="50" height="224" rx="16" fill="url(#slipSide)" />
+    <line x1="310" y1="204" x2="340" y2="204" stroke="#16352F" stroke-width="2.5" stroke-opacity="0.35" stroke-linecap="round" />
+    <line x1="310" y1="284" x2="340" y2="284" stroke="#16352F" stroke-width="2.5" stroke-opacity="0.35" stroke-linecap="round" />
+
+    <!-- Center Primary Bamboo Slip (Taller, Prominent) -->
+    <rect x="228" y="114" width="56" height="268" rx="18" fill="url(#slipMain)" />
+    <line x1="256" y1="152" x2="256" y2="232" stroke="#13302A" stroke-width="4" stroke-opacity="0.45" stroke-linecap="round" stroke-dasharray="18 10" />
+    <line x1="256" y1="256" x2="256" y2="338" stroke="#13302A" stroke-width="4" stroke-opacity="0.45" stroke-linecap="round" stroke-dasharray="12 10" />
+
+    <!-- Traditional Woven Cord Binding ("韦编" / Context Link) - Upper & Lower -->
+    <path d="M 156 174 Q 256 184 356 174" fill="none" stroke="url(#goldCord)" stroke-width="6" stroke-linecap="round" />
+    <path d="M 156 322 Q 256 332 356 322" fill="none" stroke="url(#goldCord)" stroke-width="6" stroke-linecap="round" />
+
+    <!-- Binding Knots Between Slips -->
+    <circle cx="220" cy="177" r="5" fill="#FFF5E1" />
+    <circle cx="292" cy="177" r="5" fill="#FFF5E1" />
+    <circle cx="220" cy="325" r="5" fill="#FFF5E1" />
+    <circle cx="292" cy="325" r="5" fill="#FFF5E1" />
+  </g>
+
+  <!-- Graceful Bamboo Leaves Sweeping Upward Right -->
+  <path d="M 326 154
+           C 356 112, 404 94, 434 98
+           C 414 134, 382 162, 334 166 Z"
+        fill="url(#leafGrad)" filter="url(#glow)" />
+  <path d="M 342 174
+           C 372 158, 408 158, 428 170
+           C 400 186, 368 188, 342 174 Z"
+        fill="url(#leafGrad)" fill-opacity="0.85" />
+
+  <!-- AI Living Context Spark (Four-Pointed Star at Top Left of Slips) -->
+  <path d="M 148 106
+           Q 148 128 126 128
+           Q 148 128 148 150
+           Q 148 128 170 128
+           Q 148 128 148 106 Z"
+        fill="#FFF7E4" filter="url(#glow)" />
+
+  <!-- Classic Vermilion Seal Stamp ("印：素" for 尺素) at Bottom Right Corner of Slips -->
+  <g transform="translate(332, 344)">
+    <rect x="0" y="0" width="44" height="44" rx="10" fill="#C84B31" stroke="#F4EFE6" stroke-width="2" stroke-opacity="0.8" />
+    <!-- Minimalist Seal-Script Stylized "素" Mark -->
+    <path d="M 12 11 H 32 M 14 16 H 30 M 10 21 H 34 M 22 8 V 21 M 22 21 L 15 27 L 29 27 L 22 33 M 22 27 V 36 M 14 31 L 11 35 M 30 31 L 33 35"
+          fill="none" stroke="#FFF7F2" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" />
+  </g>
+</svg>

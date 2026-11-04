@@ -1,4 +1,4 @@
-# WeChat as Context — 微信 iLink 协议全景、CLI 数据流与功能扩展指南
+# 青简 · 尺素 (`WeChat as Context`) — 微信 iLink 协议全景、CLI 数据流与功能扩展指南
 
 本文档记录了 `wechat_as_context` 的三项核心技术资产：
 1. **腾讯微信 `iLink Bot`（`微信ClawBot [AI]`）协议阅读笔记**（共 **9 个 CGI 接口 + 2 个 C2C CDN 加解密端点 = 11 个接口**，以及消息类型与引用协议）；

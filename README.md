@@ -1,15 +1,16 @@
-# WeChat as Context (`wechat-as-context`)
+# <img src="./docs/assets/icon-qingjian-chisu.svg" width="36" height="36" align="top" alt="QingJian ChiSu Icon" /> 青简 · 尺素 (`WeChat as Context` / `wechat-as-context`) — 个人微信 ⇄ 本地知识库与桌面 AI 智能体双向活上下文网关
 
+[![Version: v0.4.8](https://img.shields.io/badge/Version-v0.4.8-10b981)](./CHANGELOG.zh.md)
 [![Runtime: Bun >= 1.1](https://img.shields.io/badge/Runtime-Bun_%E2%89%A51.1-f472b6?logo=bun&logoColor=white)](https://bun.sh)
 [![Pure BYOK & BYOCLI](https://img.shields.io/badge/Pure_BYOK_%26_BYOCLI-Zero_Model_Lock--in-4f46e5)](./src/config.ts)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
 [![Protocol: WeChat ClawBot iLink](https://img.shields.io/badge/WeChat-ClawBot_iLink-07c160?logo=wechat&logoColor=white)](./docs/ilink_protocol_and_extension_guide.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
 
-> **把手机微信里的「高频阅读、语音批注与随时闪念」，变成个人知识库与桌面 AI 智能体（Codex / AntiGravity / Claude Code / OpenCode）可随时调用的活上下文（Living Context）。**  
+> **尺素传书，立化青简 (`WeChat as Context`) —— 把手机微信里的「高频阅读、语音批注与随时闪念」，变成个人知识库与桌面 AI 智能体（Codex / AntiGravity / Claude Code / OpenCode）可随时调用的活上下文（Living Context）。**  
 > **坚持「零内置模型锁定」的纯粹开放 BYOK（Bring Your Own Key）与 BYOCLI（Bring Your Own CLI）设计**——只要你手头拥有任意大模型平台的 API Key 或本机已安装的 AI Agent CLI，即可一键打通手机微信与本地第二大脑。
 
-`wechat-as-context` 不是又一个孤立的「稍后读」收藏夹。它通过微信官方 **ClawBot iLink 长轮询协议**，将你个人微信置顶的 **`微信ClawBot [AI]`** 变成连接手机端与本地电脑的**双向智能体上下文网关**：
+**青简 · 尺素 (`wechat-as-context`)** 不是又一个孤立的「稍后读」收藏夹。它通过微信官方 **ClawBot iLink 长轮询协议**，将你个人微信置顶的 **`微信ClawBot [AI]`** 变成连接手机端与本地电脑的**双向智能体上下文网关**：
 
 - 📱 **在手机微信端**：顺手转发公众号文章、Medium 深度专栏、YouTube 视频、小红书图文/视频、抖音作品、任意外部网页或微信原生视频（`type=5`），10 秒内追加语音/文字批注、记录灵感闪念、设置定时提醒与周期早报、发送截图/PDF、向本地知识库提问、或遥控本机 AI Agent（`agy` / `codex` / `opencode` / `claude`）执行深度研究并回传 `.md` / `.html` / `.pdf` 文件或架构配图。
 - 💻 **在电脑桌面端**：在 Codex、AntiGravity、Claude Code、OpenCode 中一句指令即可接力深读刚转发的文章，或通过 `bun run push` 将桌面端产出的报告、图表、文档主动推送到手机微信，且自动注入微信对话上下文，手机端直接回复即可无缝追问。
@@ -45,6 +46,7 @@
 
 ## 📑 目录
 
+- [0. 项目简介与「青简 · 尺素」命名释义](#0-项目简介与青简--尺素命名释义)
 - [核心特性](#-核心特性)
 - [纯粹开放 BYOK / BYOCLI 理念与多模型协议说明](#-纯粹开放-byok--byocli-理念与多模型协议说明)
   - [核心设计原则：无内置绑定，100% 释放自有 API 与 CLI 潜力](#1-核心设计原则无内置绑定100-释放自有-api-与-cli-潜力)
@@ -63,6 +65,25 @@
 - [可靠性与权威存储保障 (Authoritative Storage)](#-可靠性与权威存储保障-authoritative-storage)
 - [测试与开发](#-测试与开发)
 - [许可证](#-许可证)
+
+---
+
+## 0. 项目简介与「青简 · 尺素」命名释义
+
+### 0.1 什么是「青简 · 尺素 (WeChat as Context)」？
+
+**青简 · 尺素 (`WeChat as Context` / `wechat-as-context`)** 是一套基于微信官方 **ClawBot iLink 长轮询协议**构建的**个人微信 ⇄ 本地知识库与桌面 AI 智能体双向活上下文（Living Context）网关**。
+
+它将你个人微信中置顶的 **`微信ClawBot [AI]`** 与本机常驻服务（Bun + SQLite WAL）无缝连接，无需公网 IP、无需反向代理隧道，即可让手机微信里的公众号文章、Medium 深度专栏、YouTube/小红书/抖音音视频、10 秒语音批注与随时闪念，实时转化为本地知识库与桌面端 AI Agent（Codex、AntiGravity、Claude Code、OpenCode）可检索、可深读、可双向追问的活上下文。
+
+### 0.2 关于「青简 · 尺素 (WeChat as Context)」命名的解释说明
+
+「**青简 · 尺素**」与同系列的「**青简 · 津梁**」（双语精读智译扩展）、「**青简 · 咫尺**」（macOS ⇄ Android 全场景协同底座）、「**青简 · 灵枢**」（ESP32-S3 独立主权具身 AI Agent）一脉相承，凝练了本项目在治学传统与工程交互上的双重思考：
+
+1. **「青简」：竹简杀青，治学案头**  
+   古人炙竹渗水谓之「杀青」，编联成册谓之「韦编」。「青简」自古便是典籍、学问与案头研读的代名词，象征我们在本地电脑与个人知识库（Personal Knowledge Base）中长年累月沉淀的原文存档、伴读笔记与结构化思想资产。
+2. **「尺素」 (`WeChat as Context`)：尺素传书，对话即语境**  
+   古乐府《饮马长城窟行》有云：“客从远方来，遗我双鲤鱼。呼儿烹鲤鱼，中有**尺素**书。”古人常将「青简」与「尺素」并称——青简为案头长久之典籍，尺素为日常往来之书札。个人微信（WeChat）正是当代人全天候不离手的「尺素」。然而，传统的微信收藏夹与「文件传输助手」往往沦为只进不出的信息孤岛。「**青简 · 尺素**」旨在打通日常即时通讯与深度治学之间的脉络：**你在手机微信里像发日常尺牍一样顺手转发文章、视频或追加 10 秒语音批注，转瞬即在本地化作韦编有序的「数字青简」，成为桌面 AI 智能体可随时调用、接力深读与双向追问的活上下文（`WeChat as Context`）**——**尺素传书，立化青简**。
 
 ---
 
@@ -169,7 +190,7 @@ flowchart TB
         M3["发送图片 / 截图 / PDF\n或要求生成图表与 MD/HTML/PDF 报告"]
     end
 
-    subgraph Gateway["⚙️ wechat-as-context 本地常驻服务 (Bun + SQLite WAL)"]
+    subgraph Gateway["⚙️ 青简·尺素 (wechat-as-context) 本地常驻服务 (Bun + SQLite WAL)"]
         C1["ClawBot iLink Client\ngetupdates 长轮询 | sendtyping 状态\nC2C CDN AES-128-ECB 双向加解密"]
         DB[("SQLite 状态库\ninbound_messages\narticles | agent_tasks\nreply_outbox\nconversation_turns")]
         R1["双层意图路由器 (src/agent/router.ts)\n8 大核心意图识别 + 复杂度评估"]

@@ -300,7 +300,7 @@ async function main() {
           )
         );
       } else {
-        console.log("🎉 === wechat-as-context 初始化完成 ===");
+        console.log("🎉 === 青简·尺素 (wechat-as-context) 初始化完成 ===");
         console.log(
           `- 配置文件: ${envPath} (${envCreated ? "已从 .env.example 生成" : "已存在"})`
         );
@@ -462,7 +462,7 @@ async function main() {
       if (isJson) {
         console.log(JSON.stringify(report, null, 2));
       } else {
-        console.log("=== wechat-as-context 环境自检 ===");
+        console.log("=== 青简·尺素 (wechat-as-context) 环境自检 ===");
         console.log(`- 存储与知识库模式: ${report.vaultMode} (${report.vaultRoot}) [${report.checks.vault}]`);
         console.log(`- 微信文章落盘: ${report.wechatArticlesDir}`);
         console.log(`- LLM 初筛引擎: ${report.checks.llmApiKey}`);
@@ -1113,7 +1113,7 @@ async function main() {
     }
 
     default: {
-      console.log(`wechat-as-context (wx-ctx) — 微信公众号文章 -> 个人知识库 & AI Agent 桥接工具
+      console.log(`青简·尺素 · wechat-as-context (wx-ctx) — 个人微信 ⇄ 本地知识库 & 桌面 AI Agent 活上下文网关
 
 可用命令:
   bun run src/cli.ts setup [--vault <path>] [--no-open]    一键初始化配置 (.env)、知识库骨架与全局 Skill，并打开 HTML 配置工作台

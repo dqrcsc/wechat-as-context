@@ -884,7 +884,7 @@ export async function notifyExternalWebhookIfConfigured(
   const secret = config.notifyWebhookSecret?.trim() || "";
   const keyword = config.notifyWebhookKeyword?.trim() || "";
   const kwPrefix = keyword ? `[${keyword}] ` : "";
-  const headerTitle = `${kwPrefix}【WeChat-as-Context · ${eventType.toUpperCase()}】${title}`.trim();
+  const headerTitle = `${kwPrefix}【青简·尺素 | WeChat-as-Context · ${eventType.toUpperCase()}】${title}`.trim();
   const textBody = `${headerTitle}\n${summary}`.trim();
 
   let targetUrl = rawUrl;

@@ -14,7 +14,7 @@ rotateDaemonLogsIfOversized(config.dataDir);
 const server = Bun.serve({ hostname: LOCAL_HOST, port: config.port, fetch: createHttpHandler(db, pipeline), maxRequestBodySize: 1024 * 1024 });
 
 console.log(
-  `🚀 [wechat-as-context] Server listening on http://127.0.0.1:${server.port}`
+  `🚀 [青简·尺素 | wechat-as-context] Server listening on http://127.0.0.1:${server.port}`
 );
 console.log(
   `   ClawBot Status:   ${

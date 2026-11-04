@@ -1,5 +1,13 @@
 # 更新日志
 
+## 0.4.8 - 2026-11-04
+
+### 品牌中文名「青简 · 尺素」与全链路标识同步
+
+- 正式确立项目中文名称为 **「青简 · 尺素」**（`QingJian · ChiSu` / `WeChat as Context`），与同系列「青简 · 津梁」「青简 · 咫尺」「青简 · 灵枢」形成完整治学与智能体协同产品矩阵，寓意**「尺素传书，立化青简」**——将个人微信中的日常转发、语音批注与随时闪念沉淀为本地知识库与桌面 AI 智能体的活上下文（Living Context）。
+- 新增项目矢量徽标 `docs/assets/icon-qingjian-chisu.svg`（三联青简 · 韦编金扣 · 尺素书函 · 朱砂「素」印），并在 `README.md` 增补完整的「项目简介与『青简 · 尺素』命名释义」章节。
+- 同步更新 Web 配置工作台（`src/web_config.ts`）、CLI 命令行提示（`src/cli.ts`）、服务启动横幅（`src/server.ts`）、外部通知标题前缀（`src/config.ts`）、`.env.example`、`docs/ilink_protocol_and_extension_guide.md` 以及 `skills/wechat-as-context/SKILL.md`（含 `~/.codex/skills/wechat-as-context/SKILL.md` 全局同步）。
+
 ## 0.4.7 - 2026-11-02
 
 ### 运行态证书环境加固与文档对齐
