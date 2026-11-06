@@ -1,6 +1,6 @@
 # <img src="./docs/assets/icon-qingjian-chisu.svg" width="36" height="36" align="top" alt="QingJian ChiSu Icon" /> 青简 · 尺素 (`WeChat as Context` / `wechat-as-context`) — 个人微信 ⇄ 本地知识库与桌面 AI 智能体双向活上下文网关
 
-[![Version: v0.4.8](https://img.shields.io/badge/Version-v0.4.8-10b981)](./CHANGELOG.zh.md)
+[![Version: v0.4.9](https://img.shields.io/badge/Version-v0.4.9-10b981)](./CHANGELOG.zh.md)
 [![Runtime: Bun >= 1.1](https://img.shields.io/badge/Runtime-Bun_%E2%89%A51.1-f472b6?logo=bun&logoColor=white)](https://bun.sh)
 [![Pure BYOK & BYOCLI](https://img.shields.io/badge/Pure_BYOK_%26_BYOCLI-Zero_Model_Lock--in-4f46e5)](./src/config.ts)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -17,7 +17,7 @@
 
 ---
 
-**v0.4.7 / v0.4.6 真实复验与运行态加固**：抖音证书错误可用受限系统 TLS 回退；YouTube 原生抓取失败后可选用本机 `yt-dlp` 解析音频（子进程使用脱敏环境并自动挂载系统 `/etc/ssl/cert.pem` 根证书与 `/usr/local/bin`、`/opt/homebrew/bin` 路径，消除 macOS Python 虚拟环境缺少 `certifi` 时的证书校验失败），工具缺失或仍受限时明确降级，不自动安装。公众号尾部清理、手机初筛预算、离线想法前缀与 ASR 待核对定位同步修复。依赖、验证结果和边界见 [真实复验修复说明](./docs/review-2026-11-01-v046-live-replay.md)。仅更新代码或技能不会升级本机服务，也不会重试历史失败。
+**v0.4.9 媒体工具运行修复**：恢复 yt-dlp 脱敏环境中的代理配置，统一三个媒体工具的路径展开和可执行检查，细化失败诊断；常用重分析示例保留人工笔记保护。新增离线 CA 加载测试，明确 certifi 与系统 CA 的使用边界。依赖、恢复矩阵和验收见 [媒体工具与渠道恢复说明](./docs/media-runtime-and-recovery.md)。仅更新代码或技能不会升级本机服务，也不会重试历史失败。
 
 **v0.2.4 升级与使用边界声明**：
 - **测试隔离修复**：测试改用 `bun run test`，在不含 `.env` 和业务数据的临时源码副本中执行，父子进程统一阻断越界数据库与未模拟网络请求。直接 `bun test` 会提前拒绝运行。原因与验收见 [测试隔离说明](./docs/test-isolation.md)。生产配置优先级不变。
@@ -288,7 +288,7 @@ bash scripts/install_daemon.sh
 ### 1. 转发公众号、Medium、YouTube、小红书、抖音或外部网页 + 语音/文字批注 (`ingest_link`)
 - **操作**：在微信看到好内容 $\rightarrow$ 转发链接或分享卡片给 `微信ClawBot [AI]`（原生支持微信公众号 `mp.weixin.qq.com`、Medium 专栏、YouTube 视频、小红书图文/视频、抖音视频/图集，以及 ArXiv、Substack、技术博客等外部网页 URL）$\rightarrow$ **10 秒内可紧接着发一条语音或文字批注**（如 *“这篇文章对 Agent 记忆架构的拆解很值得参考”*）。
 - **效果**：
-  1. **多模态自适应提取**：公众号与网页净化提取正文并下载防盗链图片至 `assets/`；Medium 支持本机 Chrome 会话与镜像回退；小红书/抖音图集支持每批 6 张（最高 60 张）Vision OCR 结构化提取；YouTube（原生字幕 $\rightarrow$ ANDROID InnerTube 音频 $\rightarrow$ 可选本机 `yt-dlp` 兜底）、小红书视频、抖音视频及微信原生视频自动通过 `ffmpeg` + 本机 `local-asr`（或云端多模态音频）完成口播转写并存入 `01_inputs/video/`，同时在 frontmatter 记录结构化 `extraction_quality`；
+  1. **多模态自适应提取**：公众号与网页净化提取正文并下载防盗链图片至 `assets/`；Medium 支持本机 Chrome 会话与镜像回退；小红书/抖音图集支持每批 6 张（最高 60 张）Vision OCR 结构化提取；YouTube（原生字幕 $\rightarrow$ ANDROID InnerTube 音频 $\rightarrow$ 可选本机 `yt-dlp` 兜底）、小红书视频、抖音视频及微信原生视频在取流成功、工具或模型可用时通过 `ffmpeg` + 本机 `local-asr`（或云端多模态音频）尝试口播转写并按配置归档（结构化模式默认 `01_inputs/video/`），失败保留质量标记，归档不等于解析完成；同时在 frontmatter 记录结构化 `extraction_quality`；
   2. 将你的语音/文字批注置顶写入 `<slug>_note.md` 的 `## 我的转发批注`；
   3. 结合可选知识库片段及显式观点/业务背景，在微信回复紧凑初筛（v0.4.0 起目标约 450–650 字，恢复“脱水干货”；无实质批注不显示空回应；详细论证留在伴读）。初筛比较观点增量、当前业务问题和验证动作，不罗列具体笔记链接；没有背景或没有关联时如实说明。
 
@@ -382,7 +382,7 @@ Web 配置工作台支持：
 | `doctor` | `bun run doctor` | 全面诊断知识库状态、LLM 配置、SQLite 队列计数与微信绑定状态（支持 `--json`） |
 | `list` | `bun run src/cli.ts list --status light_done` | 列出已抓取的文章列表（支持 `--status pending_extract\|extracting\|analyzing\|light_done\|deep_done\|failed` 与 `--limit N`） |
 | `show` | `bun run src/cli.ts show 1 --json` | 查看元数据、`extractionQuality`、伴读笔记和原文路径；需要全文时读取返回的 `source_md_path` |
-| `reanalyze` | `bun run src/cli.ts reanalyze 1 --force [--send]` | 重新执行单篇文章/视频的模型初筛（可将本地回退摘录或 `metadata_only` 视频重新提取并升级为完整初筛） |
+| `reanalyze` | `bun run src/cli.ts reanalyze 1 --json` | 对 articles 表中指定 ID 补跑初筛，默认不发送；已有人工内容受保护，强制重抓/覆盖须先核对，见下方说明 |
 | `recent` | `bun run src/cli.ts recent --json` | 查看最近的非文章类微信对话、收集箱速记、灵感闪念、定时任务与 Agent 异步任务记录 |
 | `inbox` | `bun run src/cli.ts inbox --limit 20 --json` | 仅查看最近通过微信转发存入 `01_inputs/inbox/` 的速记与备忘记录 |
 | `schedule` | `bun run src/cli.ts schedule [list\|add\|run\|done\|cancel]` | 查看和管理微信待办提醒与周期性早报/信息收集定时任务（结构化模式下自动同步 `00_home/queue.md`） |
@@ -392,6 +392,8 @@ Web 配置工作台支持：
 | `push` | `bun run push -- "消息内容" --file ./note.md --formats md,html,pdf` | 从电脑端主动向手机微信推送文本、图片 (`--image`)、文件 (`--file`) 或多格式渲染文档 (`--file` + `--formats`) |
 | `triage` | `bun run src/cli.ts triage 1 process_now --level deep` | 更新分诊 `keep_raw/reference/process_later/process_now` 和可选加工深度 `raw/light/deep`，不执行深读；保留正文 |
 | `idea` | `bun run src/cli.ts idea 1 "我的新想法"` | 从命令行快速记录一条个人闪念种子（可选关联某篇文章 `#ID`） |
+
+**重分析的覆盖与发送边界**：普通补跑使用 `reanalyze <id> --json`。仅在阅读现有原文、伴读并确认允许替换后，才显式使用 `--force`：它允许覆盖已编辑或完整的 light 笔记；对于缺原文或带 `metadata_only` 标记的外部视频，还会重抓原文。deep/synthesis 及生成期间发生的并发编辑仍受保护。`--send` 另行授权发送，普通补跑不需要它。微信原生视频/图片/文件没有 articles ID，不能套用该命令；详见 [渠道恢复矩阵](./docs/media-runtime-and-recovery.md#渠道恢复矩阵)。
 
 ---
 
@@ -444,6 +446,7 @@ VAULT_ROOT=./vault
 # ANALYSIS_CONTEXT_FILE=./data/analysis-context.json
 
 # 4. 可选：本机音视频转写与 YouTube 兜底工具路径覆盖
+# 支持绝对路径、~/ 和项目根目录相对路径；无效显式路径报错，不回退其他版本。
 # FFMPEG_BIN=/opt/homebrew/bin/ffmpeg
 # LOCAL_ASR_BIN=~/.local/bin/local-asr
 # YT_DLP_BIN=~/.local/bin/yt-dlp

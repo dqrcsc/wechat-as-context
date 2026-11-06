@@ -30,3 +30,18 @@ jobs:
 
       - name: Run test suite
         run: bun run test
+
+  offline-ca:
+    name: Offline yt-dlp certificate loading
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install isolated test-only dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/wxctx-ca"
+          "$RUNNER_TEMP/wxctx-ca/bin/python" -m pip install --isolated --index-url https://pypi.org/simple -r tests/integration/youtube-ca-requirements.txt
+      - name: Verify CA stores without network or application data
+        run: '"$RUNNER_TEMP/wxctx-ca/bin/python" tests/integration/youtube_ca_test.py'

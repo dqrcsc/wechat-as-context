@@ -13,11 +13,12 @@ import {
   writeSync,
   closeSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { tmpdir } from "node:os";
 import { basename, extname, join } from "node:path";
 import type { AppConfig } from "../config.ts";
 import { fetchWithTransientRetry, resolveModelEndpoint } from "../agent/llm.ts";
 import { fetchPublicResource } from "../public_url.ts";
+import { findMediaToolBinary } from "./tool_binary.ts";
 
 export interface AsrTranscriptionRequest {
   mediaUrl?: string;
@@ -49,29 +50,12 @@ export function setAsrTestRunner(runner: AsrTestRunner | null): void {
 
 function findFfmpegBinary(): string | null {
   if (process.env.WXCTX_TEST_ROOT) return null;
-  const candidates = [
-    process.env.FFMPEG_BIN || "",
-    "/opt/homebrew/bin/ffmpeg",
-    "/usr/local/bin/ffmpeg",
-    "/usr/bin/ffmpeg",
-  ].filter(Boolean);
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
-  return null;
+  return findMediaToolBinary('ffmpeg', process.env.FFMPEG_BIN);
 }
 
 function findLocalAsrBinary(): string | null {
   if (process.env.WXCTX_TEST_ROOT) return null;
-  const candidates = [
-    process.env.LOCAL_ASR_BIN || "",
-    join(homedir(), ".local", "bin", "local-asr"),
-    "/usr/local/bin/local-asr",
-  ].filter(Boolean);
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
-  return null;
+  return findMediaToolBinary('local-asr', process.env.LOCAL_ASR_BIN);
 }
 
 function cleanupTempDirSafe(dirPath: string): void {

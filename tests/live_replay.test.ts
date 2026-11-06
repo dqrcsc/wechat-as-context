@@ -61,7 +61,7 @@ test('YouTube resolver validates target and allows only public Google video medi
  setYouTubeResolverTestRunner(async()=>resolverData('wrongvideo00'));expect((await resolveYouTubeFallbackAudio('abcdefghijk')).reason).toBe('resolver_identity_mismatch');
  for(const url of ['http://127.0.0.1/a','https://evil.test/a','https://user:secret@r1.googlevideo.com/a']){setYouTubeResolverTestRunner(async()=>resolverData('abcdefghijk',url));expect((await resolveYouTubeFallbackAudio('abcdefghijk')).urls).toEqual([]);}
  setYouTubeResolverTestRunner(async()=>{throw new Error('resolver_timeout');});expect((await resolveYouTubeFallbackAudio('abcdefghijk')).reason).toBe('resolver_timeout');
- setYouTubeResolverTestRunner(async()=>'{bad json');expect((await resolveYouTubeFallbackAudio('abcdefghijk')).reason).toBe('resolver_failed');
+ setYouTubeResolverTestRunner(async()=>'{bad json');expect((await resolveYouTubeFallbackAudio('abcdefghijk')).reason).toBe('resolver_invalid_output');
 });
 function ytPage(captions=false){const player:any={videoDetails:{title:'Fixture',shortDescription:'Source description.'},streamingData:{adaptiveFormats:[{mimeType:'audio/mp4',url:'https://old.googlevideo.com/a'}]}};if(captions)player.captions={playerCaptionsTracklistRenderer:{captionTracks:[{languageCode:'en',baseUrl:'https://caption.example.test/a'}]}};globalThis.fetch=(async(url:any)=>String(url).includes('watch?')?new Response(`<script>var ytInitialPlayerResponse = ${JSON.stringify(player)};</script>`):new Response('<transcript><text start="0" dur="1">Native captions.</text></transcript>')) as any;}
 test('YouTube native audio 403 recovers using fresh resolver media and preserves diagnosis',async()=>{

@@ -150,6 +150,16 @@ bun run {{PROJECT_ROOT}}/src/cli.ts push --article <id> [--with-file] [--formats
 - 旧版仅附件入队而正文状态不明时暂停并要求人工核对，不自动补发。历史失败 outbox 保留；不得把调度恢复作为授权重试历史消息。
 - 具体迁移、超时、日志轮转与测试边界见项目 `docs/review-2026-10-30-fixes.md`。
 
+## v0.4.9 媒体工具与恢复边界
+
+- yt-dlp 子进程保留 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY 及小写形式（包括空值），仍剔除模型密钥、Python/Node 注入参数及 TLS 密钥日志配置。不在日志或共享报告中展示代理凭据、原始 stderr 或签名 URL。
+- YT_DLP_BIN、FFMPEG_BIN、LOCAL_ASR_BIN 支持绝对路径、~/ 和项目根目录相对路径，要求普通可执行文件。显式路径无效时报错，不悄悄选另一版本；未指定时统一依次检查 ~/.local/bin、/opt/homebrew/bin、/usr/local/bin、/usr/bin。仍是启动进程的环境变量，修改后须在用户授权的维护中重启生效，不承诺配置工作台热更新工具路径。
+- 证书环境注入不等于 CA 已被采用：yt-dlp 默认优先使用已安装的 certifi；无 certifi 时才经 Python/OpenSSL 默认路径加载 SSL_CERT_FILE/SSL_CERT_DIR。不得用关闭证书校验解决失败。离线 CA 测试只验证证书加载，不证明真实网站握手成功。
+- 下载器失败只保留固定 reason 与数值退出码；区分工具路径、执行权限、超时、输出超限、证书、代理、网络、HTTP 和无效 JSON。分类来自已观察错误，不证明完整根因；外部视频的质量 reasons 可见 resolver_exit_code_N，不保存原始 stderr。
+- 常用补跑用 `reanalyze <id> --json`，只适用于 articles 表的公众号/网页/外部平台链接。`--force` 可能覆盖人工 light 内容，并可重抓缺失或 metadata_only 的外部来源，必须先阅读并取得对应覆盖授权；`--send` 是独立发送选项。deep/synthesis 和并发编辑仍保护。
+- 微信原生视频/图片/PDF/PPTX/个人文字主要走会话及文件归档，没有可用于 reanalyze 的 articles ID。先用 recent/inbox 和实际路径定位证据，按用户授权单独解析；重投同一消息可能被幂等去重，不视为恢复成功。归档、解析、模型初筛与送达分别核验，历史 failed 不自动重试。
+- 完整恢复矩阵与依赖验证见项目 `docs/media-runtime-and-recovery.md`。仅同步本 Skill 不更新部署，不安装可选下载器，也不授予私人材料外发许可。
+
 ## v0.4.6 真实复验边界
 
 以下能力需部署对应代码；同步 Skill 不升级或重启服务。

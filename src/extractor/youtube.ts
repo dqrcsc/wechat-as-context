@@ -317,6 +317,7 @@ export async function extractYouTubeVideo(
   if (!snippets.length && !asrTranscript) {
     const fallback = await resolveYouTubeFallbackAudio(videoId);
     if (fallback.reason) acquisitionReasons.add(fallback.reason);
+    if (fallback.exitCode !== undefined) acquisitionReasons.add(`resolver_exit_code_${fallback.exitCode}`);
     if (fallback.urls.length) {
       try {
         const result = await transcribeAudioFromMedia({ mediaUrls: fallback.urls, headers: fallback.headers, config: options?.config, hintTitle: title });

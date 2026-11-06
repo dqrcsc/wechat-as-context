@@ -1,0 +1,3 @@
+# Optional offline certificate integration suite only; not a runtime dependency.
+yt-dlp==2026.10.26
+certifi==2026.10.19
