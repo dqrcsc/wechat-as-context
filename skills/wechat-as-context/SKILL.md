@@ -150,6 +150,12 @@ bun run {{PROJECT_ROOT}}/src/cli.ts push --article <id> [--with-file] [--formats
 - 旧版仅附件入队而正文状态不明时暂停并要求人工核对，不自动补发。历史失败 outbox 保留；不得把调度恢复作为授权重试历史消息。
 - 具体迁移、超时、日志轮转与测试边界见项目 `docs/review-2026-10-30-fixes.md`。
 
+## v0.4.10 媒体兜底与链接安全
+
+- ffmpeg/local-asr 显式路径无效时只跳过对应引擎，转写继续尝试其余引擎（含云端音频兜底）；质量 reasons 记录脱敏的 `asr_tool_<tool>_<reason>`（YouTube 兜底链路为 `resolver_asr_tool_*`），不含路径。只写命令名（如 `YT_DLP_BIN=yt-dlp`）不查 PATH，报 `invalid_path`。排查工具问题先运行 `bun run src/cli.ts doctor --json` 查看 `checks.mediaTools`，它只读，不安装、不执行、不回退。
+- 外链转 Markdown 仅保留 http/https/mailto，规范化后再校验协议；被丢弃的链接只保留锚文本。不要据此判断原文没有链接。
+- YouTube 占位标题（`YouTube Video (id)`）的 `reanalyze <id>`：不带 `--force` 时仅刷新 metadata-only 原文，刷新失败或仍为占位则复用原文件；已有逐字稿的原文只有显式 `--force` 才会重抓。模型仍降级时会保存已恢复的标题与原文元数据，伴读保持不变。
+
 ## v0.4.9 媒体工具与恢复边界
 
 - yt-dlp 子进程保留 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY/NO_PROXY 及小写形式（包括空值），仍剔除模型密钥、Python/Node 注入参数及 TLS 密钥日志配置。不在日志或共享报告中展示代理凭据、原始 stderr 或签名 URL。

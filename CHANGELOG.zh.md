@@ -1,8 +1,8 @@
 # 更新日志
 
-## 未发布
+## 0.4.10 - 2026-11-07
 
-### 修复
+### 媒体工具兜底、链接安全与 YouTube 占位复跑
 
 - ffmpeg/local-asr 显式路径无效时不再中断整个转写：只跳过对应引擎并继续云端兜底，失败原因以 `asr_tool_*` / `resolver_asr_tool_*` 脱敏记录；工具解析提前到下载前。
 - 只写命令名（如 `YT_DLP_BIN=yt-dlp`）时报 `invalid_path` 而非 `not_found`；`doctor` 新增三个媒体工具的只读状态检查。
@@ -10,6 +10,13 @@
 - YouTube 占位标题（`YouTube Video (id)`）复跑：仅匹配 frontmatter 标题；不带 `--force` 时只刷新 metadata-only 原文，刷新失败或仍为占位时复用原文件，不覆盖已有逐字稿；模型仍降级时也保存已恢复的标题与原文元数据。
 - 音频格式排序修复 `Infinity - Infinity = NaN` 导致的不稳定顺序；yt-dlp stderr 中的具体 HTTP 状态优先于泛化的 timeout 字样。
 - 定时任务队列标题额外转义 Obsidian 的 `#`、`==`、`~~`、`$`、`^`、`%%` 语法。
+- YouTube 登录拦截页（LOGIN_REQUIRED）从 ytInitialData 与 oEmbed 补齐标题、作者、简介与日期，并校验视频 ID；网页外链按原文 URL 补全相对地址。
+
+### 验证与文档
+
+- 新增 12 项回归（ASR 引擎跳过与云端兜底、工具路径写法、doctor 状态、排序、链接协议、Obsidian 转义、占位复跑五种场景），另补 1 项 stderr 分类；全量 538 通过 / 2539 断言，隔离审计 7 通过 / 40 断言，TypeScript 检查通过。
+- 同步技能、配置示例与 [媒体工具与渠道恢复说明](docs/media-runtime-and-recovery.md) 的失败诊断表。
+- 发布后按用户授权重启本机服务；不重跑历史文章、不发微信、不重试历史失败。
 
 ## 0.4.9 - 2026-11-06
 

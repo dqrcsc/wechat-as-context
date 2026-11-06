@@ -1,6 +1,6 @@
 # <img src="./docs/assets/icon-qingjian-chisu.svg" width="36" height="36" align="top" alt="QingJian ChiSu Icon" /> 青简 · 尺素 (`WeChat as Context` / `wechat-as-context`) — 个人微信 ⇄ 本地知识库与桌面 AI 智能体双向活上下文网关
 
-[![Version: v0.4.9](https://img.shields.io/badge/Version-v0.4.9-10b981)](./CHANGELOG.zh.md)
+[![Version: v0.4.10](https://img.shields.io/badge/Version-v0.4.10-10b981)](./CHANGELOG.zh.md)
 [![Runtime: Bun >= 1.1](https://img.shields.io/badge/Runtime-Bun_%E2%89%A51.1-f472b6?logo=bun&logoColor=white)](https://bun.sh)
 [![Pure BYOK & BYOCLI](https://img.shields.io/badge/Pure_BYOK_%26_BYOCLI-Zero_Model_Lock--in-4f46e5)](./src/config.ts)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -16,6 +16,8 @@
 - 💻 **在电脑桌面端**：在 Codex、AntiGravity、Claude Code、OpenCode 中一句指令即可接力深读刚转发的文章，或通过 `bun run push` 将桌面端产出的报告、图表、文档主动推送到手机微信，且自动注入微信对话上下文，手机端直接回复即可无缝追问。
 
 ---
+
+**v0.4.10 媒体兜底与链接安全**：ffmpeg/local-asr 显式路径无效时只跳过对应引擎、继续云端转写，并以脱敏的 `asr_tool_*` 原因记录；`doctor` 新增三个媒体工具的只读状态。外链仅保留 http/https/mailto，阻断编码混淆的 `javascript:` 等协议；YouTube 占位标题补跑不再覆盖已有逐字稿，模型降级时也保留已恢复的标题。详见 [更新日志](./CHANGELOG.zh.md) 与 [媒体工具与渠道恢复说明](./docs/media-runtime-and-recovery.md)。
 
 **v0.4.9 媒体工具运行修复**：恢复 yt-dlp 脱敏环境中的代理配置，统一三个媒体工具的路径展开和可执行检查，细化失败诊断；常用重分析示例保留人工笔记保护。新增离线 CA 加载测试，明确 certifi 与系统 CA 的使用边界。依赖、恢复矩阵和验收见 [媒体工具与渠道恢复说明](./docs/media-runtime-and-recovery.md)。仅更新代码或技能不会升级本机服务，也不会重试历史失败。
 
