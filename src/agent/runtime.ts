@@ -8,7 +8,7 @@ import { AppConfig, notifyExternalWebhookIfConfigured } from "../config.ts";
 import { ArticleRecord, ContextDatabase, ConversationTurnRecord, TriageLevel } from "../db.ts";
 import { ClawBotMessage, unpackClawBotMessage, UnpackedClawBotMessage } from "../clawbot/client.ts";
 import { downloadAndDecryptCdnMedia } from "../clawbot/media.ts";
-import { transcribeAudioFromMedia } from "../extractor/asr.ts";
+import { asrFailureReasons, transcribeAudioFromMedia } from "../extractor/asr.ts";
 import {
   getPlatformDisplayLabel,
   sanitizeSharedLinkMessage,
@@ -841,6 +841,7 @@ ${vaultCtx.nowSummary}`,
             mediaPath: videoPath, config: this.config, hintTitle: ctx.unpacked.userText,
           });
           const transcript = asrRes.transcript.trim();
+          for (const issue of asrRes.toolIssues ?? []) videoReasons.push(`video_${index}:asr_tool_${issue}`);
           if (transcript) {
             processedVideos.push(index);
             videoEngines.add(asrRes.engineUsed);
@@ -848,8 +849,10 @@ ${vaultCtx.nowSummary}`,
             videoSourceSnippets.push(`${heading}\n${renderAsrTranscript(transcript)}`);
             modelVideoSnippets.push(`${heading}\n自动转写未经核对，仅代表口播，不包括全部画面。\n${normalizeTranscriptPunctuation(transcript)}`);
           } else videoReasons.push(`video_${index}:asr_empty`);
-        } catch {
-          videoReasons.push(`video_${index}:${videoPath ? "asr_failed" : "download_or_decrypt_failed"}`);
+        } catch (error) {
+          if (videoPath) {
+            for (const reason of asrFailureReasons(error)) videoReasons.push(`video_${index}:${reason}`);
+          } else videoReasons.push(`video_${index}:download_or_decrypt_failed`);
         } finally {
           if (videoPath) {
             try { if (existsSync(videoPath)) unlinkSync(videoPath); } catch {}

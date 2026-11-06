@@ -4,7 +4,9 @@
 
 ## 工具路径与网络配置
 
-`YT_DLP_BIN`、`FFMPEG_BIN`、`LOCAL_ASR_BIN` 是启动进程的环境变量。支持绝对路径、`~/` 和相对**项目根目录**的路径（不依赖调用 CLI 的当前目录）。显式路径需为普通可执行文件，缺失、目录或无执行权限均报错，不静默选用其他版本。支持指向可执行文件的符号链接；不支持 `~otheruser`。空值视为未指定。
+`YT_DLP_BIN`、`FFMPEG_BIN`、`LOCAL_ASR_BIN` 是启动进程的环境变量。支持绝对路径、`~/` 和相对**项目根目录**的路径（不依赖调用 CLI 的当前目录）。显式路径需为普通可执行文件，缺失、目录或无执行权限均报错，不静默选用其他版本。支持指向可执行文件的符号链接；不支持 `~otheruser`。空值视为未指定。只写命令名（如 `YT_DLP_BIN=yt-dlp`）不会在 PATH 中查找：项目根目录下无此文件时报 `invalid_path`（路径写法问题），而不是 `not_found`。
+
+ffmpeg/local-asr 的显式路径无效时只跳过对应引擎：转写仍继续尝试其余引擎（包括云端多模态音频兜底），并以 `asr_tool_<tool>_<reason>`（如 `asr_tool_local-asr_not_found`，YouTube 兜底链路前缀为 `resolver_`）写入采集原因，不含路径。`bun run src/cli.ts doctor` 会只读地列出三个工具的状态（默认/显式、可用、未安装或显式路径无效），不安装、不执行、不回退。
 
 未指定时三个工具统一依次检查 `~/.local/bin`、`/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin`。不安装依赖，不从任意 PATH 位置猜测下载器版本。修改工具环境后须在用户授权的服务维护中重启；配置工作台的模型热更新不等于这些工具变量热更新。
 
@@ -29,7 +31,8 @@ python3 -m venv /tmp/wxctx-ca-check
 | reason | 观察到的失败 | 处理方向 |
 | --- | --- | --- |
 | resolver_not_installed | 默认未找到工具或执行时 ENOENT | 核对安装/解释器，不自动安装 |
-| resolver_tool_not_found / resolver_tool_not_executable / resolver_tool_invalid_path | 显式路径无效 | 核对配置位置、权限、路径写法 |
+| resolver_tool_not_found / resolver_tool_not_executable / resolver_tool_invalid_path | 显式路径无效（只写命令名归为 invalid_path） | 核对配置位置、权限、路径写法；可先运行 doctor |
+| asr_tool_* / resolver_asr_tool_* | ffmpeg/local-asr 显式路径无效，该引擎被跳过 | 修正路径；其余引擎（含云端兜底）已照常尝试 |
 | resolver_not_executable | 启动时权限/可执行格式拒绝 | 核对文件和执行环境 |
 | resolver_timeout / resolver_output_limit | 期限/输出上限触发 | 检查耗时及异常输出，不解除现有界限 |
 | resolver_certificate_error / resolver_proxy_error / resolver_network_error | stderr 含相应错误特征 | 核对 CA、代理或连接，不能仅凭分类断定全部根因 |

@@ -1,5 +1,16 @@
 # 更新日志
 
+## 未发布
+
+### 修复
+
+- ffmpeg/local-asr 显式路径无效时不再中断整个转写：只跳过对应引擎并继续云端兜底，失败原因以 `asr_tool_*` / `resolver_asr_tool_*` 脱敏记录；工具解析提前到下载前。
+- 只写命令名（如 `YT_DLP_BIN=yt-dlp`）时报 `invalid_path` 而非 `not_found`；`doctor` 新增三个媒体工具的只读状态检查。
+- 外链转 Markdown 时先按 URL 解析规则规范化再校验协议，仅保留 http/https/mailto，阻断 `jav&#x09;ascript:`、`data:`、`vbscript:` 等绕过；链接目标中的括号与空白会被编码。
+- YouTube 占位标题（`YouTube Video (id)`）复跑：仅匹配 frontmatter 标题；不带 `--force` 时只刷新 metadata-only 原文，刷新失败或仍为占位时复用原文件，不覆盖已有逐字稿；模型仍降级时也保存已恢复的标题与原文元数据。
+- 音频格式排序修复 `Infinity - Infinity = NaN` 导致的不稳定顺序；yt-dlp stderr 中的具体 HTTP 状态优先于泛化的 timeout 字样。
+- 定时任务队列标题额外转义 Obsidian 的 `#`、`==`、`~~`、`$`、`^`、`%%` 语法。
+
 ## 0.4.9 - 2026-11-06
 
 ### 媒体工具配置与恢复安全

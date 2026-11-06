@@ -8,6 +8,7 @@ import { auditSkillsDirectoryHealth, expandHomePath, loadConfig } from "./config
 import { ContextDatabase, TriageLevel } from "./db.ts";
 import { WeChatContextPipeline, normalizeWeChatUrl } from "./pipeline.ts";
 import { isWeChatArticleUrl, normalizeExternalWebUrl } from "./extractor/web.ts";
+import { describeMediaTools, type MediaToolStatus } from "./extractor/tool_binary.ts";
 import {
   createIdeaSeedInVault,
   ensureStarterVaultInitialized,
@@ -414,6 +415,14 @@ async function main() {
             : `out_of_sync (run \`bun run src/cli.ts install-skill\` to sync ${installedSkillPath})`;
       }
 
+      const mediaTools = describeMediaTools(process.env, config.projectRoot);
+      const describeTool = (t: MediaToolStatus) =>
+        t.status === "ok"
+          ? `ok (${t.source === "override" ? `${t.env}` : "default"}: ${t.path})`
+          : t.status === "not_installed"
+            ? "not installed (optional; captions/cloud ASR still work)"
+            : `invalid ${t.env} (${t.reason}); this engine is skipped, no fallback to other copies`;
+
       const report = {
         ok: Boolean(clawbotCreds),
         scope: "local_configuration_only",
@@ -456,6 +465,7 @@ async function main() {
               : `ok (${analysisContext?.entries.length ?? 0} active entries${
                   analysisContext?.warnings.length ? `; warnings: ${analysisContext.warnings.join("; ")}` : ""
                 })`,
+          mediaTools: Object.fromEntries(mediaTools.map((t) => [t.tool, describeTool(t)])),
         },
       };
 
@@ -467,6 +477,7 @@ async function main() {
         console.log(`- 微信文章落盘: ${report.wechatArticlesDir}`);
         console.log(`- LLM 初筛引擎: ${report.checks.llmApiKey}`);
         console.log(`- 微信ClawBot [AI] (置顶长轮询通道): ${report.checks.clawbot}`);
+        for (const t of mediaTools) console.log(`- 媒体工具 ${t.tool}: ${describeTool(t)}`);
         console.log(JSON.stringify({ lastPoll: report.lastPoll, delivery: report.delivery, deliveryErrors: report.deliveryErrors, deliveryDiagnostics: report.deliveryDiagnostics, inboxErrors: report.inboxErrors }, null, 2));
       }
       break;

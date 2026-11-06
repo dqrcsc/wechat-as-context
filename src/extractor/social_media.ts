@@ -18,7 +18,7 @@ import type { AppConfig } from "../config.ts";
 import { fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
 import {
   extractStructuredTextFromImageCards,
-  MediaDownloadError,
+  asrFailureReasons,
   transcribeAudioFromMedia,
 } from "./asr.ts";
 import {
@@ -333,10 +333,11 @@ export async function extractXiaohongshuNote(
         hintTitle: title,
       });
       transcript = asrRes.transcript.trim();
+      for (const issue of asrRes.toolIssues ?? []) reasons.push(`asr_tool_${issue}`);
       if (transcript) engineUsed = asrRes.engineUsed;
       else reasons.push("asr_empty");
     } catch (err) {
-      reasons.push(err instanceof MediaDownloadError ? `audio_${err.reason}` : "asr_failed");
+      reasons.push(...asrFailureReasons(err));
       console.warn(`[XHSExtractor] ${reasons.at(-1)}`);
     }
 
@@ -679,10 +680,11 @@ export async function extractDouyinWork(
         hintTitle: title,
       });
       transcript = asrRes.transcript.trim();
+      for (const issue of asrRes.toolIssues ?? []) reasons.push(`asr_tool_${issue}`);
       if (transcript) engineUsed = asrRes.engineUsed;
       else reasons.push("asr_empty");
     } catch (err) {
-      reasons.push(err instanceof MediaDownloadError ? `audio_${err.reason}` : "asr_failed");
+      reasons.push(...asrFailureReasons(err));
       console.warn(`[DouyinExtractor] ${reasons.at(-1)}`);
     }
   }

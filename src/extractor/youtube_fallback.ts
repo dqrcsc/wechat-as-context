@@ -40,6 +40,18 @@ class ResolverFailure extends Error {
   constructor(public reason: string, public exitCode?: number) { super(reason); }
 }
 
+/**
+ * Ascending by size with unknown/invalid sizes last. Avoids `Infinity - Infinity = NaN`,
+ * which makes Array#sort order engine-dependent when several sizes are missing.
+ */
+export function compareKnownSizeFirst(a: unknown, b: unknown): number {
+  const sa = Number(a), sb = Number(b);
+  const ka = Number.isFinite(sa) && sa > 0, kb = Number.isFinite(sb) && sb > 0;
+  if (ka && kb) return sa - sb;
+  if (ka !== kb) return ka ? -1 : 1;
+  return 0;
+}
+
 function subprocessFailure(error: any, stderr: string): ResolverFailure {
   const exitCode = Number.isSafeInteger(error?.code) ? error.code : undefined;
   // Match bounded stderr locally; only fixed categories and numeric exit status escape.
@@ -50,8 +62,9 @@ function subprocessFailure(error: any, stderr: string): ResolverFailure {
     : ['EACCES', 'EPERM', 'ENOEXEC'].includes(error?.code) ? 'resolver_not_executable'
     : /CERTIFICATE_VERIFY_FAILED|certificate verify failed|unable to get local issuer certificate/i.test(diagnostic) ? 'resolver_certificate_error'
     : /ProxyError|Unable to connect to proxy|Cannot connect to proxy|proxy connection failed/i.test(diagnostic) ? 'resolver_proxy_error'
-    : /timed out|timeout/i.test(diagnostic) ? 'resolver_timeout'
+    // A concrete HTTP status is more specific than incidental "timeout" wording elsewhere in stderr.
     : /HTTP Error (\d{3})\b/i.test(diagnostic) ? `resolver_http_${diagnostic.match(/HTTP Error (\d{3})\b/i)![1]}`
+    : /timed out|timeout/i.test(diagnostic) ? 'resolver_timeout'
     : /Connection refused|Network is unreachable|Name or service not known|Temporary failure in name resolution|nodename nor servname|Connection reset/i.test(diagnostic) ? 'resolver_network_error'
     : 'resolver_failed';
   return new ResolverFailure(reason, exitCode);
@@ -81,7 +94,7 @@ export async function resolveYouTubeFallbackAudio(videoId: string): Promise<{ ur
     if (info.id !== videoId) return { urls: [], reason: "resolver_identity_mismatch" };
     const formats = (Array.isArray(info.formats) ? info.formats : []).filter((format: any) =>
       format.protocol === "https" && format.vcodec === "none" && format.acodec && format.acodec !== "none" && typeof format.url === "string")
-      .sort((a: any, b: any) => (Number(a.filesize) || Infinity) - (Number(b.filesize) || Infinity))
+      .sort((a: any, b: any) => compareKnownSizeFirst(a.filesize, b.filesize))
       .filter((format: any) => {
         try { const url = assertPublicUrl(format.url); return url.protocol === "https:" && url.hostname.endsWith(".googlevideo.com"); }
         catch { return false; }

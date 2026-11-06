@@ -264,7 +264,7 @@ export function parseGeneralHtmlToArticle(
     extractRegion(cleanedHtml, "body") ||
     cleanedHtml;
 
-  const { markdown, imageUrls } = htmlToCleanMarkdownWithImages(mainRegion);
+  const { markdown, imageUrls } = htmlToCleanMarkdownWithImages(mainRegion, url);
   if (!markdown || markdown.trim().length < 60) return null;
 
   return {

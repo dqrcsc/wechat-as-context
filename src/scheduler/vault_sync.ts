@@ -7,6 +7,15 @@ import { describeCronExpression, formatZonedDateTime } from "./cron.ts";
 export const SCHEDULER_BLOCK_BEGIN = "<!-- BEGIN_WECHAT_SCHEDULER -->";
 export const SCHEDULER_BLOCK_END = "<!-- END_WECHAT_SCHEDULER -->";
 
+function displayTaskTitle(title: string): string {
+  const chars = Array.from(title.replace(/\s+/g, " ").trim());
+  const short = chars.length > 80 ? chars.slice(0, 77).join("") + "..." : chars.join("");
+  // Escape Markdown plus Obsidian-specific syntax: #tag, ==highlight==, ~~strike~~,
+  // $math$, ^block-ref and %%comment%%, so task titles stay inert plain text.
+  return short.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/[\\`*_\[\]|#~=$^%]/g, "\\$&");
+}
+
 function isInsideRoot(rootDir: string, candidatePath: string): boolean {
   const rel = relative(resolve(rootDir), resolve(candidatePath));
   return Boolean(rel && !rel.startsWith("..") && !rel.startsWith("/"));
@@ -50,7 +59,7 @@ export function renderSchedulerManagedBlock(
         ? ` · 关联文章 #${item.related_article_id}`
         : "";
       lines.push(
-        `- [ ] **#${item.id} ${item.title}** · ⏰ ${dueStr}${fallbackTag}${articleTag}`
+        `- [ ] **#${item.id} ${displayTaskTitle(item.title)}** · ⏰ ${dueStr}${fallbackTag}${articleTag}`
       );
     }
   }
@@ -68,7 +77,7 @@ export function renderSchedulerManagedBlock(
         : "已暂停";
       const statusBadge = item.status === "paused" ? " [已暂停]" : "";
       lines.push(
-        `- 🔄 **#${item.id} ${item.title}**${statusBadge} · \`${item.cron_expr}\` (${cronDesc}) · 下次: ${nextStr}`
+        `- 🔄 **#${item.id} ${displayTaskTitle(item.title)}**${statusBadge} · \`${item.cron_expr}\` (${cronDesc}) · 下次: ${nextStr}`
       );
     }
   }
@@ -83,7 +92,7 @@ export function renderSchedulerManagedBlock(
       const doneStr = Number.isFinite(doneMs)
         ? formatZonedDateTime(doneMs, item.timezone || timezone)
         : doneIso.slice(0, 16).replace("T", " ");
-      lines.push(`- [x] **#${item.id} ${item.title}** · 完成于 ${doneStr}`);
+      lines.push(`- [x] **#${item.id} ${displayTaskTitle(item.title)}** · 完成于 ${doneStr}`);
     }
   }
 

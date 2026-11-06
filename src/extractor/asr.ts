@@ -18,7 +18,7 @@ import { basename, extname, join } from "node:path";
 import type { AppConfig } from "../config.ts";
 import { fetchWithTransientRetry, resolveModelEndpoint } from "../agent/llm.ts";
 import { fetchPublicResource } from "../public_url.ts";
-import { findMediaToolBinary } from "./tool_binary.ts";
+import { findMediaToolBinary, MediaToolError } from "./tool_binary.ts";
 
 export interface AsrTranscriptionRequest {
   mediaUrl?: string;
@@ -33,6 +33,30 @@ export interface AsrTranscriptionResult {
   transcript: string;
   engineUsed: string;
   durationSeconds?: number;
+  /** Sanitized local tool configuration problems skipped on the way (e.g. `ffmpeg_not_found`). */
+  toolIssues?: string[];
+}
+
+/** Every engine failed; carries sanitized tool configuration issues for diagnostics. */
+export class AsrUnavailableError extends Error {
+  constructor(public toolIssues: string[] = []) {
+    super(
+      `Audio transcription unavailable (neither local-asr nor a multimodal audio API succeeded)${
+        toolIssues.length ? `; tool issues: ${toolIssues.join(", ")}` : ""
+      }`
+    );
+  }
+}
+
+/**
+ * Map a transcription failure to sanitized acquisition reasons. Download failures keep
+ * their specific reason; invalid explicit tool overrides are surfaced as
+ * `<prefix>asr_tool_<tool>_<reason>` next to the generic `<prefix>asr_failed`.
+ */
+export function asrFailureReasons(error: unknown, prefix = ""): string[] {
+  if (error instanceof MediaDownloadError) return [`${prefix}audio_${error.reason}`];
+  const issues = error instanceof AsrUnavailableError ? error.toolIssues : [];
+  return [`${prefix}asr_failed`, ...issues.map((issue) => `${prefix}asr_tool_${issue}`)];
 }
 
 export type AsrTestRunner = (
@@ -48,14 +72,34 @@ export function setAsrTestRunner(runner: AsrTestRunner | null): void {
   customAsrTestRunner = runner;
 }
 
+/**
+ * An invalid explicit override for one engine must not block the remaining engines
+ * (e.g. a wrong LOCAL_ASR_BIN must still allow the cloud fallback). The sanitized
+ * MediaToolError message (`<tool>_<reason>`, never a path) is collected instead.
+ */
+function findOptionalTool(find: () => string | null, issues: string[]): string | null {
+  try {
+    return find();
+  } catch (error) {
+    if (!(error instanceof MediaToolError)) throw error;
+    issues.push(error.message);
+    console.warn(`[ASR] ${error.message}: explicit tool override is invalid; skipping this engine`);
+    return null;
+  }
+}
+
+// In isolated tests an explicit override is still validated (so configuration errors are
+// observable), but a resolved path is never returned: tests cannot execute host binaries.
 function findFfmpegBinary(): string | null {
-  if (process.env.WXCTX_TEST_ROOT) return null;
-  return findMediaToolBinary('ffmpeg', process.env.FFMPEG_BIN);
+  if (process.env.WXCTX_TEST_ROOT && !process.env.FFMPEG_BIN) return null;
+  const path = findMediaToolBinary('ffmpeg', process.env.FFMPEG_BIN);
+  return process.env.WXCTX_TEST_ROOT ? null : path;
 }
 
 function findLocalAsrBinary(): string | null {
-  if (process.env.WXCTX_TEST_ROOT) return null;
-  return findMediaToolBinary('local-asr', process.env.LOCAL_ASR_BIN);
+  if (process.env.WXCTX_TEST_ROOT && !process.env.LOCAL_ASR_BIN) return null;
+  const path = findMediaToolBinary('local-asr', process.env.LOCAL_ASR_BIN);
+  return process.env.WXCTX_TEST_ROOT ? null : path;
 }
 
 function cleanupTempDirSafe(dirPath: string): void {
@@ -135,6 +179,14 @@ export async function transcribeAudioFromMedia(
     return customAsrTestRunner(req);
   }
 
+  // Resolve local tools before downloading so configuration problems are known up front;
+  // an invalid override only disables that engine and is reported via toolIssues.
+  const toolIssues: string[] = [];
+  const ffmpegBin = findOptionalTool(findFfmpegBinary, toolIssues);
+  const localAsrBin = findOptionalTool(findLocalAsrBinary, toolIssues);
+  const withIssues = (result: AsrTranscriptionResult): AsrTranscriptionResult =>
+    toolIssues.length ? { ...result, toolIssues: [...toolIssues] } : result;
+
   const baseTmpRoot = req.config?.dataDir
     ? join(req.config.dataDir, "tmp_asr")
     : join(tmpdir(), "wxctx_asr");
@@ -168,7 +220,6 @@ export async function transcribeAudioFromMedia(
     }
 
     // Step 1: Extract 16kHz mono audio track via ffmpeg if available
-    const ffmpegBin = findFfmpegBinary();
     let audioPathForAsr = localMediaPath;
     let durationSeconds: number | undefined;
 
@@ -213,7 +264,6 @@ export async function transcribeAudioFromMedia(
     }
 
     // Step 2: Engine 1 -> Local offline `local-asr` (FunASR + SenseVoiceSmall)
-    const localAsrBin = findLocalAsrBinary();
     if (localAsrBin) {
       const asrRes = spawnSync(
         localAsrBin,
@@ -243,22 +293,22 @@ export async function transcribeAudioFromMedia(
             };
             const text = (parsed.text || parsed.raw_text || "").trim();
             if (text.length > 0) {
-              return {
+              return withIssues({
                 transcript: text,
                 engineUsed: "local_asr_sensevoice",
                 durationSeconds,
-              };
+              });
             }
           } catch {}
         }
         if (existsSync(txtPath)) {
           const text = readFileSync(txtPath, "utf-8").trim();
           if (text.length > 0) {
-            return {
+            return withIssues({
               transcript: text,
               engineUsed: "local_asr_sensevoice",
               durationSeconds,
-            };
+            });
           }
         }
       }
@@ -274,17 +324,15 @@ export async function transcribeAudioFromMedia(
         req.hintTitle
       );
       if (cloudRes) {
-        return {
+        return withIssues({
           transcript: cloudRes.transcript,
           engineUsed: cloudRes.engineUsed,
           durationSeconds,
-        };
+        });
       }
     }
 
-    throw new Error(
-      "Audio transcription unavailable (neither local-asr nor a multimodal audio API succeeded)"
-    );
+    throw new AsrUnavailableError([...toolIssues]);
   } finally {
     cleanupTempDirSafe(workDir);
   }

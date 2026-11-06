@@ -51,6 +51,29 @@ for(const [mode,reason] of [['audio403','audio_http_403'],['caption403','caption
 test('YouTube acquired captions are not marked as metadata-only',async()=>{
  youtubeMock('caption');const r=await extractYouTubeVideo('https://www.youtube.com/watch?v=abcdefghijk');expect(r.extractionQuality?.status).toBe('complete');expect(r.markdownBody).toContain('Actual transcript.');
 });
+test('YouTube LOGIN_REQUIRED extracts ytInitialData metadata and rejects empty login shells',async()=>{
+ const initialData={
+  currentVideoEndpoint:{watchEndpoint:{videoId:'j2VzCwJ7of8'}},
+  contents:{twoColumnWatchNextResults:{results:{results:{contents:[
+   {videoPrimaryInfoRenderer:{title:{runs:[{text:'易论AI访谈杨攀 宋勰睿'}]},dateText:{simpleText:'2026年10月30日'}}},
+   {videoSecondaryInfoRenderer:{owner:{videoOwnerRenderer:{title:{runs:[{text:'易论AI'}]}}}}}
+  ]}}}},
+  engagementPanels:[{engagementPanelSectionListRenderer:{panelIdentifier:'engagement-panel-structured-description',content:{structuredDescriptionContentRenderer:{items:[{expandableVideoDescriptionBodyRenderer:{attributedDescriptionBodyText:{content:'Personal Agent 深度访谈简介与7个核心问题。'}}}]}}}}]
+ };
+ globalThis.fetch=(async(url:any)=>{
+  if(String(url).includes('youtube.com/watch'))return new Response(`<script>var ytInitialPlayerResponse = {"playabilityStatus":{"status":"LOGIN_REQUIRED","reason":"请登录，以便我们确认你不是聊天机器人"}}; var ytInitialData = ${JSON.stringify(initialData)};</script>`);
+  return new Response('denied',{status:403});
+ }) as unknown as typeof fetch;
+ const r=await extractYouTubeVideo('https://youtu.be/j2VzCwJ7of8?si=fixture','YouTube Video (j2VzCwJ7of8)','YouTube Channel','',{config:config()});
+ expect(r.title).toBe('易论AI访谈杨攀 宋勰睿');expect(r.author).toBe('易论AI');expect(r.publishDate).toBe('2026-10-30');
+ expect(r.markdownBody).toContain('Personal Agent 深度访谈简介与7个核心问题。');expect(r.extractionQuality?.reasons).toContain('login_required');
+ const mismatched={...initialData,currentVideoEndpoint:{watchEndpoint:{videoId:'otherVideo1'}}};
+ globalThis.fetch=(async(url:any)=>{
+  if(String(url).includes('youtube.com/watch'))return new Response(`<script>var ytInitialPlayerResponse = {"playabilityStatus":{"status":"LOGIN_REQUIRED"}}; var ytInitialData = ${JSON.stringify(mismatched)};</script>`);
+  return new Response('denied',{status:403});
+ }) as unknown as typeof fetch;
+ await expect(extractYouTubeVideo('https://youtu.be/j2VzCwJ7of8','YouTube Video (j2VzCwJ7of8)','YouTube Channel','',{config:config()})).rejects.toThrow('Failed to extract YouTube video content');
+});
 
 import { extractGeneralWebArticle } from '../src/extractor/web.ts';
 for(const [metadata,expected] of [

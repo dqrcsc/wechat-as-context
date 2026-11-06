@@ -41,6 +41,7 @@ for (const [error, stderr, reason] of [
   [{ code: 1 }, 'ProxyError: cannot connect user:pass@proxy.test', 'resolver_proxy_error'],
   [{ code: 1 }, 'Unable to download: Connection refused private-url', 'resolver_network_error'],
   [{ code: 1 }, 'HTTP Error 403: Forbidden signed-url?token=secret', 'resolver_http_403'],
+  [{ code: 1 }, 'ERROR: HTTP Error 429: Too Many Requests; read timeout hint private-url', 'resolver_http_429'],
   [{ code: 1 }, 'timed out while requesting private-url', 'resolver_timeout'],
   [{ code: 1 }, 'unrecognized private stderr', 'resolver_failed'],
 ] as const) {

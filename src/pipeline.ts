@@ -12,6 +12,7 @@ import {
   normalizeExternalWebUrl,
   saveRawWebArticleToVault,
 } from "./extractor/web.ts";
+import { isPlaceholderYouTubeTitle } from "./extractor/youtube.ts";
 import { analyzeArticleWithVault, isFallbackLightNote } from "./vault/analyzer.ts";
 import { createIdeaSeedInVault, gatherVaultContext, saveCompanionLightNote, isUnmodifiedGeneratedLightNote } from "./vault/context.ts";
 import {
@@ -349,9 +350,27 @@ export class WeChatContextPipeline {
         record.note_md_path && existsSync(record.note_md_path)
           ? readFileSync(record.note_md_path, "utf8")
           : "";
+      const existingSourceContent =
+        record.source_md_path && existsSync(record.source_md_path)
+          ? readFileSync(record.source_md_path, "utf8")
+          : "";
+      // Only the frontmatter title counts; body text quoting a placeholder must not match.
+      const existingSourceFrontmatter =
+        existingSourceContent.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/)?.[1] ?? "";
+      const isPlaceholderVideo =
+        isPlaceholderYouTubeTitle(record.title) ||
+        /^title:\s*["']?YouTube Video \([A-Za-z0-9_-]{6,20}\)["']?\s*$/im.test(
+          existingSourceFrontmatter
+        );
+      const existingSourceIsMetadataOnly =
+        !existingSourceContent ||
+        /transcript_engine:\s*["']?metadata_only["']?/i.test(existingSourceContent) ||
+        readSavedExtractionQuality(existingSourceContent)?.status === "metadata_only" ||
+        existingSourceContent.includes("暂未获取到视频音频流或转写结果");
       const wasFallback =
         !existingNoteContent ||
-        isFallbackLightNote(existingNoteContent);
+        isFallbackLightNote(existingNoteContent) ||
+        isPlaceholderVideo;
 
       if (existingNoteContent && (!wasFallback || !isUnmodifiedGeneratedLightNote(existingNoteContent)) && !options?.force) {
         throw new Error(
@@ -360,51 +379,75 @@ export class WeChatContextPipeline {
       }
 
       const isWeChat = isWeChatArticleUrl(record.url);
-      const existingSourceContent =
-        record.source_md_path && existsSync(record.source_md_path)
-          ? readFileSync(record.source_md_path, "utf8")
-          : "";
-      const shouldReextractSource =
-        Boolean(options?.force) &&
-        (!existingSourceContent ||
-          /transcript_engine:\s*["']?metadata_only["']?/i.test(
-            existingSourceContent
-          ) ||
-          existingSourceContent.includes("暂未获取到视频音频流或转写结果"));
+      // --force re-extracts metadata-only captures and placeholder-titled videos.
+      const forcedReextract =
+        Boolean(options?.force) && (existingSourceIsMetadataOnly || isPlaceholderVideo);
+      // Without --force, a placeholder title only triggers a best-effort refresh of a
+      // metadata-only capture. Captures holding transcripts/body are never replaced, and
+      // the saved source is reused when the refresh fails or is still a placeholder.
+      const tryPlaceholderRepair =
+        !forcedReextract &&
+        isPlaceholderVideo &&
+        existingSourceIsMetadataOnly &&
+        Boolean(existingSourceContent);
 
-      const extracted =
-        existingSourceContent && !shouldReextractSource
-          ? {
-              url: record.url,
-              title: record.title,
-              author: record.author,
-              digest: record.digest,
-              publishDate: savedPublicationDate(existingSourceContent),
-              extractionQuality: readSavedExtractionQuality(existingSourceContent),
-              markdownBody: existingSourceContent.replace(
-                /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
-                ""
-              ),
-              imageUrls: [],
-              extractorUsed: "native_http" as const,
-            }
-          : isWeChat
-            ? await extractWeChatArticle(
-                record.url,
-                record.title,
-                record.author,
-                record.digest
-              )
-            : await extractGeneralWebArticle(
-                record.url,
-                record.title,
-                record.author,
-                record.digest,
-                {
-                  allowJinaFallback: this.config.allowJinaFallback,
-                  config: this.config,
-                }
-              );
+      const savedExtracted = () => ({
+        url: record.url,
+        title: record.title,
+        author: record.author,
+        digest: record.digest,
+        publishDate: savedPublicationDate(existingSourceContent),
+        extractionQuality: readSavedExtractionQuality(existingSourceContent),
+        markdownBody: existingSourceContent.replace(
+          /^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/,
+          ""
+        ),
+        imageUrls: [] as string[],
+        extractorUsed: "native_http" as const,
+      });
+      const extractFresh = () =>
+        isWeChat
+          ? extractWeChatArticle(
+              record.url,
+              record.title,
+              record.author,
+              record.digest
+            )
+          : extractGeneralWebArticle(
+              record.url,
+              record.title,
+              record.author,
+              record.digest,
+              {
+                allowJinaFallback: this.config.allowJinaFallback,
+                config: this.config,
+              }
+            );
+
+      let shouldReextractSource = forcedReextract;
+      let placeholderRepaired = false;
+      let extracted: Awaited<ReturnType<typeof extractFresh>>;
+      if (tryPlaceholderRepair) {
+        try {
+          const fresh = await extractFresh();
+          if (fresh.title && !isPlaceholderYouTubeTitle(fresh.title)) {
+            extracted = fresh;
+            shouldReextractSource = true;
+            placeholderRepaired = true;
+          } else {
+            extracted = savedExtracted();
+          }
+        } catch (err) {
+          console.warn(
+            `[Pipeline] Placeholder video refresh for article #${id} failed; reusing saved source: ${err instanceof Error ? err.message : String(err)}`
+          );
+          extracted = savedExtracted();
+        }
+      } else if (existingSourceContent && !forcedReextract) {
+        extracted = savedExtracted();
+      } else {
+        extracted = await extractFresh();
+      }
 
       const vaultContext = gatherVaultContext(
         this.config.vaultRoot,
@@ -428,10 +471,40 @@ export class WeChatContextPipeline {
         vaultContext,
       });
 
+      const targetExternalDir =
+        extracted.mediaKind === "video"
+          ? this.config.videoDir ||
+            join(this.config.vaultRoot, "01_inputs", "video")
+          : this.config.webArticlesDir ||
+            join(this.config.vaultRoot, "01_inputs", "articles", "web");
+
       const isStillFallback = isFallbackLightNote(analysis.wechat_reply);
       if (isStillFallback && existingNoteContent) {
+        if (!placeholderRepaired) {
+          return {
+            record,
+            upgradedFromFallback: false,
+            isFallback: true,
+          };
+        }
+        // The model is still unavailable, but the recovered video metadata must not be
+        // discarded: persist the refreshed metadata-only capture and record fields only.
+        const repairedSourcePath = await saveRawWebArticleToVault({
+          articlesDir: targetExternalDir,
+          article: extracted,
+          slug: analysis.english_slug,
+          userNotes: record.user_notes,
+          existingPath: record.source_md_path || undefined,
+          overwriteExisting: true,
+        });
+        const repaired = this.db.updateArticle(id, {
+          title: extracted.title || record.title,
+          author: extracted.author || record.author,
+          digest: extracted.digest || record.digest,
+          source_md_path: repairedSourcePath,
+        })!;
         return {
-          record,
+          record: repaired,
           upgradedFromFallback: false,
           isFallback: true,
         };
@@ -441,12 +514,6 @@ export class WeChatContextPipeline {
         throw new Error(`Article #${id} note changed during analysis; refusing to overwrite concurrent edits.`);
       }
 
-      const targetExternalDir =
-        extracted.mediaKind === "video"
-          ? this.config.videoDir ||
-            join(this.config.vaultRoot, "01_inputs", "video")
-          : this.config.webArticlesDir ||
-            join(this.config.vaultRoot, "01_inputs", "articles", "web");
       const sourceMdPath =
         record.source_md_path &&
         existsSync(record.source_md_path) &&

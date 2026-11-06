@@ -1,9 +1,9 @@
 import { validPublicationDate } from "./publication_date.ts";
 import { renderAsrTranscript } from "./transcript_text.ts";
-import { resolveYouTubeFallbackAudio } from "./youtube_fallback.ts";
+import { compareKnownSizeFirst, resolveYouTubeFallbackAudio } from "./youtube_fallback.ts";
 import type { AppConfig } from "../config.ts";
 import { fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
-import { MediaDownloadError, transcribeAudioFromMedia } from "./asr.ts";
+import { asrFailureReasons, transcribeAudioFromMedia } from "./asr.ts";
 import type { ExtractedWeChatArticle } from "./wechat.ts";
 
 const WATCH_PAGE_UA =
@@ -38,6 +38,11 @@ export interface YouTubeChapter {
 /**
  * Extract the 11-character YouTube video ID from any standard YouTube URL.
  */
+/** True for the synthetic title used when no real YouTube title could be resolved. */
+export function isPlaceholderYouTubeTitle(title: string | null | undefined): boolean {
+  return /^YouTube Video \([A-Za-z0-9_-]{6,20}\)$/i.test(String(title ?? "").trim());
+}
+
 export function extractYouTubeVideoId(rawUrl: string): string | null {
   try {
     const u = new URL(rawUrl.trim());
@@ -98,11 +103,12 @@ export async function extractYouTubeVideo(
     console.warn(`[YouTubeExtractor] Watch page fetch warning for ${rawUrl}:`, err);
   }
 
-  // Extract player response from watch HTML or InnerTube API
+  // Extract player response and initial watch data from watch HTML or InnerTube API
   let playerData = extractJsonObjectAfterMarker(
     watchHtml,
     "ytInitialPlayerResponse"
   );
+  const initialMeta = extractYouTubeInitialMetadata(watchHtml, videoId);
   const webCaptionTracks: any[] =
     playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
   const apiKey = watchHtml.match(/"INNERTUBE_API_KEY":\s*"([a-zA-Z0-9_-]+)"/)?.[1];
@@ -177,19 +183,50 @@ export async function extractYouTubeVideo(
     }
   }
 
-  const videoDetails = playerData?.videoDetails ?? {};
-  const title =
+  const videoDetails =
+    playerData?.videoDetails?.videoId &&
+    playerData.videoDetails.videoId !== videoId
+      ? {}
+      : playerData?.videoDetails ?? {};
+  const cleanFallbackTitle =
+    fallbackTitle && !isPlaceholderYouTubeTitle(fallbackTitle)
+      ? fallbackTitle.trim()
+      : "";
+  const cleanFallbackAuthor =
+    fallbackAuthor && fallbackAuthor.trim() !== "YouTube Channel"
+      ? fallbackAuthor.trim()
+      : "";
+
+  let oembedMeta: { title: string; author: string; thumbnailUrl: string } = {
+    title: "",
+    author: "",
+    thumbnailUrl: "",
+  };
+  if (
+    !videoDetails.title &&
+    !initialMeta.title &&
+    !matchMetaTag(watchHtml, "og:title")
+  ) {
+    oembedMeta = await fetchYouTubeOembedMetadata(canonicalUrl);
+  }
+
+  const resolvedTitle =
     videoDetails.title ||
+    initialMeta.title ||
     matchMetaTag(watchHtml, "og:title") ||
-    fallbackTitle ||
-    `YouTube Video (${videoId})`;
+    oembedMeta.title ||
+    cleanFallbackTitle;
+  const title = resolvedTitle || `YouTube Video (${videoId})`;
   const author =
     videoDetails.author ||
+    initialMeta.author ||
     matchMetaTag(watchHtml, "author") ||
-    fallbackAuthor ||
+    oembedMeta.author ||
+    cleanFallbackAuthor ||
     "YouTube Channel";
   const description =
     videoDetails.shortDescription ||
+    initialMeta.description ||
     matchMetaTag(watchHtml, "og:description") ||
     fallbackDigest ||
     "";
@@ -199,11 +236,12 @@ export async function extractYouTubeVideo(
     watchHtml.match(/"publishDate":\s*"(\d{4}-\d{2}-\d{2})/) ||
     watchHtml.match(/itemprop=["']datePublished["']\s+content=["'](\d{4}-\d{2}-\d{2})/);
   const publishDate =
-    validPublicationDate(publishDateMatch?.[1]);
+    validPublicationDate(publishDateMatch?.[1]) || initialMeta.publishDate;
 
   const coverUrl =
     videoDetails.thumbnail?.thumbnails?.slice(-1)?.[0]?.url ||
     matchMetaTag(watchHtml, "og:image") ||
+    oembedMeta.thumbnailUrl ||
     `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 
   const chapters = parseChaptersFromDescription(description);
@@ -222,6 +260,12 @@ export async function extractYouTubeVideo(
   ];
 
   const acquisitionReasons = new Set<string>();
+  if (
+    String(playerData?.playabilityStatus?.status || "").toUpperCase() ===
+    "LOGIN_REQUIRED"
+  ) {
+    acquisitionReasons.add("login_required");
+  }
   let snippets: YouTubeSnippet[] = [];
   let transcriptSourceLabel = "";
 
@@ -283,10 +327,8 @@ export async function extractYouTubeVideo(
           f.mimeType.startsWith("audio/") &&
           typeof f?.url === "string"
       )
-      .sort(
-        (a: any, b: any) =>
-          Number(a?.contentLength || Infinity) -
-          Number(b?.contentLength || Infinity)
+      .sort((a: any, b: any) =>
+        compareKnownSizeFirst(a?.contentLength, b?.contentLength)
       );
     const audioUrls = audioFormats.map((f: any) => String(f.url));
     if (!audioUrls.length) acquisitionReasons.add("audio_stream_not_found");
@@ -301,15 +343,16 @@ export async function extractYouTubeVideo(
           config: options?.config,
           hintTitle: title,
         });
+        for (const issue of asrRes.toolIssues ?? []) acquisitionReasons.add(`asr_tool_${issue}`);
         if (!asrRes.transcript.trim()) acquisitionReasons.add("asr_empty");
         if (asrRes.transcript.trim()) {
           asrTranscript = asrRes.transcript.trim();
           transcriptSourceLabel = `音频自动转写 (${asrRes.engineUsed})`;
         }
       } catch (err) {
-        const reason = err instanceof MediaDownloadError ? `audio_${err.reason}` : "asr_failed";
-        acquisitionReasons.add(reason);
-        console.warn(`[YouTubeExtractor] ${reason}`);
+        const reasons = asrFailureReasons(err);
+        for (const reason of reasons) acquisitionReasons.add(reason);
+        console.warn(`[YouTubeExtractor] ${reasons.join(", ")}`);
       }
     }
   }
@@ -321,11 +364,12 @@ export async function extractYouTubeVideo(
     if (fallback.urls.length) {
       try {
         const result = await transcribeAudioFromMedia({ mediaUrls: fallback.urls, headers: fallback.headers, config: options?.config, hintTitle: title });
+        for (const issue of result.toolIssues ?? []) acquisitionReasons.add(`resolver_asr_tool_${issue}`);
         asrTranscript = result.transcript.trim();
         if (asrTranscript) transcriptSourceLabel = `音频自动转写 (${result.engineUsed}; yt-dlp)`;
         else acquisitionReasons.add("resolver_asr_empty");
       } catch (error) {
-        acquisitionReasons.add(error instanceof MediaDownloadError ? `resolver_audio_${error.reason}` : "resolver_asr_failed");
+        for (const reason of asrFailureReasons(error, "resolver_")) acquisitionReasons.add(reason);
       }
     }
   }
@@ -335,7 +379,7 @@ export async function extractYouTubeVideo(
       ? formatSnippetsWithChapters(snippets, chapters)
       : asrTranscript ? renderAsrTranscript(asrTranscript) : "";
 
-  if (!formattedTranscript && !description.trim() && !watchHtml.trim()) {
+  if (!formattedTranscript && !description.trim() && !resolvedTitle.trim()) {
     throw new Error(`Failed to extract YouTube video content for ${canonicalUrl}`);
   }
 
@@ -639,4 +683,183 @@ function decodeHtmlEntities(s: string): string {
     .replace(/&#39;/g, "'")
     .replace(/&#x27;/gi, "'")
     .replace(/&nbsp;/g, " ");
+}
+
+function readYouTubeTextNode(node: any): string {
+  if (!node || typeof node !== "object") return "";
+  if (typeof node.content === "string" && node.content.trim()) {
+    return node.content.trim();
+  }
+  if (typeof node.simpleText === "string" && node.simpleText.trim()) {
+    return node.simpleText.trim();
+  }
+  if (Array.isArray(node.runs)) {
+    const joined = node.runs
+      .map((r: any) => (typeof r?.text === "string" ? r.text : ""))
+      .join("")
+      .trim();
+    if (joined) return joined;
+  }
+  return "";
+}
+
+export function parseYouTubeDateText(raw: unknown): string {
+  if (typeof raw !== "string" || !raw.trim()) return "";
+  const direct = validPublicationDate(raw);
+  if (direct) return direct;
+
+  const zhMatch = raw.match(/(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/);
+  if (zhMatch) {
+    return validPublicationDate(
+      `${zhMatch[1]}-${zhMatch[2].padStart(2, "0")}-${zhMatch[3].padStart(2, "0")}`
+    );
+  }
+
+  const months = [
+    "jan",
+    "feb",
+    "mar",
+    "apr",
+    "may",
+    "jun",
+    "jul",
+    "aug",
+    "sep",
+    "oct",
+    "nov",
+    "dec",
+  ];
+  const enMdy = raw.match(/\b([A-Za-z]{3,9})\s+(\d{1,2}),\s*(\d{4})\b/);
+  if (enMdy) {
+    const mIdx = months.indexOf(enMdy[1].slice(0, 3).toLowerCase()) + 1;
+    if (mIdx > 0) {
+      return validPublicationDate(
+        `${enMdy[3]}-${String(mIdx).padStart(2, "0")}-${enMdy[2].padStart(2, "0")}`
+      );
+    }
+  }
+
+  const enDmy = raw.match(/\b(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{4})\b/);
+  if (enDmy) {
+    const mIdx = months.indexOf(enDmy[2].slice(0, 3).toLowerCase()) + 1;
+    if (mIdx > 0) {
+      return validPublicationDate(
+        `${enDmy[3]}-${String(mIdx).padStart(2, "0")}-${enDmy[1].padStart(2, "0")}`
+      );
+    }
+  }
+
+  return "";
+}
+
+export function extractYouTubeInitialMetadata(
+  watchHtml: string,
+  videoId: string
+): {
+  title: string;
+  author: string;
+  description: string;
+  publishDate: string;
+} {
+  const empty = { title: "", author: "", description: "", publishDate: "" };
+  if (!watchHtml) return empty;
+  const initialData = extractJsonObjectAfterMarker(watchHtml, "ytInitialData");
+  if (!initialData || typeof initialData !== "object") return empty;
+
+  const declaredVideoId =
+    initialData?.currentVideoEndpoint?.watchEndpoint?.videoId;
+  if (declaredVideoId && declaredVideoId !== videoId) {
+    return empty;
+  }
+
+  const contents: any[] =
+    initialData?.contents?.twoColumnWatchNextResults?.results?.results
+      ?.contents ?? [];
+  const primary = contents.find((c) => c?.videoPrimaryInfoRenderer)
+    ?.videoPrimaryInfoRenderer;
+  const secondary = contents.find((c) => c?.videoSecondaryInfoRenderer)
+    ?.videoSecondaryInfoRenderer;
+
+  const panels: any[] = Array.isArray(initialData?.engagementPanels)
+    ? initialData.engagementPanels
+    : [];
+  const descPanel = panels.find(
+    (p) =>
+      (p?.engagementPanelSectionListRenderer?.panelIdentifier ||
+        p?.engagementPanelSectionListRenderer?.targetId) ===
+      "engagement-panel-structured-description"
+  )?.engagementPanelSectionListRenderer;
+  const descItems: any[] =
+    descPanel?.content?.structuredDescriptionContentRenderer?.items ?? [];
+  const titleHeader = descItems.find((i) => i?.videoTitleHeaderViewModel)
+    ?.videoTitleHeaderViewModel;
+  const descHeader = descItems.find((i) => i?.videoDescriptionHeaderRenderer)
+    ?.videoDescriptionHeaderRenderer;
+  const descBody = descItems.find(
+    (i) => i?.expandableVideoDescriptionBodyRenderer
+  )?.expandableVideoDescriptionBodyRenderer;
+  const infocards = descItems.find(
+    (i) => i?.videoDescriptionInfocardsSectionRenderer
+  )?.videoDescriptionInfocardsSectionRenderer;
+  const overlayDetails =
+    initialData?.playerOverlays?.playerOverlayRenderer?.videoDetails
+      ?.playerOverlayVideoDetailsRenderer;
+
+  const title =
+    readYouTubeTextNode(primary?.title) ||
+    readYouTubeTextNode(titleHeader?.videoTitle) ||
+    readYouTubeTextNode(descHeader?.title) ||
+    readYouTubeTextNode(overlayDetails?.title);
+
+  const author =
+    readYouTubeTextNode(secondary?.owner?.videoOwnerRenderer?.title) ||
+    readYouTubeTextNode(descHeader?.channel) ||
+    readYouTubeTextNode(infocards?.sectionTitle);
+
+  const description =
+    readYouTubeTextNode(secondary?.attributedDescription) ||
+    readYouTubeTextNode(secondary?.description) ||
+    readYouTubeTextNode(descBody?.attributedDescriptionBodyText) ||
+    readYouTubeTextNode(descBody?.descriptionBodyText);
+
+  const publishDate =
+    parseYouTubeDateText(readYouTubeTextNode(primary?.dateText)) ||
+    parseYouTubeDateText(readYouTubeTextNode(descHeader?.publishDate));
+
+  return { title, author, description, publishDate };
+}
+
+async function fetchYouTubeOembedMetadata(canonicalUrl: string): Promise<{
+  title: string;
+  author: string;
+  thumbnailUrl: string;
+}> {
+  try {
+    const resp = await fetchPublicResource(
+      `https://www.youtube.com/oembed?url=${encodeURIComponent(
+        canonicalUrl
+      )}&format=json`,
+      {
+        headers: {
+          "User-Agent": WATCH_PAGE_UA,
+          Accept: "application/json",
+        },
+        signal: AbortSignal.timeout(10_000),
+      }
+    );
+    if (!resp.ok) return { title: "", author: "", thumbnailUrl: "" };
+    const data = (await resp.json()) as any;
+    return {
+      title: typeof data?.title === "string" ? data.title.trim() : "",
+      author:
+        typeof data?.author_name === "string" ? data.author_name.trim() : "",
+      thumbnailUrl:
+        typeof data?.thumbnail_url === "string"
+          ? data.thumbnail_url.trim()
+          : "",
+    };
+  } catch (err) {
+    if (err instanceof UnsafeUrlError) throw err;
+    return { title: "", author: "", thumbnailUrl: "" };
+  }
 }

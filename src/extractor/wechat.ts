@@ -265,7 +265,41 @@ export function htmlToCleanMarkdown(rawHtml: string): string {
   return htmlToCleanMarkdownWithImages(rawHtml).markdown;
 }
 
-export function htmlToCleanMarkdownWithImages(rawHtml: string): {
+const SAFE_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+
+/**
+ * Normalize an anchor href exactly like the WHATWG URL parser would (entity decoding,
+ * stripping tab/newline and leading/trailing C0 controls) BEFORE checking its scheme, so
+ * obfuscated forms such as `jav&#x09;ascript:` cannot slip through. Only http(s)/mailto
+ * links survive; relative links are resolved against `baseUrl` when provided.
+ * Returns null when the link should be dropped (anchor text is kept by the caller).
+ */
+export function toSafeMarkdownHref(rawHref: string, baseUrl?: string): string | null {
+  const normalized = decodeHtmlEntities(rawHref)
+    .replace(/[\t\n\r]/g, "")
+    .replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, "");
+  if (!normalized) return null;
+  let href: string;
+  if (baseUrl) {
+    try {
+      const url = new URL(normalized, baseUrl);
+      if (!SAFE_LINK_PROTOCOLS.has(url.protocol)) return null;
+      href = url.href;
+    } catch {
+      return null;
+    }
+  } else {
+    const scheme = normalized.match(/^([a-z][a-z0-9+.-]*):/i)?.[1];
+    if (scheme && !SAFE_LINK_PROTOCOLS.has(`${scheme.toLowerCase()}:`)) return null;
+    href = normalized;
+  }
+  // Keep the Markdown link destination intact: encode characters that end or split it.
+  return href.replace(/[()<>\s]/g, (c) =>
+    c === "(" ? "%28" : c === ")" ? "%29" : encodeURIComponent(c)
+  );
+}
+
+export function htmlToCleanMarkdownWithImages(rawHtml: string, baseUrl?: string): {
   markdown: string;
   imageUrls: string[];
 } {
@@ -332,8 +366,8 @@ export function htmlToCleanMarkdownWithImages(rawHtml: string): {
     (_m, href, inner) => {
       const text = decodeHtmlEntities(stripHtmlTags(inner)).trim();
       if (!text) return "";
-      if (href.startsWith("javascript:")) return text;
-      return `[${text}](${href})`;
+      const safeHref = toSafeMarkdownHref(href, baseUrl);
+      return safeHref ? `[${text}](${safeHref})` : text;
     }
   );
 
