@@ -1,4 +1,5 @@
 import { AppConfig } from "../config.ts";
+import { fetchWithSystemProxyFallback } from "../system_proxy.ts";
 
 export type ModelTier = "fast" | "deep";
 
@@ -33,6 +34,7 @@ export function isTransientNetworkError(err: unknown): boolean {
       "ECONNRESET",
       "ETIMEDOUT",
       "ECONNREFUSED",
+      "ConnectionRefused",
       "EPIPE",
       "ENOTFOUND",
       "EAI_AGAIN",
@@ -68,7 +70,7 @@ export async function fetchWithTransientRetry(
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      const resp = await fetch(url, initFactory());
+      const resp = await fetchWithSystemProxyFallback(url, initFactory());
       if (
         retryHttpStatuses &&
         attempt < maxAttempts &&

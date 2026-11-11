@@ -2,6 +2,7 @@ import { createHmac } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
+import { fetchWithSystemProxyFallback } from "./system_proxy.ts";
 
 export type LlmProviderId =
   | "gemini"
@@ -931,7 +932,7 @@ export async function notifyExternalWebhookIfConfigured(
   }
 
   try {
-    const res = await fetch(targetUrl, {
+    const res = await fetchWithSystemProxyFallback(targetUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),

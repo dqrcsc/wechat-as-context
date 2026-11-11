@@ -1,5 +1,6 @@
 import { BlockList, isIP } from "node:net";
 import { canRetryWithSystemTls, fetchWithSystemTls } from "./extractor/system_tls.ts";
+import { fetchWithSystemProxyFallback } from "./system_proxy.ts";
 
 const blocked = new BlockList();
 for (const [address, prefix] of [
@@ -32,7 +33,7 @@ export async function fetchPublicResource(raw: string, init: RequestInit = {}): 
   let url = assertPublicUrl(raw);
   for (let redirects = 0; redirects <= 5; redirects++) {
     let response: Response;
-    try { response = await fetch(url.toString(), { ...init, redirect: "manual" }); }
+    try { response = await fetchWithSystemProxyFallback(url.toString(), { ...init, redirect: "manual" }); }
     catch (error) {
       if (!canRetryWithSystemTls(url, init, error)) throw error;
       response = await fetchWithSystemTls(url, init);

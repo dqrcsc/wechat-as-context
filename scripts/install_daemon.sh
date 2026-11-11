@@ -48,6 +48,8 @@ if [[ "$OS_TYPE" == "Darwin" ]]; then
     <string>${HOME}</string>
     <key>PATH</key>
     <string>${HOME}/.local/bin:${HOME}/.bun/bin:/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    <key>BUN_CONFIG_DNS_TIME_TO_LIVE_SECONDS</key>
+    <string>0</string>
   </dict>
   <key>RunAtLoad</key>
   <true/>
@@ -93,6 +95,7 @@ Type=simple
 WorkingDirectory=${PROJECT_DIR}
 Environment="HOME=${HOME}"
 Environment="PATH=${HOME}/.local/bin:${HOME}/.bun/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="BUN_CONFIG_DNS_TIME_TO_LIVE_SECONDS=0"
 ExecStart=${BUN_BIN} run ${PROJECT_DIR}/src/server.ts
 Restart=always
 RestartSec=5

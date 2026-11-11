@@ -18,6 +18,7 @@ import { WeChatContextPipeline } from "./pipeline.ts";
 import { scanLocalAgentClis } from "./agent/subagent_cli.ts";
 import { ensureStarterVaultInitialized } from "./vault/context.ts";
 import { loadAnalysisContext, type AnalysisContextSnapshot } from "./vault/analysis_context.ts";
+import { fetchWithSystemProxyFallback } from "./system_proxy.ts";
 
 export interface VaultSubdirStatus {
   id: string;
@@ -403,7 +404,7 @@ export async function handleTestLlmConnection(
     const timer = setTimeout(() => controller.abort(), 15_000);
 
     try {
-      const res = await fetch(endpoint, {
+      const res = await fetchWithSystemProxyFallback(endpoint, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -526,7 +527,7 @@ export async function handleFetchProviderModels(
       headers.Authorization = `Bearer ${effectiveApiKey}`;
     }
 
-    const res = await fetch(endpoint, {
+    const res = await fetchWithSystemProxyFallback(endpoint, {
       method: "GET",
       headers,
       signal: AbortSignal.timeout(10_000),

@@ -3,6 +3,7 @@ import { DeliveryError, deliveryFingerprint, deliveryRequest, reportDelivery, sa
 import { ContextDatabase } from "../db.ts";
 import { extractUrlsFromMixedText } from "../extractor/sanitizer.ts";
 import { CDN_BASE_URL, CdnMediaRef, prepareMediaForUpload } from "./media.ts";
+import { fetchWithSystemProxyFallback } from "../system_proxy.ts";
 
 const FIXED_BASE_URL = "https://ilinkai.weixin.qq.com";
 const CHANNEL_VERSION = "2.4.10";
@@ -279,7 +280,7 @@ export class WeChatClawBotClient {
     const existing = this.getCredentials();
     const localTokenList = existing?.botToken ? [existing.botToken] : [];
 
-    const resp = await fetch(
+    const resp = await fetchWithSystemProxyFallback(
       `${FIXED_BASE_URL}/ilink/bot/get_bot_qrcode?bot_type=3`,
       {
         method: "POST",
@@ -324,7 +325,7 @@ export class WeChatClawBotClient {
           endpoint += `&verify_code=${encodeURIComponent(pendingVerifyCode)}`;
         }
         const url = new URL(endpoint, base);
-        const resp = await fetch(url.toString(), {
+        const resp = await fetchWithSystemProxyFallback(url.toString(), {
           method: "GET",
           headers: {
             "iLink-App-Id": "bot",
@@ -414,7 +415,7 @@ export class WeChatClawBotClient {
         ? creds.baseUrl
         : `${creds.baseUrl}/`;
       const url = new URL("ilink/bot/getupdates", base);
-      const resp = await fetch(url.toString(), {
+      const resp = await fetchWithSystemProxyFallback(url.toString(), {
         method: "POST",
         headers: buildHeaders(creds.botToken),
         body: JSON.stringify({
@@ -505,7 +506,7 @@ export class WeChatClawBotClient {
           base_info: buildBaseInfo(),
         };
 
-        return fetch(url.toString(), {
+        return fetchWithSystemProxyFallback(url.toString(), {
           method: "POST", headers: buildHeaders(creds.botToken), body: JSON.stringify(payload), signal: AbortSignal.timeout(30_000),
         });
       };
@@ -542,7 +543,7 @@ export class WeChatClawBotClient {
     const base = creds.baseUrl.endsWith("/") ? creds.baseUrl : `${creds.baseUrl}/`;
     const url = new URL("ilink/bot/getconfig", base);
     try {
-      const resp = await fetch(url.toString(), {
+      const resp = await fetchWithSystemProxyFallback(url.toString(), {
         method: "POST",
         headers: buildHeaders(creds.botToken),
         body: JSON.stringify({
@@ -580,7 +581,7 @@ export class WeChatClawBotClient {
     const base = creds.baseUrl.endsWith("/") ? creds.baseUrl : `${creds.baseUrl}/`;
     const url = new URL("ilink/bot/sendtyping", base);
     try {
-      const resp = await fetch(url.toString(), {
+      const resp = await fetchWithSystemProxyFallback(url.toString(), {
         method: "POST",
         headers: buildHeaders(creds.botToken),
         body: JSON.stringify({
@@ -649,7 +650,7 @@ export class WeChatClawBotClient {
 
     // Step 1: Request upload URL from /ilink/bot/getuploadurl
     const getUploadUrlEndpoint = new URL("ilink/bot/getuploadurl", base);
-    const uploadMeta = await deliveryRequest("getuploadurl", () => fetch(getUploadUrlEndpoint.toString(), {
+    const uploadMeta = await deliveryRequest("getuploadurl", () => fetchWithSystemProxyFallback(getUploadUrlEndpoint.toString(), {
       method: "POST",
       headers: buildHeaders(creds.botToken),
       body: JSON.stringify({
@@ -676,7 +677,7 @@ export class WeChatClawBotClient {
       )}&filekey=${encodeURIComponent(prepared.filekey)}`;
 
     // Step 2: Upload AES-128-ECB ciphertext to C2C CDN
-    const cdnResp: Response = await deliveryRequest("cdn_upload", () => fetch(c2cUploadUrl, {
+    const cdnResp: Response = await deliveryRequest("cdn_upload", () => fetchWithSystemProxyFallback(c2cUploadUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/octet-stream",
@@ -719,7 +720,7 @@ export class WeChatClawBotClient {
           };
 
     const sendMediaMsg = async (token?: string) => {
-      return fetch(sendEndpoint.toString(), {
+      return fetchWithSystemProxyFallback(sendEndpoint.toString(), {
         method: "POST",
         headers: buildHeaders(creds.botToken),
         body: JSON.stringify({
