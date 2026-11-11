@@ -1,5 +1,20 @@
 # 更新日志
 
+## 0.4.11 - 2026-11-11
+
+### 守护进程 Fake-IP 缓存加固与 macOS 系统代理 TLS 恢复
+
+- 守护进程安装脚本（`scripts/install_daemon.sh`，含 macOS LaunchAgent 与 Linux `systemd` 服务模板）注入 `BUN_CONFIG_DNS_TIME_TO_LIVE_SECONDS=0`，避免 ClashX Pro / Mihomo / Surge 等增强模式（Fake-IP `198.18.0.0/15`）重启并重建内存映射表后，长驻 Bun 进程继续复用过期解析结果而连错上游主机。
+- 新增 `src/system_proxy.ts`（`fetchWithSystemProxyFallback`）：当直连 `https:` 请求在握手阶段触发 TLS 证书校验错误（如 Fake-IP 错配导致的 `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`、`ERR_TLS_CERT_ALTNAME_INVALID`、`UNKNOWN_CERTIFICATE_VERIFICATION_ERROR`）且未配置显式代理环境变量时，按需读取 macOS `scutil --proxy` 并通过 Bun 原生 `CONNECT host:443` 系统代理隧道重试，**全程保持严格 X.509 证书链与域名校验**（绝不跳过或弱化证书验证）。
+- 严格保证非幂等请求安全：直连切代理仅在未发出任何 HTTP 字节的 TLS 握手证书校验失败时触发；恢复后启用 5 分钟粘性代理窗口避免并发下载（如多图本地化）重复失败握手；若用户退出本地代理软件导致端口拒绝连接（`ConnectionRefused` / `ECONNREFUSED`，0 字节发出），自动清粘性并回退直连，其余中途网络异常绝不在同一次调用内重放，防止 `sendmessage` 等请求重复投递。
+- 自动遵循 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`、回环/私网地址过滤与 `scutil` `ExceptionsList` 规则，并保留无系统代理场景下抖音原有的受限 `system_tls` 回退链路。
+- 统一接入 LLM 请求重试器（`src/agent/llm.ts`）、公网资源抓取与图片本地化（`src/public_url.ts`）、微信 ClawBot iLink 客户端（`src/clawbot/client.ts`）、Web 配置工作台连通性测试/模型拉取（`src/web_config.ts`）与外部 Webhook 通知（`src/config.ts`）。
+
+### 验证与文档
+
+- 新增 11 项系统代理与幂等状态机隔离回归测试（`tests/system_proxy.test.ts`），全量 **549 通过 / 2601 断言**，外部进程沙箱隔离审计 **7 通过 / 40 断言**，TypeScript 检查通过。
+- 同步更新 `README.md` 与 `skills/wechat-as-context/SKILL.md`（及本机全局 Skill）。
+
 ## 0.4.10 - 2026-11-07
 
 ### 媒体工具兜底、链接安全与 YouTube 占位复跑

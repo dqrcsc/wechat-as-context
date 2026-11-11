@@ -150,6 +150,12 @@ bun run {{PROJECT_ROOT}}/src/cli.ts push --article <id> [--with-file] [--formats
 - 旧版仅附件入队而正文状态不明时暂停并要求人工核对，不自动补发。历史失败 outbox 保留；不得把调度恢复作为授权重试历史消息。
 - 具体迁移、超时、日志轮转与测试边界见项目 `docs/review-2026-10-30-fixes.md`。
 
+## v0.4.11 守护进程 Fake-IP 与系统代理 TLS 恢复
+
+- `scripts/install_daemon.sh`（macOS LaunchAgent 与 Linux `systemd` 模板）注入 `BUN_CONFIG_DNS_TIME_TO_LIVE_SECONDS=0`，防止 ClashX Pro / Mihomo 等 Fake-IP（`198.18.0.0/15`）重启后长驻进程复用过期解析记录；升级旧守护配置需在用户授权后重新执行 `bash scripts/install_daemon.sh` 重载生效。
+- `src/system_proxy.ts` 在直连 `https:` 请求发生握手阶段 TLS 证书校验错配且未显式设置代理环境变量时，按需查询 macOS `scutil --proxy` 并经系统代理发起 `CONNECT host:443` 隧道重试，**始终保持完整 X.509 证书链与域名校验**，绝不关闭或弱化证书验证。
+- 粘性代理窗口内若本地代理退出触发 `ConnectionRefused` / `ECONNREFUSED`（0 字节发出）自动清粘性回退直连；中途断连等其他异常不重放非幂等请求，不自动重跑历史降级文章或重试历史失败发送。
+
 ## v0.4.10 媒体兜底与链接安全
 
 - ffmpeg/local-asr 显式路径无效时只跳过对应引擎，转写继续尝试其余引擎（含云端音频兜底）；质量 reasons 记录脱敏的 `asr_tool_<tool>_<reason>`（YouTube 兜底链路为 `resolver_asr_tool_*`），不含路径。只写命令名（如 `YT_DLP_BIN=yt-dlp`）不查 PATH，报 `invalid_path`。排查工具问题先运行 `bun run src/cli.ts doctor --json` 查看 `checks.mediaTools`，它只读，不安装、不执行、不回退。
