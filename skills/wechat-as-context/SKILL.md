@@ -150,6 +150,16 @@ bun run {{PROJECT_ROOT}}/src/cli.ts push --article <id> [--with-file] [--formats
 - 旧版仅附件入队而正文状态不明时暂停并要求人工核对，不自动补发。历史失败 outbox 保留；不得把调度恢复作为授权重试历史消息。
 - 具体迁移、超时、日志轮转与测试边界见项目 `docs/review-2026-10-30-fixes.md`。
 
+## v0.4.12 代理、转写与恢复修复
+
+- 本节须部署修订代码后才生效，更新 Skill 不代表服务已升级。非 GET/HEAD 出站请求禁止自动跟随重定向（默认 error，显式 manual 保留）；不得把重定向后错误解释为原始 POST 从未发送。代理回退仍严格验证证书；不承诺微信端到端严格一次，历史 failed 不重试。
+- 系统代理只采用全局 ExceptionsList，不合并 Scoped/网卡子字典例外。代理诊断不得输出凭据或签名 URL。
+- YouTube 的 Web/Android 播放器数据有明确 videoId 冲突时，在合并前弃用整组元数据、字幕、音频流，记录 web_player_video_id_mismatch/android_player_video_id_mismatch。不要把错源正文标为恢复成功；无 videoId 不等同于已验证身份。
+- 占位原文恢复只读 frontmatter 质量或兼容旧 transcript_engine 字段，正文提到 metadata_only 不授予覆盖权限。覆盖前（包括图片本地化之后）校验原文快照；若被修改、删除或新建，拒绝覆盖。发生冲突时先读当前文件，不自动 --force 重试。
+- 云端 ASR 的 STOP 非空文本可短于 10 字；MAX_TOKENS 标 partial/asr_truncated，缺少 finishReason 标 partial/asr_finish_reason_missing；拒绝或空文本记录 cloud_asr_rejected/cloud_asr_empty。保留部分证据，不写成完整逐字稿。
+- partial 状态贯通 YouTube 原生/yt-dlp、小红书、抖音、微信原生视频。原生视频 partialVideos 是 processedVideos 的子集，表示取得片段但未完整转写；missingVideos 表示完全未取得转写。模型提示、微信回复和归档均需披露缺失，不能用取得文件份数代替完整覆盖。
+- --force 成功恢复真实标题或原文转写后，模型仍降级也保留恢复成果、保持旧伴读；无改善时沿用旧记录。读取/解析与模型分析成功分别核验。完整验收见 docs/review-v0411-fixes.md，不追加私人材料外发许可。
+
 ## v0.4.11 守护进程 Fake-IP 与系统代理 TLS 恢复
 
 - `scripts/install_daemon.sh`（macOS LaunchAgent 与 Linux `systemd` 模板）注入 `BUN_CONFIG_DNS_TIME_TO_LIVE_SECONDS=0`，防止 ClashX Pro / Mihomo 等 Fake-IP（`198.18.0.0/15`）重启后长驻进程复用过期解析记录；升级旧守护配置需在用户授权后重新执行 `bash scripts/install_daemon.sh` 重载生效。
