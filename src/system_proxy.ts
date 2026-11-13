@@ -117,7 +117,7 @@ export function parseScutilProxyOutput(raw: string): MacSystemProxyConfig {
       continue;
     }
 
-    if (/^\s*ExceptionsList\s*:\s*<array>\s*\{\s*$/.test(line)) {
+    if (nestedDepth === 0 && /^\s*ExceptionsList\s*:\s*<array>\s*\{\s*$/.test(line)) {
       inExceptionsList = true;
       continue;
     }
@@ -478,6 +478,7 @@ function callDirectFetch(
  * Security & idempotency invariants:
  * - Full X.509 certificate chain and hostname verification remain strictly enforced.
  * - Only `https:` requests are proxied (`CONNECT host:port` end-to-end TLS).
+ * - Non-GET/HEAD requests never automatically follow redirects.
  * - Direct -> Proxy fallback triggers strictly on pre-HTTP TLS certificate verification errors
  *   (0 HTTP bytes transmitted).
  * - Sticky Proxy -> Direct fallback triggers strictly on local proxy TCP `ECONNREFUSED` /
@@ -488,6 +489,12 @@ export async function fetchWithSystemProxyFallback(
   input: string | URL,
   init?: RequestInit
 ): Promise<Response> {
+  // A redirect can fail after the original POST was accepted. Never follow it
+  // implicitly: only a failure at the original hop can justify transport replay.
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD" && init?.redirect !== "manual") {
+    init = { ...init, redirect: "error" };
+  }
   if (init && typeof init === "object" && "proxy" in init && (init as Record<string, unknown>).proxy) {
     return callDirectFetch(input, init);
   }

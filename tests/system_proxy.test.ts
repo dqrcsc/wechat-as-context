@@ -454,3 +454,77 @@ describe("caller integration (LLM, fetchPublicResource, ClawBot client)", () => 
     db.db.close();
   });
 });
+
+// An accepted POST followed by a redirect failure must not replay the original POST.
+for (const sticky of [false, true]) {
+  test(`sendmessage rejects redirects without replay (sticky=${sticky})`, async () => {
+    setSystemProxyTestDetector(() => activeClashConfig());
+    if (sticky) {
+      let first = true;
+      globalThis.fetch = (async () => {
+        if (first) { first = false; throw Object.assign(new Error("TLS certificate"), { code: "UNKNOWN_CERTIFICATE_VERIFICATION_ERROR" }); }
+        return new Response("ok");
+      }) as unknown as typeof fetch;
+      await fetchWithSystemProxyFallback("https://public.example.test/prime");
+    }
+    const db = new ContextDatabase(":memory:");
+    const client = new WeChatClawBotClient(db);
+    client.saveCredentials({ botToken: "synthetic", baseUrl: "https://ilinkai.weixin.qq.com", botId: "fixture", userId: "fixture", savedAt: new Date().toISOString() });
+    const calls: any[] = [];
+    globalThis.fetch = (async (_url: any, init: any) => {
+      calls.push(init);
+      // Emulate fetch's redirect policy after the first server accepted the POST.
+      if (init.redirect === "error") throw new TypeError("Unexpected redirect");
+      if (calls.length === 1) throw Object.assign(new Error("failure at redirect destination"), {
+        code: sticky ? "ECONNREFUSED" : "UNKNOWN_CERTIFICATE_VERIFICATION_ERROR",
+      });
+      return Response.json({ ret: 0, errcode: 0 });
+    }) as unknown as typeof fetch;
+    try {
+      await expect(client.sendTextMessage("fixture", "synthetic", "stable-id")).rejects.toThrow();
+      expect(calls).toHaveLength(1);
+      expect(calls[0].redirect).toBe("error");
+      expect(calls[0].proxy).toBe(sticky ? "http://127.0.0.1:7890" : undefined);
+    } finally { db.db.close(); }
+  });
+}
+
+test("non-read requests cannot opt into automatic redirects, but manual handling is preserved", async () => {
+  const calls: any[] = [];
+  globalThis.fetch = (async (_url: any, init: any) => { calls.push(init); return new Response(null, {status: 302}); }) as unknown as typeof fetch;
+  for (const method of ["POST", "PUT", "PATCH", "DELETE"]) {
+    await fetchWithSystemProxyFallback("https://public.example.test/write", {method, redirect: "follow"});
+    expect(calls.at(-1).redirect).toBe("error");
+  }
+  const response = await fetchWithSystemProxyFallback("https://public.example.test/write", {method: "POST", redirect: "manual"});
+  expect(calls.at(-1).redirect).toBe("manual");
+  expect(response.status).toBe(302);
+});
+
+test("scoped proxy exceptions cannot disable the global proxy or leak across interfaces", async () => {
+  const parsed = parseScutilProxyOutput(`<dictionary> {
+    Scoped : <dictionary> {
+      en9 : <dictionary> {
+        ExceptionsList : <array> {
+          0 : *
+        }
+        HTTPSEnable : 0
+      }
+      en0 : <dictionary> {
+        ExceptionsList : <array> {
+          0 : *.example.test
+        }
+      }
+    }
+    ExceptionsList : <array> {
+      0 : localhost
+    }
+    HTTPSEnable : 1
+    HTTPSProxy : 127.0.0.1
+    HTTPSPort : 7890
+  }`);
+  expect(parsed.exceptionsList).toEqual(["localhost"]);
+  setSystemProxyTestDetector(() => parsed);
+  expect(await resolveSystemProxyForUrl("https://public.example.test", {})).toBe("http://127.0.0.1:7890");
+  expect(await resolveSystemProxyForUrl("https://localhost", {})).toBeNull();
+});
