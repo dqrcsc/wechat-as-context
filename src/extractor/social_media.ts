@@ -319,6 +319,7 @@ export async function extractXiaohongshuNote(
   if (isVideoNote) {
     let transcript = "";
     let engineUsed = "metadata_only";
+    let asrPartial = false;
     const reasons: string[] = [];
     if (!videoStreamUrl) reasons.push("audio_stream_not_found");
     else try {
@@ -333,6 +334,8 @@ export async function extractXiaohongshuNote(
         hintTitle: title,
       });
       transcript = asrRes.transcript.trim();
+      asrPartial = asrRes.extractionQuality?.status === "partial";
+      reasons.push(...(asrRes.extractionQuality?.reasons ?? []));
       for (const issue of asrRes.toolIssues ?? []) reasons.push(`asr_tool_${issue}`);
       if (transcript) engineUsed = asrRes.engineUsed;
       else reasons.push("asr_empty");
@@ -346,7 +349,7 @@ export async function extractXiaohongshuNote(
     if (coverUrl) sections.push(`![视频封面](${coverUrl})`);
     if (desc.trim()) sections.push(`## 笔记正文与标签\n\n${desc.trim()}`);
     if (transcript) {
-      sections.push(`## 视频口播逐字稿（${engineUsed}）\n\n${renderAsrTranscript(transcript)}`);
+      sections.push(`## 视频口播逐字稿${asrPartial ? "（部分转写，未取得全文）" : ""}（${engineUsed}）\n\n${renderAsrTranscript(transcript)}`);
     } else {
       sections.push(`> ⚠️ 暂未提取到口播语音转写稿，以上为笔记原始文案。`);
     }
@@ -365,7 +368,7 @@ export async function extractXiaohongshuNote(
       durationSeconds,
       durationText: durationSeconds ? formatDurationHms(durationSeconds) : undefined,
       transcriptEngine: engineUsed,
-      extractionQuality: { status: transcript ? "complete" : "metadata_only", reasons },
+      extractionQuality: { status: transcript ? (asrPartial ? "partial" : "complete") : "metadata_only", reasons },
     };
   }
 
@@ -665,6 +668,7 @@ export async function extractDouyinWork(
   // Transcribe spoken audio via Local-ASR / Cloud Multimodal Audio
   let transcript = "";
   let engineUsed = "metadata_only";
+  let asrPartial = false;
   const reasons: string[] = [];
   if (!playUrl) reasons.push("audio_stream_not_found");
   if (playUrl) {
@@ -680,6 +684,8 @@ export async function extractDouyinWork(
         hintTitle: title,
       });
       transcript = asrRes.transcript.trim();
+      asrPartial = asrRes.extractionQuality?.status === "partial";
+      reasons.push(...(asrRes.extractionQuality?.reasons ?? []));
       for (const issue of asrRes.toolIssues ?? []) reasons.push(`asr_tool_${issue}`);
       if (transcript) engineUsed = asrRes.engineUsed;
       else reasons.push("asr_empty");
@@ -701,7 +707,7 @@ export async function extractDouyinWork(
   if (coverUrl) sections.push(`![视频封面](${coverUrl})`);
   if (rawDesc.trim()) sections.push(`## 视频文案与标签\n\n${rawDesc.trim()}`);
   if (transcript) {
-    sections.push(`## 视频口播逐字稿（${engineUsed}）\n\n${renderAsrTranscript(transcript)}`);
+    sections.push(`## 视频口播逐字稿${asrPartial ? "（部分转写，未取得全文）" : ""}（${engineUsed}）\n\n${renderAsrTranscript(transcript)}`);
   } else {
     sections.push(
       `> ⚠️ 暂未获取到视频音频流或转写结果，以上为视频标题与文案。`
@@ -728,7 +734,7 @@ export async function extractDouyinWork(
     durationSeconds,
     durationText: durationSeconds ? formatDurationHms(durationSeconds) : undefined,
     transcriptEngine: engineUsed,
-    extractionQuality: { status: transcript ? "complete" : "metadata_only", reasons },
+    extractionQuality: { status: transcript ? (asrPartial ? "partial" : "complete") : "metadata_only", reasons },
   };
 }
 

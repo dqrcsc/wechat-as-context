@@ -103,11 +103,17 @@ export async function extractYouTubeVideo(
     console.warn(`[YouTubeExtractor] Watch page fetch warning for ${rawUrl}:`, err);
   }
 
+  const acquisitionReasons = new Set<string>();
+
   // Extract player response and initial watch data from watch HTML or InnerTube API
   let playerData = extractJsonObjectAfterMarker(
     watchHtml,
     "ytInitialPlayerResponse"
   );
+  if (playerData?.videoDetails?.videoId && playerData.videoDetails.videoId !== videoId) {
+    acquisitionReasons.add("web_player_video_id_mismatch");
+    playerData = null;
+  }
   const initialMeta = extractYouTubeInitialMetadata(watchHtml, videoId);
   const webCaptionTracks: any[] =
     playerData?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
@@ -157,7 +163,11 @@ export async function extractYouTubeVideo(
         }
       );
       if (itResp.ok) {
-        const itJson = (await itResp.json()) as any;
+        let itJson = (await itResp.json()) as any;
+        if (itJson?.videoDetails?.videoId && itJson.videoDetails.videoId !== videoId) {
+          acquisitionReasons.add("android_player_video_id_mismatch");
+          itJson = null;
+        }
         if (itJson?.videoDetails || itJson?.captions || itJson?.streamingData) {
           usedAndroidInnerTube = Boolean(
             itJson?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length
@@ -259,7 +269,6 @@ export async function extractYouTubeVideo(
     "en-US",
   ];
 
-  const acquisitionReasons = new Set<string>();
   if (
     String(playerData?.playabilityStatus?.status || "").toUpperCase() ===
     "LOGIN_REQUIRED"
@@ -319,6 +328,7 @@ export async function extractYouTubeVideo(
 
   // Step 3: Fallback to audio stream + ASR if no captions were obtained
   let asrTranscript = "";
+  let asrPartial = false;
   if (snippets.length === 0) {
     const audioFormats = (playerData?.streamingData?.adaptiveFormats ?? [])
       .filter(
@@ -343,6 +353,8 @@ export async function extractYouTubeVideo(
           config: options?.config,
           hintTitle: title,
         });
+        asrPartial = asrRes.extractionQuality?.status === "partial";
+        for (const reason of asrRes.extractionQuality?.reasons ?? []) acquisitionReasons.add(reason);
         for (const issue of asrRes.toolIssues ?? []) acquisitionReasons.add(`asr_tool_${issue}`);
         if (!asrRes.transcript.trim()) acquisitionReasons.add("asr_empty");
         if (asrRes.transcript.trim()) {
@@ -364,6 +376,8 @@ export async function extractYouTubeVideo(
     if (fallback.urls.length) {
       try {
         const result = await transcribeAudioFromMedia({ mediaUrls: fallback.urls, headers: fallback.headers, config: options?.config, hintTitle: title });
+        asrPartial = result.extractionQuality?.status === "partial";
+        for (const reason of result.extractionQuality?.reasons ?? []) acquisitionReasons.add(reason);
         for (const issue of result.toolIssues ?? []) acquisitionReasons.add(`resolver_asr_tool_${issue}`);
         asrTranscript = result.transcript.trim();
         if (asrTranscript) transcriptSourceLabel = `音频自动转写 (${result.engineUsed}; yt-dlp)`;
@@ -405,7 +419,7 @@ export async function extractYouTubeVideo(
 
   if (formattedTranscript) {
     mdSections.push(
-      `## 完整字幕 / 逐字稿${
+      `## ${asrPartial ? "部分逐字稿（未取得完整转写）" : "完整字幕 / 逐字稿"}${
         transcriptSourceLabel ? `（${transcriptSourceLabel}）` : ""
       }\n\n${formattedTranscript}`
     );
@@ -436,7 +450,7 @@ export async function extractYouTubeVideo(
     durationSeconds,
      durationText,
     transcriptEngine: transcriptSourceLabel || "metadata_only",
-    extractionQuality: { status: formattedTranscript ? "complete" : "metadata_only", reasons: [...acquisitionReasons] },
+    extractionQuality: { status: formattedTranscript ? (asrPartial ? "partial" : "complete") : "metadata_only", reasons: [...acquisitionReasons] },
   };
 }
 

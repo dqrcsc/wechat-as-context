@@ -813,6 +813,7 @@ ${vaultCtx.nowSummary}`,
     const videoSourceSnippets: string[] = [];
     const modelVideoSnippets: string[] = [];
     const processedVideos: number[] = [];
+    const partialVideos: number[] = [];
     const videoReasons: string[] = [];
     const videoEngines = new Set<string>();
     let videoCount = 0;
@@ -841,9 +842,11 @@ ${vaultCtx.nowSummary}`,
             mediaPath: videoPath, config: this.config, hintTitle: ctx.unpacked.userText,
           });
           const transcript = asrRes.transcript.trim();
+          for (const reason of asrRes.extractionQuality?.reasons ?? []) videoReasons.push(`video_${index}:${reason}`);
           for (const issue of asrRes.toolIssues ?? []) videoReasons.push(`video_${index}:asr_tool_${issue}`);
           if (transcript) {
             processedVideos.push(index);
+            if (asrRes.extractionQuality?.status === "partial") partialVideos.push(index);
             videoEngines.add(asrRes.engineUsed);
             const heading = `【微信视频 ${index} 口播转写稿（${asrRes.engineUsed}）】`;
             videoSourceSnippets.push(`${heading}\n${renderAsrTranscript(transcript)}`);
@@ -905,8 +908,9 @@ ${vaultCtx.nowSummary}`,
     }
 
     const videoQuality: ExtractionQuality | undefined = videoCount ? {
-      status: processedVideos.length === videoCount ? "complete" : processedVideos.length ? "partial" : "unavailable",
+      status: processedVideos.length === videoCount && !partialVideos.length ? "complete" : processedVideos.length ? "partial" : "unavailable",
       reasons: videoReasons, totalVideos: videoCount, processedVideos,
+      ...(partialVideos.length ? { partialVideos } : {}),
       missingVideos: Array.from({ length: videoCount }, (_, i) => i + 1).filter(i => !processedVideos.includes(i)),
     } : undefined;
     const qualityNotice = extractionNotice(videoQuality);

@@ -133,3 +133,21 @@ test('buildYouTubeResolverEnv strips secret keys, preserves node PATH directorie
  const customCa=buildYouTubeResolverEnv({PATH:'/bin',SSL_CERT_FILE:'/custom/ca.pem'},true);
  expect(customCa.SSL_CERT_FILE).toBe('/custom/ca.pem');
 });
+
+for (const viaResolver of [false, true]) {
+  test(`YouTube retains partial ASR status through native/resolver acquisition (${viaResolver})`, async () => {
+    ytPage();
+    setYouTubeResolverTestRunner(async () => resolverData());
+    let calls = 0;
+    setAsrTestRunner(async () => {
+      if (viaResolver && ++calls === 1) throw new MediaDownloadError('http_403');
+      return {transcript: 'Only the first portion of speech.', engineUsed: 'fixture', extractionQuality: {status: 'partial', reasons: ['asr_truncated']}};
+    });
+    const result = await extractYouTubeVideo('https://youtu.be/abcdefghijk');
+    expect(result.extractionQuality?.status).toBe('partial');
+    expect(result.extractionQuality?.reasons).toContain('asr_truncated');
+    expect(result.markdownBody).toContain('Only the first portion');
+    expect(result.markdownBody).toContain('部分逐字稿');
+    expect(result.markdownBody).not.toContain('## 完整字幕');
+  });
+}

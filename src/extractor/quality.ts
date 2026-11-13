@@ -8,12 +8,15 @@ export interface ExtractionQuality {
   /** Coverage of video transcripts only, even when a message also contains files/images. */
   totalVideos?: number;
   processedVideos?: number[];
+  /** Videos with some usable transcript but incomplete coverage; subset of processedVideos. */
+  partialVideos?: number[];
   missingVideos?: number[];
 }
 export function extractionNotice(quality?: ExtractionQuality): string {
   if (!quality || quality.status === 'complete') return '';
-  if (quality.totalVideos !== undefined) return `⚠️ 视频口播转写仅取得 ${quality.processedVideos?.length ?? 0}/${quality.totalVideos} 份；未取得转写的视频序号：${quality.missingVideos?.join('、') || '无'}。不代表已理解全部视频画面或其他附件。`;
+  if (quality.totalVideos !== undefined) return `⚠️ 视频口播转写仅取得 ${quality.processedVideos?.length ?? 0}/${quality.totalVideos} 份${quality.partialVideos?.length ? `，其中部分转写的视频序号：${quality.partialVideos.join("、")}` : ""}；未取得转写的视频序号：${quality.missingVideos?.join('、') || '无'}。不代表已理解全部视频画面或其他附件。`;
   if (quality.totalPages !== undefined) return `⚠️ 图集仅解析 ${quality.processedPages?.length ?? 0}/${quality.totalPages} 页；未解析页：${quality.missingPages?.join('、') || '无'}。以下分析不代表覆盖全部图片。`;
+  if (quality.status === 'partial') return '⚠️ 本次仅取得部分逐字稿，转写不完整；以下分析仅覆盖已获取片段。';
   if (quality.status === 'unavailable') return '⚠️ 采集内容或解析质量记录不可用；需核对原始来源，以下分析不能视为完整正文分析。';
   return '⚠️ 本次未取得完整逐字稿，仅根据已获取的简介/元数据分析；不能据此判断源站是否提供字幕。';
 }
@@ -26,6 +29,10 @@ export function readSavedExtractionQuality(source: string): ExtractionQuality | 
     try {
       const q=JSON.parse(raw);
       if(!['complete','partial','metadata_only','unavailable'].includes(q?.status)||!Array.isArray(q.reasons)||!q.reasons.every((x:unknown)=>typeof x==='string'))throw new Error('invalid');
+      if (q.partialVideos !== undefined &&
+          (!Array.isArray(q.partialVideos) || !q.partialVideos.length || q.status !== 'partial' ||
+           !Array.isArray(q.processedVideos) || new Set(q.partialVideos).size !== q.partialVideos.length ||
+           !q.partialVideos.every((n: unknown) => Number.isSafeInteger(n) && q.processedVideos.includes(n)))) throw new Error('invalid');
       for (const [totalKey, processedKey, missingKey] of [
         ['totalPages', 'processedPages', 'missingPages'],
         ['totalVideos', 'processedVideos', 'missingVideos'],
@@ -40,7 +47,7 @@ export function readSavedExtractionQuality(source: string): ExtractionQuality | 
         const items = [...processed, ...missing];
         if (items.length !== total || new Set(items).size !== total ||
             (q.status === 'complete' && missing.length > 0) ||
-            (q.status === 'partial' && (!processed.length || !missing.length)) ||
+            (q.status === 'partial' && (!processed.length || (!missing.length && !(totalKey === 'totalVideos' && q.partialVideos?.length)))) ||
             (q.status === 'unavailable' && processed.length > 0)) throw new Error('invalid');
       }
       return q;

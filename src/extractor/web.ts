@@ -1,6 +1,6 @@
 import { extractPublicationDate, validPublicationDate } from "./publication_date.ts";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { AppConfig } from "../config.ts";
 import { replaceFileAtomically, writeNewFile } from "../storage.ts";
@@ -286,6 +286,8 @@ export async function saveRawWebArticleToVault(params: {
   userNotes?: string;
   existingPath?: string;
   overwriteExisting?: boolean;
+  /** Snapshot before fetching/analyzing; null means the target did not exist. */
+  expectedExistingContent?: string | null;
 }): Promise<string> {
   mkdirSync(params.articlesDir, { recursive: true });
   const datePrefix = new Date().toISOString().slice(0, 10).replace(/-/g, "_");
@@ -293,6 +295,13 @@ export async function saveRawWebArticleToVault(params: {
   const identity = createHash("sha256").update(params.article.url).digest("hex").slice(0, 16);
   const baseFolderSlug = `${datePrefix}_${cleanSlug}_${identity}`;
   const fullPath = params.existingPath || join(params.articlesDir, `${baseFolderSlug}.md`);
+  const assertSourceUnchanged = () => {
+    if (params.expectedExistingContent !== undefined &&
+        (existsSync(fullPath) ? readFileSync(fullPath, "utf8") : null) !== params.expectedExistingContent) {
+      throw new Error("Source changed during analysis; refusing to overwrite concurrent edits.");
+    }
+  };
+  assertSourceUnchanged();
   if (existsSync(fullPath) && !params.overwriteExisting) return fullPath;
 
   const assetsDir = join(dirname(fullPath), "assets", baseFolderSlug);
@@ -360,6 +369,9 @@ export async function saveRawWebArticleToVault(params: {
     "",
   ];
 
+  // Check after image localization (which can await network). Do not resurrect
+  // deleted sources or overwrite edits made while extraction/analysis was running.
+  assertSourceUnchanged();
   if (existsSync(fullPath) && params.overwriteExisting) {
     replaceFileAtomically(fullPath, lines.join("\n"));
   } else {

@@ -33,13 +33,14 @@ export interface AsrTranscriptionResult {
   transcript: string;
   engineUsed: string;
   durationSeconds?: number;
+  extractionQuality?: ExtractionQuality;
   /** Sanitized local tool configuration problems skipped on the way (e.g. `ffmpeg_not_found`). */
   toolIssues?: string[];
 }
 
 /** Every engine failed; carries sanitized tool configuration issues for diagnostics. */
 export class AsrUnavailableError extends Error {
-  constructor(public toolIssues: string[] = []) {
+  constructor(public toolIssues: string[] = [], public reasons: string[] = []) {
     super(
       `Audio transcription unavailable (neither local-asr nor a multimodal audio API succeeded)${
         toolIssues.length ? `; tool issues: ${toolIssues.join(", ")}` : ""
@@ -56,7 +57,7 @@ export class AsrUnavailableError extends Error {
 export function asrFailureReasons(error: unknown, prefix = ""): string[] {
   if (error instanceof MediaDownloadError) return [`${prefix}audio_${error.reason}`];
   const issues = error instanceof AsrUnavailableError ? error.toolIssues : [];
-  return [`${prefix}asr_failed`, ...issues.map((issue) => `${prefix}asr_tool_${issue}`)];
+  return [`${prefix}asr_failed`, ...(error instanceof AsrUnavailableError ? error.reasons.map(reason => `${prefix}${reason}`) : []), ...issues.map((issue) => `${prefix}asr_tool_${issue}`)];
 }
 
 export type AsrTestRunner = (
@@ -322,11 +323,15 @@ export async function transcribeAudioFromMedia(
         ffmpegBin,
         req.config,
         req.hintTitle
-      );
+      ).catch(error => {
+        if (error instanceof AsrUnavailableError) throw new AsrUnavailableError([...toolIssues], error.reasons);
+        throw error;
+      });
       if (cloudRes) {
         return withIssues({
           transcript: cloudRes.transcript,
           engineUsed: cloudRes.engineUsed,
+          extractionQuality: cloudRes.extractionQuality,
           durationSeconds,
         });
       }
@@ -344,7 +349,7 @@ async function tryCloudMultimodalAudioTranscription(
   ffmpegBin: string | null,
   config: AppConfig,
   hintTitle?: string
-): Promise<{ transcript: string; engineUsed: string } | null> {
+): Promise<AsrTranscriptionResult | null> {
   const resolvedEp = resolveModelEndpoint(config, "fast");
   const apiKey = resolvedEp.apiKey || config.llm.apiKey;
   const baseUrl = (resolvedEp.baseUrl || config.llm.baseUrl).replace(/\/+$/, "");
@@ -414,15 +419,28 @@ async function tryCloudMultimodalAudioTranscription(
       }));
       if (resp.ok) {
         const data = (await resp.json()) as any;
-        const text = (data?.candidates?.[0]?.content?.parts ?? [])
-          .map((p: any) => p.text || "")
+        const candidate = data?.candidates?.[0];
+        const finishReason = candidate?.finishReason;
+        if (data?.promptFeedback?.blockReason || (finishReason && !["STOP", "MAX_TOKENS"].includes(finishReason))) {
+          throw new AsrUnavailableError([], ["cloud_asr_rejected"]);
+        }
+        const text = (candidate?.content?.parts ?? [])
+          .filter((part: any) => part.thought !== true && typeof part.text === "string")
+          .map((part: any) => part.text)
           .join("")
           .trim();
-        if (text.length > 10) {
-          return { transcript: text, engineUsed: `gemini_audio:${model}` };
-        }
+        if (!text) throw new AsrUnavailableError([], ["cloud_asr_empty"]);
+        return {
+          transcript: text,
+          engineUsed: `gemini_audio:${model}`,
+          extractionQuality: finishReason === "STOP"
+            ? { status: "complete", reasons: [] }
+            : { status: "partial", reasons: [finishReason === "MAX_TOKENS" ? "asr_truncated" : "asr_finish_reason_missing"] },
+        };
       }
-    } catch {}
+    } catch (error) {
+      if (error instanceof AsrUnavailableError) throw error;
+    }
   }
 
   return null;

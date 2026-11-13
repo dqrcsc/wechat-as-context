@@ -253,3 +253,24 @@ for(const addition of ['业务验证：无需复核，可以直接上线。\n', 
  const r=await analyzeArticleWithVault({config:config(),article:articleFixture,userNotes:'',vaultContext:emptyVault});
  expect(calls).toBe(2);expect(r.wechat_reply).toStartWith(original);expect(r.wechat_reply).not.toContain('直接上线');expect(r.wechat_reply).toContain('未压缩到手机短版');
 });}
+
+for (const source of ['web', 'android'] as const) {
+  test(`YouTube rejects all data from conflicting ${source} player before merging`, async () => {
+    const player = (id: string) => ({videoDetails: {videoId: id, title: id, shortDescription: 'description'},
+      captions: {playerCaptionsTracklistRenderer: {captionTracks: [{languageCode: 'en', baseUrl: `https://captions.example.test/${id}`}]}},
+      streamingData: {adaptiveFormats: [{mimeType: 'audio/mp4', url: `https://audio.example.test/${id}`}]}});
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: any) => {
+      const target = String(url); calls.push(target);
+      if (target.includes('youtube.com/watch')) return new Response(`<meta property="og:title" content="A title"><script>var ytInitialPlayerResponse=${JSON.stringify(player(source === 'web' ? 'zzzzzzzzzzz' : 'abcdefghijk'))};</script>"INNERTUBE_API_KEY":"fixture"`);
+      if (target.includes('youtubei')) return Response.json(source === 'android' ? player('zzzzzzzzzzz') : {playabilityStatus: {status: 'LOGIN_REQUIRED'}});
+      if (target.includes('captions')) return new Response('<transcript><text start="0" dur="1">Correct A transcript</text></transcript>');
+      return new Response('', {status: 403});
+    }) as unknown as typeof fetch;
+    const result = await extractYouTubeVideo('https://www.youtube.com/watch?v=abcdefghijk');
+    expect(calls.some(url => url.includes('zzzzzzzzzzz'))).toBe(false);
+    expect(result.extractionQuality?.reasons).toContain(`${source}_player_video_id_mismatch`);
+    expect(result.extractionQuality?.status).toBe(source === 'web' ? 'metadata_only' : 'complete');
+    if (source === 'android') expect(result.markdownBody).toContain('Correct A transcript');
+  });
+}

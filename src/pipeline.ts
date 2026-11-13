@@ -350,8 +350,9 @@ export class WeChatContextPipeline {
         record.note_md_path && existsSync(record.note_md_path)
           ? readFileSync(record.note_md_path, "utf8")
           : "";
+      const existingSourceExisted = Boolean(record.source_md_path && existsSync(record.source_md_path));
       const existingSourceContent =
-        record.source_md_path && existsSync(record.source_md_path)
+        existingSourceExisted
           ? readFileSync(record.source_md_path, "utf8")
           : "";
       // Only the frontmatter title counts; body text quoting a placeholder must not match.
@@ -362,11 +363,11 @@ export class WeChatContextPipeline {
         /^title:\s*["']?YouTube Video \([A-Za-z0-9_-]{6,20}\)["']?\s*$/im.test(
           existingSourceFrontmatter
         );
+      // Structured coverage takes precedence over legacy engine fields. Never
+      // interpret a quotation in the source body as a recovery instruction.
       const existingSourceIsMetadataOnly =
         !existingSourceContent ||
-        /transcript_engine:\s*["']?metadata_only["']?/i.test(existingSourceContent) ||
-        readSavedExtractionQuality(existingSourceContent)?.status === "metadata_only" ||
-        existingSourceContent.includes("暂未获取到视频音频流或转写结果");
+        readSavedExtractionQuality(existingSourceContent)?.status === "metadata_only";
       const wasFallback =
         !existingNoteContent ||
         isFallbackLightNote(existingNoteContent) ||
@@ -478,9 +479,15 @@ export class WeChatContextPipeline {
           : this.config.webArticlesDir ||
             join(this.config.vaultRoot, "01_inputs", "articles", "web");
 
+      // Acquisition success is independent of whether the model recovers, and
+      // independent of whether the user chose --force.
+      const sourceRecovered = placeholderRepaired || (forcedReextract && (
+        (isPlaceholderVideo && extracted.title && !isPlaceholderYouTubeTitle(extracted.title)) ||
+        (existingSourceIsMetadataOnly && ["complete", "partial"].includes(extracted.extractionQuality?.status ?? ""))
+      ));
       const isStillFallback = isFallbackLightNote(analysis.wechat_reply);
       if (isStillFallback && existingNoteContent) {
-        if (!placeholderRepaired) {
+        if (!sourceRecovered) {
           return {
             record,
             upgradedFromFallback: false,
@@ -496,6 +503,7 @@ export class WeChatContextPipeline {
           userNotes: record.user_notes,
           existingPath: record.source_md_path || undefined,
           overwriteExisting: true,
+          expectedExistingContent: existingSourceExisted ? existingSourceContent : null,
         });
         const repaired = this.db.updateArticle(id, {
           title: extracted.title || record.title,
@@ -534,6 +542,7 @@ export class WeChatContextPipeline {
                 userNotes: record.user_notes,
                 existingPath: record.source_md_path || undefined,
                 overwriteExisting: shouldReextractSource,
+                expectedExistingContent: existingSourceExisted ? existingSourceContent : null,
               });
 
       const noteMdPath =

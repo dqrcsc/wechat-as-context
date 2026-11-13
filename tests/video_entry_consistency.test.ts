@@ -29,7 +29,7 @@ async function native(options:{outcomes:string[];mixed?:boolean;idea?:boolean;mo
   if(url.includes('video-0')&&options.outcomes[0]==='download')return new Response('',{status:403});
   return new Response(new Uint8Array(payload));
  }) as unknown as typeof fetch;
- setAsrTestRunner(async req=>{paths.push(req.mediaPath!);const outcome=options.outcomes[asrCalls++];if(outcome==='throw')throw new Error('private upstream secret');return {transcript:outcome==='empty'?'':raw,engineUsed:'fixture_asr'};});
+ setAsrTestRunner(async req=>{paths.push(req.mediaPath!);const outcome=options.outcomes[asrCalls++];if(outcome==='throw')throw new Error('private upstream secret');return {transcript:outcome==='empty'?'':raw,engineUsed:'fixture_asr', ...(outcome==='partial'?{extractionQuality:{status:'partial' as const,reasons:['asr_truncated']}}:{})};});
  setSubagentTestRunner(async req=>{prompts.push(req.prompt);if(options.modelFails)throw new Error('model unavailable');return {backend:req.backend,modelUsed:'fixture',outputText:'MODEL_SUMMARY',generatedImages:[],generatedFiles:[]};});
  const videos=options.outcomes.map((_,i)=>({type:5,video_item:{aeskey:key.toString('hex'),media:{encrypt_query_param:`video-${i}`}}}));
  const items:any[]=[{type:1,text_item:{text:options.idea?'记为灵感':'请归档视频'}},...videos];
@@ -58,15 +58,15 @@ test('native multiple videos retain successful evidence and missing index',async
 test('native model failure cannot discard a successful transcript',async()=>{
  const r=await native({outcomes:['ok'],modelFails:true});expect(r.source).toContain(raw);expect(readSavedExtractionQuality(r.source)?.status).toBe('complete');expect(r.result.replyText).toContain('未解析');
 });
-for(const platform of ['xhs','douyin'] as const)for(const outcome of ['ok','empty','throw','download','no_stream'] as const){test(`${platform} ${outcome} has video-scoped quality and safe date`,async()=>{
+for(const platform of ['xhs','douyin'] as const)for(const outcome of ['ok','partial','empty','throw','download','no_stream'] as const){test(`${platform} ${outcome} has video-scoped quality and safe date`,async()=>{
  const id=platform==='xhs'?'bbbbbbbbbbbbbbbbbbbbbbbb':'76543210987654321';let calls=0;
  const video=outcome==='no_stream'?{}:{play_addr:{url_list:['https://media.example.test/video.mp4']},media:{stream:{h264:[{masterUrl:'https://media.example.test/video.mp4'}]}}};
  const state=platform==='xhs'?{note:{noteDetailMap:{[id]:{note:{noteId:id,type:'video',title:'Fixture video',desc:'Fixture description',time:'bad',video}}}}}:{loaderData:{page:{videoInfoRes:{item_list:[{aweme_id:id,desc:'Fixture description',create_time:'bad',video}]}}}};
  const html=`<script>window.${platform==='xhs'?'__INITIAL_STATE__':'_ROUTER_DATA'}=${JSON.stringify(state)}</script>`;
  globalThis.fetch=(async()=>new Response(html)) as unknown as typeof fetch;
- setAsrTestRunner(async()=>{calls++;if(outcome==='throw')throw new Error('private token');if(outcome==='download')throw new MediaDownloadError('http_403');return {transcript:outcome==='empty'?'':raw,engineUsed:'fixture'};});
+ setAsrTestRunner(async()=>{calls++;if(outcome==='throw')throw new Error('private token');if(outcome==='download')throw new MediaDownloadError('http_403');return {transcript:outcome==='empty'?'':raw,engineUsed:'fixture', ...(outcome==='partial'?{extractionQuality:{status:'partial' as const,reasons:['asr_truncated']}}:{})};});
  const r=await (platform==='xhs'?extractXiaohongshuNote:extractDouyinWork)(platform==='xhs'?`https://www.xiaohongshu.com/explore/${id}`:`https://www.douyin.com/video/${id}`);
- expect(r.mediaKind).toBe('video');expect(r.publishDate).toBe('');expect(r.extractionQuality?.status).toBe(outcome==='ok'?'complete':'metadata_only');expect(r.markdownBody).not.toContain('private token');
+ expect(r.mediaKind).toBe('video');expect(r.publishDate).toBe('');expect(r.extractionQuality?.status).toBe(outcome==='ok'?'complete':outcome==='partial'?'partial':'metadata_only');expect(r.markdownBody).not.toContain('private token');
  if(outcome==='ok')expect(r.markdownBody).toContain(raw);else expect(r.extractionQuality?.reasons.length).toBeGreaterThan(0);
  if(outcome==='no_stream'){expect(calls).toBe(0);expect(r.markdownBody).not.toContain('Vision OCR');}
 });}
@@ -116,3 +116,25 @@ for(const fileFirst of [true,false])for(const idea of [true,false])test(`mixed f
  expect(r.source).toContain(raw);expect(readSavedExtractionQuality(r.source)?.status).toBe('complete');
  expect(r.result.replyText).toContain('未归档或解析该附件');expect(r.source).toContain('未归档或解析该附件');expect(r.prompts[0]).toContain('未归档或解析该附件');
 });
+
+for (const mode of ['video', 'mixed', 'idea'] as const) {
+  for (const outcomes of [['partial'], ['ok', 'partial'], ['partial', 'empty']]) {
+    test(`native ${mode} retains incomplete transcript coverage: ${outcomes}`, async () => {
+      const r = await native({outcomes, mixed: mode === 'mixed', idea: mode === 'idea'});
+      const quality = readSavedExtractionQuality(r.source)!;
+      expect(quality.status).toBe('partial');
+      expect(quality.partialVideos).toEqual(outcomes.flatMap((o, i) => o === 'partial' ? [i + 1] : []));
+      expect(quality.missingVideos).toEqual(outcomes.flatMap((o, i) => o === 'empty' ? [i + 1] : []));
+      expect(r.source).toContain(raw);
+      expect(r.source).toContain('部分转写的视频序号');
+      expect(r.prompts[0]).toContain('部分转写的视频序号');
+      expect(r.result.replyText).toContain('部分转写的视频序号');
+    });
+  }
+}
+for (const partialVideos of [[2], [1, 1], [], ['1']]) {
+  test(`invalid partial video indices fail visibly: ${JSON.stringify(partialVideos)}`, () => {
+    const q = {status: 'partial', reasons: [], totalVideos: 1, processedVideos: [1], missingVideos: [], partialVideos};
+    expect(readSavedExtractionQuality(`---\nextraction_quality: ${JSON.stringify(q)}\n---\nBody`)?.reasons).toEqual(['invalid_saved_quality']);
+  });
+}

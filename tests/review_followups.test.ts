@@ -1,6 +1,6 @@
 import './support/isolation.ts';
 import { afterEach, expect, test } from 'bun:test';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { loadConfig } from '../src/config.ts';
@@ -217,5 +217,138 @@ test('recovered video metadata is persisted even when the model still falls back
     expect(isPlaceholderYouTubeTitle(f.db.getArticleById(f.row.id)!.title)).toBe(false);
     expect(readFileSync(f.source, 'utf8')).toContain('Real Video Title');
     expect(readFileSync(first.note_md_path, 'utf8')).toBe(note);
+  } finally { f.db.db.close(); }
+});
+
+for (const marker of ['transcript_engine: metadata_only', '暂未获取到视频音频流或转写结果']) {
+  test(`complete transcript quoting ${marker} is never refreshed without force`, async () => {
+    const f = await placeholderFixture({metadataOnly: false, body: `## 逐字稿\n完整证据。配置示例：${marker}`});
+    try {
+      const calls: string[] = []; routeFetch('real', 'ok', calls);
+      await new WeChatContextPipeline(f.cfg, f.db).reanalyzeArticleById(f.row.id);
+      expect(calls.some(url => url.includes('youtube.com'))).toBe(false);
+      expect(readFileSync(f.source, 'utf8')).toBe(f.original);
+    } finally { f.db.db.close(); }
+  });
+}
+
+for (const force of [false, true]) for (const model of ['ok', 'offline'] as const) {
+  for (const mutation of ['edit', 'delete'] as const) {
+    test(`source changes survive placeholder recovery (force=${force}, model=${model}, mutation=${mutation})`, async () => {
+      const f = await placeholderFixture();
+      try {
+        const pipeline = new WeChatContextPipeline(f.cfg, f.db);
+        const calls: string[] = []; routeFetch('denied', 'offline', calls);
+        const first = await pipeline.processArticleById(f.row.id, {sendWeChatReply: false});
+        const note = readFileSync(first.note_md_path, 'utf8');
+        let changed = false;
+        globalThis.fetch = (async (url: any) => {
+          if (String(url).includes('model.example.test')) {
+            if (!changed) {
+              changed = true;
+              if (mutation === 'delete') unlinkSync(f.source);
+              else writeFileSync(f.source, f.original + '\n用户新补入的证据');
+            }
+            if (model === 'offline') throw new Error('fixture offline');
+            return modelOk();
+          }
+          if (String(url).includes('youtube.com/watch')) return new Response(watchPage('Real Video Title'));
+          return new Response('', {status: 403});
+        }) as unknown as typeof fetch;
+        await expect(pipeline.reanalyzeArticleById(f.row.id, {force})).rejects.toThrow('Source changed during analysis');
+        if (mutation === 'edit') expect(readFileSync(f.source, 'utf8')).toBe(f.original + '\n用户新补入的证据');
+        else expect(() => readFileSync(f.source)).toThrow();
+        expect(readFileSync(first.note_md_path, 'utf8')).toBe(note);
+        expect(f.db.getArticleById(f.row.id)!.title).toBe(PLACEHOLDER);
+      } finally { f.db.db.close(); }
+    });
+  }
+}
+
+test('source edits during image localization are checked immediately before replacement', async () => {
+  const f = await placeholderFixture();
+  try {
+    globalThis.fetch = (async () => {
+      writeFileSync(f.source, f.original + '\n图片下载期间新增证据');
+      return new Response('', {status: 403});
+    }) as unknown as typeof fetch;
+    await expect(saveRawWebArticleToVault({articlesDir: join(f.cfg.dataDir, 'video'), existingPath: f.source,
+      overwriteExisting: true, expectedExistingContent: f.original, slug: 'fixture', article: {
+        title: 'Real', url: VIDEO_URL, author: '', publishDate: '', digest: '', imageUrls: [], extractorUsed: 'native_http',
+        markdownBody: '![image](https://images.example.test/cover.jpg)',
+      }})).rejects.toThrow('Source changed during analysis');
+    expect(readFileSync(f.source, 'utf8')).toBe(f.original + '\n图片下载期间新增证据');
+  } finally { f.db.db.close(); }
+});
+
+for (const [finishReason, text, status, reason] of [
+  ['STOP', '好的，谢谢。', 'complete', undefined],
+  ['STOP', 'OK', 'complete', undefined],
+  ['MAX_TOKENS', '这是被截断的部分逐字稿。', 'partial', 'asr_truncated'],
+  [undefined, '缺少完成状态的正文。', 'partial', 'asr_finish_reason_missing'],
+] as const) {
+  test(`cloud transcription preserves short/partial output accurately: ${finishReason}/${text}`, async () => {
+    const media = join(mkdtempSync(join(tmpdir(), 'asr-quality-')), 'clip.mp4');
+    writeFileSync(media, new Uint8Array(1024));
+    globalThis.fetch = (async () => Response.json({candidates: [{finishReason, content: {parts: [{text: 'hidden reasoning', thought: true}, {text}]}}]})) as unknown as typeof fetch;
+    const result = await transcribeAudioFromMedia({mediaPath: media, config: config('gemini-fixture')});
+    expect(result.transcript).toBe(text);
+    expect(result.extractionQuality).toEqual({status, reasons: reason ? [reason] : []});
+  });
+}
+for (const response of [
+  {candidates: [{finishReason: 'SAFETY', content: {parts: [{text: 'not a usable transcript'}]}}]},
+  {promptFeedback: {blockReason: 'SAFETY'}, candidates: []},
+  {candidates: [{finishReason: 'STOP', content: {parts: [{text: '  '} ]}}]},
+  {candidates: []},
+]) {
+  test(`cloud rejection or empty output is not transcript success: ${JSON.stringify(response)}`, async () => {
+    const media = join(mkdtempSync(join(tmpdir(), 'asr-quality-')), 'clip.mp4');
+    writeFileSync(media, new Uint8Array(1024));
+    globalThis.fetch = (async () => Response.json(response)) as unknown as typeof fetch;
+    const error = await transcribeAudioFromMedia({mediaPath: media, config: config('gemini-fixture')}).catch(e => e);
+    expect(error).toBeInstanceOf(AsrUnavailableError);
+    expect(asrFailureReasons(error)).toContain('asr_failed');
+    expect(error.reasons.length).toBeGreaterThan(0);
+  });
+}
+for (const force of [false, true]) {
+  test(`recovered metadata persists independently of model availability (force=${force})`, async () => {
+    const f = await placeholderFixture();
+    try {
+      const calls: string[] = []; routeFetch('denied', 'offline', calls);
+      const pipeline = new WeChatContextPipeline(f.cfg, f.db);
+      const first = await pipeline.processArticleById(f.row.id, {sendWeChatReply: false});
+      const note = readFileSync(first.note_md_path, 'utf8');
+      routeFetch('real', 'offline', calls);
+      const result = await pipeline.reanalyzeArticleById(f.row.id, {force});
+      expect(result.isFallback).toBe(true);
+      expect(result.record.title).toBe('Real Video Title');
+      expect(readFileSync(f.source, 'utf8')).toContain('Real Video Title');
+      expect(readFileSync(first.note_md_path, 'utf8')).toBe(note);
+    } finally { f.db.db.close(); }
+  });
+}
+
+test('a concurrently created source is not silently reused as the newly extracted source', async () => {
+  const f = await placeholderFixture();
+  try {
+    await expect(saveRawWebArticleToVault({articlesDir: join(f.cfg.dataDir, 'video'), existingPath: f.source,
+      expectedExistingContent: null, slug: 'fixture', article: {
+        title: 'Real', url: VIDEO_URL, author: '', publishDate: '', digest: '', imageUrls: [], extractorUsed: 'native_http', markdownBody: 'Fresh body',
+      }})).rejects.toThrow('Source changed during analysis');
+    expect(readFileSync(f.source, 'utf8')).toBe(f.original);
+  } finally { f.db.db.close(); }
+});
+
+test('explicit complete quality overrides conflicting legacy metadata_only engine', async () => {
+  const f = await placeholderFixture({metadataOnly: false});
+  try {
+    const original = f.original.replace('音频自动转写 (fixture)', 'metadata_only');
+    writeFileSync(f.source, original);
+    const calls: string[] = []; routeFetch('real', 'ok', calls);
+    await new WeChatContextPipeline(f.cfg, f.db).reanalyzeArticleById(f.row.id);
+    expect(calls.some(url => url.includes('youtube.com'))).toBe(false);
+    expect(readFileSync(f.source, 'utf8')).toBe(original);
   } finally { f.db.db.close(); }
 });
