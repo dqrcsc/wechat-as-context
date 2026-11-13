@@ -1,4 +1,4 @@
-# 媒体工具与渠道恢复（v0.4.9 · v0.4.10）
+# 媒体工具与渠道恢复（含 v0.4.12 修复）
 
 本次修复 v0.4.8 审查中的代理环境丢失、默认强制覆盖示例和工具路径问题。更新代码/Skill 不会升级服务、安装下载器、重发历史 failed 或重新处理历史文章。
 
@@ -47,7 +47,7 @@ python3 -m venv /tmp/wxctx-ca-check
 | 入口 | 定位与成功边界 | 恢复方式 |
 | --- | --- | --- |
 | 公众号、Medium、普通网页链接 | `list/show <id>`，articles ID、原文/伴读路径；原文获取不等于模型初筛成功 | 模型降级且笔记未编辑时 `reanalyze <id> --json`；已有人工/完整 light 内容先核对覆盖范围。抓取失败的原 URL 可在明确授权后 ingest，已有文件仍按保护规则处理 |
-| YouTube、小红书、抖音链接 | articles ID；核对 extraction_quality、缺失页及实际转写 | 普通 reanalyze 复用原文；仅显式 `--force` 且原文缺失或带 metadata_only 标记等已支持条件时重抓。partial 图集不因 force 自动变为完整重抓；先核对原因与证据 |
+| YouTube、小红书、抖音链接 | articles ID；核对 extraction_quality、缺失页及实际转写 | 普通 reanalyze 复用原文，结构化状态为 metadata_only 的 YouTube 占位原文可尝试恢复；其他情况仅显式 `--force` 且原文缺失或带 metadata_only 标记等已支持条件时重抓。partial 图集不因 force 自动变为完整重抓；先核对原因与证据 |
 | 微信原生视频及混合消息中的视频 | `recent/inbox`、会话与 Markdown 归档；无 articles ID；视频临时文件在处理后清理，失败也不长期保留 | 不支持 `reanalyze <id>`。已有转写可复核文字；缺失转写或需核对画面/口播时，须取得用户提供的原视频，或由用户明确重新发送形成新消息后按授权处理。不得假定旧临时视频仍在；同消息重放可能被幂等去重 |
 | 微信原生图片、PDF/PPTX、个人文字 | 会话、归档路径；下载/归档不代表视觉或文档正文解析成功 | 按材料类型及权限使用合适工具单独解析；没有通用 articles-ID 补跑。私人内容不可由“排查/修复”推定可外发模型 |
 | 微信原生语音 | 仅当接口提供 voice_item.text 时可读转写；不等于原生音频 ASR 已实现 | 核对接口转写和原始证据，未实现的解析如实说明 |
@@ -60,3 +60,14 @@ python3 -m venv /tmp/wxctx-ca-check
 回归涵盖实际子进程代理传递/密钥剔除、路径展开和错误覆盖、失败脱敏与输出上限，以及既有人工笔记保护和跨视频入口质量测试。运行 `bun run test`、`bun run test:isolation`、TypeScript 检查及上述离线 CA 测试；测试禁止访问真实微信、模型和数据库。不把隔离测试通过写成真实各平台全链路成功。
 
 本次发布前验收：522 项 Bun 测试 / 2446 断言、隔离审计 7 项 / 40 断言、TypeScript 5.9.3、4 项离线 CA 测试均通过；Spec/Standards 复核关闭阻断项。原工作区 12 个未提交文件的内容哈希保持一致。本次未读取/改写真实业务数据库，历史 17 条失败记录按要求不操作，未重新统计其当前数量。
+
+## v0.4.12 恢复边界
+
+- 代理仅解析全局例外；非 GET/HEAD 默认拒绝自动重定向。重定向响应不代表消息未送达；不要反复人工发送来测试网络，稳定 client_id 不等于已验证服务端严格去重。
+- YouTube Web/Android 的 videoId 明确冲突时拒绝该来源整组数据，分别记录 `web_player_video_id_mismatch` / `android_player_video_id_mismatch`；仍可尝试独立的正确来源。yt-dlp 继续独立校验身份。
+- metadata-only 恢复判定只读 frontmatter，明确 complete/partial 状态优先于旧字段或正文引用。原文在模型调用/图片下载期间有修改或被删除时拒绝覆盖；先审阅当前文件。`--force` 不能绕过进行中的编辑保护。
+- 云端结束状态 STOP + 非空文本为正常返回，无最低字数限制；MAX_TOKENS 保留文本并记录 `asr_truncated`，缺少结束状态记录 `asr_finish_reason_missing`，均为 partial。拒绝与空文本分别记录 `cloud_asr_rejected` / `cloud_asr_empty`，与本地工具失败原因并存。
+- 部分转写在所有视频入口保持 partial。微信原生视频的 `partialVideos` 是 `processedVideos` 子集；有片段但未完整转写不应算作完全缺失，也不能当成完整。质量标记和提示会随归档及模型输入传播。
+- 强制获取成功不依赖模型分析成功：真实标题/转写已恢复但模型仍不可用时，安全保存来源、保留旧伴读。升级或测试不触发任何旧文章重跑或历史 failed 重试。
+
+修复条目、跨分支矩阵和验证限制见 [复查修复说明](review-v0411-fixes.md)。

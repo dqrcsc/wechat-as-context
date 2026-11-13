@@ -1,12 +1,22 @@
 # 更新日志
 
+## 0.4.12 - 2026-11-13
+
+- 修复发送类请求在自动重定向后 TLS/连接失败导致的代理回退重放风险：非 GET/HEAD 默认使用 `redirect: error`，显式 `manual` 保留。不是服务端投递去重保证。
+- macOS 仅采用全局 ExceptionsList，忽略 Scoped/接口子字典例外。
+- YouTube 在合并 Web/Android 播放器数据前校验明确的 videoId，身份冲突时整组弃用并记录脱敏原因。
+- 原文 metadata-only 判定只读结构化元数据；不因正文引用旧错误提示而重抓。原文覆盖前校验获取/分析前快照，保护等待模型和图片下载期间的编辑或删除。
+- 云端 ASR 接受正常短文本；MAX_TOKENS 或缺少结束状态保留为 partial，拒绝/空响应明确失败。YouTube 原生与 yt-dlp、小红书、抖音、微信原生视频及混合/灵感归档保留质量状态；原生视频新增可选 partialVideos 字段。
+- 强制重抓取得真实标题或转写后，即使模型仍不可用也安全保存恢复成果，保留旧伴读。
+- 新增 46 项回归，全量 595 通过 / 2800 断言，隔离验收 7 通过 / 40 断言，TypeScript 检查通过。详细边界与验证见 [复查修复说明](docs/review-v0411-fixes.md)。不升级服务、不重跑文章、不发送微信、不重试历史 failed。
+
 ## 0.4.11 - 2026-11-11
 
 ### 守护进程 Fake-IP 缓存加固与 macOS 系统代理 TLS 恢复
 
 - 守护进程安装脚本（`scripts/install_daemon.sh`，含 macOS LaunchAgent 与 Linux `systemd` 服务模板）注入 `BUN_CONFIG_DNS_TIME_TO_LIVE_SECONDS=0`，避免 ClashX Pro / Mihomo / Surge 等增强模式（Fake-IP `198.18.0.0/15`）重启并重建内存映射表后，长驻 Bun 进程继续复用过期解析结果而连错上游主机。
 - 新增 `src/system_proxy.ts`（`fetchWithSystemProxyFallback`）：当直连 `https:` 请求在握手阶段触发 TLS 证书校验错误（如 Fake-IP 错配导致的 `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`、`ERR_TLS_CERT_ALTNAME_INVALID`、`UNKNOWN_CERTIFICATE_VERIFICATION_ERROR`）且未配置显式代理环境变量时，按需读取 macOS `scutil --proxy` 并通过 Bun 原生 `CONNECT host:443` 系统代理隧道重试，**全程保持严格 X.509 证书链与域名校验**（绝不跳过或弱化证书验证）。
-- 严格保证非幂等请求安全：直连切代理仅在未发出任何 HTTP 字节的 TLS 握手证书校验失败时触发；恢复后启用 5 分钟粘性代理窗口避免并发下载（如多图本地化）重复失败握手；若用户退出本地代理软件导致端口拒绝连接（`ConnectionRefused` / `ECONNREFUSED`，0 字节发出），自动清粘性并回退直连，其余中途网络异常绝不在同一次调用内重放，防止 `sendmessage` 等请求重复投递。
+- 当时设计的非幂等请求保护（自动重定向缺口见 v0.4.12 修复）：直连切代理仅在未发出任何 HTTP 字节的 TLS 握手证书校验失败时触发；恢复后启用 5 分钟粘性代理窗口避免并发下载（如多图本地化）重复失败握手；若用户退出本地代理软件导致端口拒绝连接（`ConnectionRefused` / `ECONNREFUSED`，0 字节发出），自动清粘性并回退直连，其余中途网络异常绝不在同一次调用内重放，防止 `sendmessage` 等请求重复投递。
 - 自动遵循 `HTTPS_PROXY` / `HTTP_PROXY` / `ALL_PROXY` / `NO_PROXY`、回环/私网地址过滤与 `scutil` `ExceptionsList` 规则，并保留无系统代理场景下抖音原有的受限 `system_tls` 回退链路。
 - 统一接入 LLM 请求重试器（`src/agent/llm.ts`）、公网资源抓取与图片本地化（`src/public_url.ts`）、微信 ClawBot iLink 客户端（`src/clawbot/client.ts`）、Web 配置工作台连通性测试/模型拉取（`src/web_config.ts`）与外部 Webhook 通知（`src/config.ts`）。
 

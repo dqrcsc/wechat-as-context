@@ -17,7 +17,9 @@
 
 ---
 
-**v0.4.11 守护进程 Fake-IP 与系统代理 TLS 恢复**：守护进程服务模板注入 `BUN_CONFIG_DNS_TIME_TO_LIVE_SECONDS=0` 禁用长驻 DNS 缓存；新增 macOS `scutil --proxy` 按需安全回退（`src/system_proxy.ts`），当 Fake-IP 映射表重置引发 `https:` 握手证书错配时，自动通过系统代理发起按域名寻址的 `CONNECT` 隧道恢复连接，全程保持严格 X.509 证书校验与非幂等 POST 请求零重放。详见 [更新日志](./CHANGELOG.zh.md)。
+**v0.4.12 代理、转写与恢复修复**：非 GET/HEAD 请求禁止自动跟随重定向，避免下一跳错误触发原始请求重放；Scoped 代理例外不再污染全局配置。YouTube 在来源合并前排除身份冲突数据；恢复只读取结构化状态，覆盖前校验原文快照。云端转写区分正常短文本、截断、缺失完成状态和拒绝响应；质量贯通各视频入口。`--force` 获取成功但模型仍降级时保留恢复成果及旧伴读。详见 [修复与验收说明](docs/review-v0411-fixes.md)。
+
+**v0.4.11 守护进程 Fake-IP 与系统代理 TLS 恢复**：守护进程服务模板注入 `BUN_CONFIG_DNS_TIME_TO_LIVE_SECONDS=0` 禁用长驻 DNS 缓存；新增 macOS `scutil --proxy` 按需安全回退（`src/system_proxy.ts`），当 Fake-IP 映射表重置引发 `https:` 握手证书错配时，自动通过系统代理发起按域名寻址的 `CONNECT` 隧道恢复连接，全程保持严格 X.509 证书校验。非幂等请求与自动重定向的边界见下述复查修复；不承诺端到端严格只投递一次。详见 [更新日志](./CHANGELOG.zh.md)。
 
 **v0.4.10 媒体兜底与链接安全**：ffmpeg/local-asr 显式路径无效时只跳过对应引擎、继续云端转写，并以脱敏的 `asr_tool_*` 原因记录；`doctor` 新增三个媒体工具的只读状态。外链仅保留 http/https/mailto，阻断编码混淆的 `javascript:` 等协议；YouTube 占位标题补跑不再覆盖已有逐字稿，模型降级时也保留已恢复的标题。详见 [更新日志](./CHANGELOG.zh.md) 与 [媒体工具与渠道恢复说明](./docs/media-runtime-and-recovery.md)。
 
