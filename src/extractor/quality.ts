@@ -13,6 +13,14 @@ export interface ExtractionQuality {
   missingVideos?: number[];
 }
 export function extractionNotice(quality?: ExtractionQuality): string {
+  const warnings = [];
+  if (quality?.reasons.includes('caption_language_mismatch')) warnings.push('⚠️ 源站字幕语言声明与正文文字特征不一致，实际语言待核验；不能视为已取得声明语言的逐字稿。');
+  if (quality?.reasons.includes('douyin_content_unavailable')) warnings.push('⚠️ 本次未取得有效作品文案或逐字稿；保留的旧标题仅用于识别作品，不能据此分析正文。');
+  else if (quality) warnings.push(coverageNotice(quality));
+  return warnings.filter(Boolean).join('\n\n');
+}
+
+function coverageNotice(quality?: ExtractionQuality): string {
   if (!quality || quality.status === 'complete') return '';
   if (quality.totalVideos !== undefined) return `⚠️ 视频口播转写仅取得 ${quality.processedVideos?.length ?? 0}/${quality.totalVideos} 份${quality.partialVideos?.length ? `，其中部分转写的视频序号：${quality.partialVideos.join("、")}` : ""}；未取得转写的视频序号：${quality.missingVideos?.join('、') || '无'}。不代表已理解全部视频画面或其他附件。`;
   if (quality.totalPages !== undefined) return `⚠️ 图集仅解析 ${quality.processedPages?.length ?? 0}/${quality.totalPages} 页；未解析页：${quality.missingPages?.join('、') || '无'}。以下分析不代表覆盖全部图片。`;

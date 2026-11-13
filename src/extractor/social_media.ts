@@ -1,4 +1,5 @@
 import { publicationDateFromTimestamp, validPublicationDate } from "./publication_date.ts";
+import { extractionNotice } from "./quality.ts";
 import { renderAsrTranscript } from "./transcript_text.ts";
 import { SystemTlsError } from "./system_tls.ts";
 import { declaredSocialPostId, matchingDouyinDetail, pageHasSocialIdentity, requestedSocialPostId, socialPostId, SocialIdentityError } from "./social_identity.ts";
@@ -446,6 +447,17 @@ function parseXiaohongshuInitialState(html: string, url: string): any | null {
 // 3. Douyin Video & Image-Album Extractor
 // ============================================================================
 
+/** Strip only recognized standalone/trailing platform copy, never mentions inside prose. */
+export function cleanDouyinDescription(value: unknown): { text: string; templateRemoved: boolean } {
+  const original = typeof value === "string" ? value.trim() : "";
+  const text = original.replace(/\s*-\s*抖音$/, "").trim();
+  const template = /^(?:[^\s，。！？：“”「」\n-]{1,60})?于\d{8}发布在抖音，已经收获了[\d.,]+[万亿]?个喜欢，来抖音，记录美好生活[！!。]?$/;
+  if (template.test(text) || /^(?:来抖音，|抖音[-，])记录美好生活[！!。]?$/.test(text)) return { text: "", templateRemoved: true };
+  const suffix = text.match(/\s*-\s*([^-]+)$/);
+  if (suffix && template.test(suffix[1]!)) return { text: text.slice(0, suffix.index).trim(), templateRemoved: true };
+  return { text, templateRemoved: false };
+}
+
 export async function extractDouyinWork(
   rawUrl: string,
   fallbackTitle = "",
@@ -536,27 +548,15 @@ export async function extractDouyinWork(
   // Do not supplement an identified object with unrelated page-level media.
   const metadataHtml = !itemInfo && !seoMeta && metadataVerified ? html : "";
 
-  const rawDescUnstripped =
-    itemInfo?.desc ||
-    seoMeta?.name ||
-    matchMeta(metadataHtml, "og:title") ||
-    matchMeta(metadataHtml, "description") ||
-    fallbackTitle ||
-    fallbackDigest ||
-    "";
-  const rawDesc = rawDescUnstripped
-    .replace(/\s*-\s*[^-]+于\d{8}发布在抖音，已经收获了[\s\S]*$/, "")
-    .replace(/\s*-\s*抖音$/, "")
-    .trim();
-
-  const title =
-    rawDesc
-      .split(/\r?\n/)[0]
-      ?.replace(/#[^\s#]+/g, "")
-      .trim()
-      .slice(0, 72) ||
-    fallbackTitle ||
-    (awemeId ? `抖音视频 (${awemeId})` : "抖音作品");
+  const descriptions = [itemInfo?.desc, seoMeta?.name, matchMeta(metadataHtml, "og:title"), matchMeta(metadataHtml, "description")].map(cleanDouyinDescription);
+  const rawDesc = descriptions.find(candidate => candidate.text)?.text || "";
+  const oldTitle = cleanDouyinDescription(fallbackTitle);
+  const trustedOldTitle = /^(?:抖音视频\s*\([^)]*\)|抖音作品)$/.test(oldTitle.text) ? "" : oldTitle.text;
+  const reasons: string[] = [];
+  if (descriptions.some(candidate => candidate.templateRemoved) || oldTitle.templateRemoved) reasons.push("douyin_template_text_filtered");
+  // Old title/digest identify history; they are not evidence fetched from this page.
+  const title = rawDesc.split(/\r?\n/)[0]?.replace(/#[^\s#]+/g, "").trim().slice(0, 72) ||
+    trustedOldTitle || (awemeId ? `抖音视频 (${awemeId})` : "抖音作品");
   const author =
     itemInfo?.author?.nickname ||
     seoMeta?.creatorName ||
@@ -661,7 +661,7 @@ export async function extractDouyinWork(
       extractorUsed: "native_http",
       mediaKind: "article",
       sourceType: "douyin_note",
-      extractionQuality: ocr.quality,
+      extractionQuality: { ...ocr.quality, reasons: [...ocr.quality.reasons, ...reasons] },
     };
   }
 
@@ -669,7 +669,6 @@ export async function extractDouyinWork(
   let transcript = "";
   let engineUsed = "metadata_only";
   let asrPartial = false;
-  const reasons: string[] = [];
   if (!playUrl) reasons.push("audio_stream_not_found");
   if (playUrl) {
     try {
@@ -696,7 +695,8 @@ export async function extractDouyinWork(
   }
 
   if (!rawDesc.trim() && !transcript) {
-    throw new Error(`Failed to extract Douyin video content from ${rawUrl}`);
+    if (!trustedOldTitle) throw new Error("Douyin content unavailable: no usable description or transcript");
+    reasons.push("douyin_content_unavailable");
   }
 
   const canonicalVideoUrl = awemeId
@@ -710,7 +710,9 @@ export async function extractDouyinWork(
     sections.push(`## 视频口播逐字稿${asrPartial ? "（部分转写，未取得全文）" : ""}（${engineUsed}）\n\n${renderAsrTranscript(transcript)}`);
   } else {
     sections.push(
-      `> ⚠️ 暂未获取到视频音频流或转写结果，以上为视频标题与文案。`
+      reasons.includes("douyin_content_unavailable")
+        ? extractionNotice({ status: "metadata_only", reasons })
+        : `> ⚠️ 暂未获取到视频音频流或转写结果，以上为视频标题与文案。`
     );
   }
   if (seoMeta?.comments && seoMeta.comments.length > 0) {

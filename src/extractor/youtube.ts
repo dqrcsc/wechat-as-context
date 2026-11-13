@@ -1,5 +1,6 @@
 import { validPublicationDate } from "./publication_date.ts";
 import { renderAsrTranscript } from "./transcript_text.ts";
+import { extractionNotice } from "./quality.ts";
 import { compareKnownSizeFirst, resolveYouTubeFallbackAudio } from "./youtube_fallback.ts";
 import type { AppConfig } from "../config.ts";
 import { fetchPublicResource, UnsafeUrlError } from "../public_url.ts";
@@ -8,6 +9,14 @@ import type { ExtractedWeChatArticle } from "./wechat.ts";
 
 const WATCH_PAGE_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+
+/** A conservative script contradiction check, not a language detector. */
+export function hasChineseCaptionScriptMismatch(languageCode: string, text: string): boolean {
+  if (!/^zh(?:-|$)/i.test(languageCode) || /\p{Script=Han}/u.test(text)) return false;
+  const letters = text.match(/\p{L}/gu) ?? [];
+  const latin = text.match(/\p{Script=Latin}/gu) ?? [];
+  return letters.length >= 200 && (text.match(/[A-Za-z]+/g)?.length ?? 0) >= 40 && latin.length / letters.length >= 0.98;
+}
 
 const ANDROID_INNERTUBE_CLIENT = {
   clientName: "ANDROID",
@@ -317,6 +326,10 @@ export async function extractYouTubeVideo(
           transcriptSourceLabel = `YouTube 字幕轨道 (${langName}${
             selectedTrack.kind === "asr" ? " · 自动生成" : ""
           })`;
+          if (hasChineseCaptionScriptMismatch(selectedTrack.languageCode || "", snippets.map(s => s.text).join(" "))) {
+            acquisitionReasons.add("caption_language_mismatch");
+            transcriptSourceLabel = `YouTube 字幕轨道（源站声明：${langName} / ${selectedTrack.languageCode}${selectedTrack.kind === "asr" ? " · 自动生成" : ""}；正文以拉丁字母为主，语言待核验）`;
+          }
           break;
         }
       }
@@ -399,6 +412,8 @@ export async function extractYouTubeVideo(
 
   const durationText = durationSeconds ? formatDurationHms(durationSeconds) : "";
   const mdSections: string[] = [];
+  const languageNotice = extractionNotice({ status: "complete", reasons: [...acquisitionReasons] });
+  if (languageNotice) mdSections.push(languageNotice);
 
   if (coverUrl) {
     mdSections.push(`![视频封面](${coverUrl})`);
