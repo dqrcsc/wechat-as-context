@@ -1,6 +1,6 @@
 # <img src="./docs/assets/icon-qingjian-chisu.svg" width="36" height="36" align="top" alt="QingJian ChiSu Icon" /> 青简 · 尺素 (`WeChat as Context` / `wechat-as-context`) — 个人微信 ⇄ 本地知识库与桌面 AI 智能体双向活上下文网关
 
-[![Version: v0.4.11](https://img.shields.io/badge/Version-v0.4.11-10b981)](./CHANGELOG.zh.md)
+[![Version: v0.4.14](https://img.shields.io/badge/Version-v0.4.14-10b981)](./CHANGELOG.zh.md)
 [![Runtime: Bun >= 1.1](https://img.shields.io/badge/Runtime-Bun_%E2%89%A51.1-f472b6?logo=bun&logoColor=white)](https://bun.sh)
 [![Pure BYOK & BYOCLI](https://img.shields.io/badge/Pure_BYOK_%26_BYOCLI-Zero_Model_Lock--in-4f46e5)](./src/config.ts)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -16,6 +16,8 @@
 - 💻 **在电脑桌面端**：在 Codex、AntiGravity、Claude Code、OpenCode 中一句指令即可接力深读刚转发的文章，或通过 `bun run push` 将桌面端产出的报告、图表、文档主动推送到手机微信，且自动注入微信对话上下文，手机端直接回复即可无缝追问。
 
 ---
+
+**v0.4.14 抖音 SEO 片段与浏览器诊断**：仅在页面身份、唯一 VideoObject 和末级面包屑共同匹配时恢复缺少对象 URL 的 SEO 简介，并明确提示可能截断。浏览器兜底按启动、导航、详情响应和媒体缺失输出脱敏原因；修复空图集阻断兜底、有效音轨重复补抓及晚到详情丢失。代理、超时和等待的两轮单因素实验未提供足够证据调整默认参数。详见 [修复、实验与验收](docs/review-v0413-douyin-fixes.md)。
 
 **v0.4.13 字幕声明与抖音模板修复**：中文声明字幕与长篇拉丁字母正文明显冲突时，保留源站声明并提示实际语言待核验，不自动认定英文或翻译。抖音逐项过滤已识别的平台模板，缺有效文案时旧标题仅用于识别；没有可用旧标题或正文则明确失败。诊断贯通原文、初筛与伴读。详见 [修复与验收说明](docs/review-v0412-replay-fixes.md)。
 

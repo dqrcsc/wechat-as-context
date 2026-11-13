@@ -1,4 +1,4 @@
-# 媒体工具与渠道恢复（含 v0.4.12 修复）
+# 媒体工具与渠道恢复（含 v0.4.14 修复）
 
 本次修复 v0.4.8 审查中的代理环境丢失、默认强制覆盖示例和工具路径问题。更新代码/Skill 不会升级服务、安装下载器、重发历史 failed 或重新处理历史文章。
 
@@ -51,6 +51,26 @@ python3 -m venv /tmp/wxctx-ca-check
 | douyin_content_unavailable | 没有有效文案/转写，仅有可识别的旧标题 | 不以旧标题/摘要推演正文；后续真实获取需单独授权，不能宣称已恢复 |
 
 语言警示可与 complete 并存；详见 [公开复验修复说明](review-v0412-replay-fixes.md)。
+
+### 抖音 SEO 与浏览器诊断（v0.4.14）
+
+`douyin_seo_excerpt` 表示简介可能截断，不能按完整文案分析；`douyin_seo_page_identity` 表示使用严格的页面及面包屑身份兜底。音频成功转写与简介不完整可以同时成立，警示随质量元数据、初筛与伴读传播。
+
+| reason | 已观察到的阶段/结果 | 核对方向 |
+| --- | --- | --- |
+| douyin_cdp_browser_unavailable / spawn_failed | 浏览器不可用或启动失败 | 核对浏览器路径及权限，不自动安装 |
+| douyin_cdp_endpoint_missing / endpoint_timeout / endpoint_failed | 未输出调试端点、启动期限触发或端点读取失败 | 核对启动条件；不能直接归因为站点风控 |
+| douyin_cdp_tab_missing / tab_failed / connect_failed | 无可用标签页、标签发现异常或 CDP 连接失败 | 核对浏览器启动与本地调试通道 |
+| douyin_cdp_setup_failed / navigation_timeout / navigation_failed / reload_failed / session_failed / deadline | CDP 初始化、导航、重载、会话或总期限失败 | 对代理/请求期限/等待单因素复验，不自动延长全部超时 |
+| douyin_cdp_document_http_NNN / document_tls_failed / document_network_failed | 目标文档 HTTP、证书或网络失败 | 保持 TLS 校验，核对实际状态；不以此推断账号或作品状态 |
+| douyin_cdp_detail_request_missing / detail_response_missing | 未观察到详情请求，或未拿到可用响应体 | 区分页面未加载、未发请求和响应阶段；不能称为“没有正文” |
+| douyin_cdp_detail_http_NNN / detail_network_failed / detail_body_failed | 详情 HTTP、网络或 CDP 读响应失败 | 按阶段隔离，原始 URL/响应不入库 |
+| douyin_cdp_detail_empty / detail_invalid_json / detail_missing / detail_identity_mismatch / no_matching_detail | 空/无效/缺字段/作品 ID 不符，未取得匹配详情 | 不借用其他作品，不把 JSON 错误页当正文 |
+| douyin_cdp_media_missing | 取得匹配详情但缺少合规媒体 URL | 可保留文案；不能用 DOM 占位视频补齐，不承诺已转写 |
+
+表中省略前缀的同组代码也都以 `douyin_cdp_` 开头。诊断记录前序失败，最终成功仍可能带这些原因。提取完全失败时，受控原因也进入错误信息，不能只看日志或只凭单个原因判定恢复成功。
+
+本轮只修复已确认的身份、媒体判定和异步响应收集问题。两轮单因素结果不足以支持调整默认代理/超时/等待参数，保留生产配置。详情与边界见 [实验和回归验收](review-v0413-douyin-fixes.md)。
 
 ## 渠道恢复矩阵
 
