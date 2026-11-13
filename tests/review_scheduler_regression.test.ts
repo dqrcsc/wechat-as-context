@@ -1,5 +1,5 @@
 import './support/isolation.ts';
-import { test, expect } from 'bun:test';
+import { test, expect, spyOn } from 'bun:test';
 import { mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -224,11 +224,29 @@ test('another live scheduler cannot reclaim a long-running owner or queue twice'
 test('renewable locks keep live ownership and reclaim stale PID-reused locks', async () => {
   const f = fixture(); const second = new ContextDatabase(f.config.dbPath);
   try {
-    await f.db.withLock('lease-test', async ownsLock => {
-      await new Promise(resolve => setTimeout(resolve, 100));
-      expect(ownsLock()).toBe(true);
-      await expect(second.withLock('lease-test', async () => {}, {ttlMs: 60})).rejects.toThrow('Operation busy');
-    }, { ttlMs: 60, renew: true });
+    // Drive the actual heartbeat deterministically: a 60ms wall-clock lease can
+    // legitimately expire during CI scheduling/SQLite delays, even with no bug.
+    let now = Date.now();
+    let renew: (() => void) | undefined;
+    let intervalMs: number | undefined;
+    const timer = { unref() {} } as ReturnType<typeof setInterval>;
+    const clock = spyOn(Date, 'now').mockImplementation(() => now);
+    const intervals = spyOn(globalThis, 'setInterval').mockImplementation(((callback: () => void, delay: number) => {
+      renew = callback; intervalMs = delay; return timer;
+    }) as typeof setInterval);
+    const clear = spyOn(globalThis, 'clearInterval').mockImplementation(() => {});
+    try {
+      await f.db.withLock('lease-test', async ownsLock => {
+        expect(intervalMs).toBe(20);
+        expect(renew).toBeDefined();
+        for (let step = 0; step < 5; step++) { now += 20; renew!(); }
+        expect(ownsLock()).toBe(true);
+        await expect(second.withLock('lease-test', async () => {}, {ttlMs: 60})).rejects.toThrow('Operation busy');
+        // Without another heartbeat, the lease must still expire and fence its owner.
+        now += 61;
+        expect(ownsLock()).toBe(false);
+      }, { ttlMs: 60, renew: true });
+    } finally { clear.mockRestore(); intervals.mockRestore(); clock.mockRestore(); }
     f.db.db.query('INSERT INTO operation_locks (name,pid,owner,acquired_at) VALUES (?,?,?,?)')
       .run('scheduler', process.pid, 'stale-instance-with-reused-pid', Date.now() - 3600000);
     const task = f.db.createScheduledTask({ title: 'recover stale lease', nextRunAt: Date.now() - 1000 });
