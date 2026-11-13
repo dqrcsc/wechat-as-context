@@ -14,6 +14,7 @@ export interface ExtractionQuality {
 }
 export function extractionNotice(quality?: ExtractionQuality): string {
   const warnings = [];
+  if (quality?.reasons.includes("douyin_seo_excerpt")) warnings.push("⚠️ 作品文案来自 SEO 简介片段，可能被截断；不能视为完整作品正文，口播覆盖另按转写状态判断。");
   if (quality?.reasons.includes('caption_language_mismatch')) warnings.push('⚠️ 源站字幕语言声明与正文文字特征不一致，实际语言待核验；不能视为已取得声明语言的逐字稿。');
   if (quality?.reasons.includes('douyin_content_unavailable')) warnings.push('⚠️ 本次未取得有效作品文案或逐字稿；保留的旧标题仅用于识别作品，不能据此分析正文。');
   else if (quality) warnings.push(coverageNotice(quality));

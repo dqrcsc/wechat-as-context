@@ -4,6 +4,7 @@ import { renderAsrTranscript } from "./transcript_text.ts";
 import { SystemTlsError } from "./system_tls.ts";
 import { declaredSocialPostId, matchingDouyinDetail, pageHasSocialIdentity, requestedSocialPostId, socialPostId, SocialIdentityError } from "./social_identity.ts";
 import { CdpSession, waitForDevToolsEndpoint } from "./cdp.ts";
+import { collectDouyinDetail, hasDouyinMedia, type DouyinBrowserResult } from "./douyin_browser.ts";
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
@@ -458,6 +459,15 @@ export function cleanDouyinDescription(value: unknown): { text: string; template
   return { text, templateRemoved: false };
 }
 
+let douyinAcquisitionTestHooks: {
+  seo?: (id: string) => Promise<DouyinSeoVideoMeta | null>;
+  browser?: (id: string) => Promise<DouyinBrowserResult>;
+} | null = null;
+export function setDouyinAcquisitionTestHooks(hooks: typeof douyinAcquisitionTestHooks): void {
+  if (!process.env.WXCTX_TEST_ROOT) throw new Error("Test isolation required");
+  douyinAcquisitionTestHooks = hooks;
+}
+
 export async function extractDouyinWork(
   rawUrl: string,
   fallbackTitle = "",
@@ -522,28 +532,25 @@ export async function extractDouyinWork(
   }
 
   // Step 3: Fetch rich SEO JSON-LD metadata (creator, duration, uploadDate, creator/top comments)
-  const seoMeta =
-    !process.env.WXCTX_TEST_ROOT && awemeId
-      ? await fetchDouyinSeoVideoObject(awemeId)
-      : null;
+  const acquisitionReasons: string[] = [];
+  const seoMeta = douyinAcquisitionTestHooks?.seo ? await douyinAcquisitionTestHooks.seo(awemeId) :
+    !process.env.WXCTX_TEST_ROOT && awemeId ? await fetchDouyinSeoVideoObject(awemeId) : null;
 
-  // Step 4: Use local headless Chrome CDP to intercept /aweme/v1/web/aweme/detail when SSR _ROUTER_DATA is empty
-  if (
-    !itemInfo?.video?.play_addr?.url_list?.length &&
-    !Array.isArray(itemInfo?.images) &&
-    !process.env.WXCTX_TEST_ROOT &&
-    awemeId
-  ) {
+  // Browser diagnostics stay separate from audio/transcription outcomes.
+  if (!hasDouyinMedia(itemInfo) && (!process.env.WXCTX_TEST_ROOT || douyinAcquisitionTestHooks?.browser) && awemeId) {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const cdpRes = await fetchDouyinAwemeDetailViaCdp(awemeId);
-      if (cdpRes?.awemeDetail) itemInfo = matchingDouyinDetail(cdpRes.awemeDetail, awemeId);
-      if (itemInfo?.video?.play_addr?.url_list?.length || itemInfo?.images?.length) break;
+      const result = await (douyinAcquisitionTestHooks?.browser ?? fetchDouyinAwemeDetailViaCdp)(awemeId);
+      acquisitionReasons.push(...result.reasons);
+      if (result.awemeDetail) itemInfo = matchingDouyinDetail(result.awemeDetail, awemeId) || itemInfo;
+      if (hasDouyinMedia(itemInfo)) break;
     }
   }
+  for (const reason of new Set(acquisitionReasons)) console.warn(`[DouyinExtractor] ${reason}`);
 
   if (!itemInfo && !seoMeta && !metadataVerified) {
-    if (acquisitionFailure) throw new Error(`Douyin acquisition failed: ${acquisitionFailure}; identity not verified after fallback`);
-    throw new SocialIdentityError("Douyin content identity could not be verified");
+    const diagnostic = [...new Set(acquisitionReasons)].join(", ");
+    if (acquisitionFailure) throw new Error(`Douyin acquisition failed: ${acquisitionFailure}; identity not verified after fallback; ${diagnostic}`);
+    throw new SocialIdentityError(`Douyin content identity could not be verified; ${diagnostic}`);
   }
   // Do not supplement an identified object with unrelated page-level media.
   const metadataHtml = !itemInfo && !seoMeta && metadataVerified ? html : "";
@@ -552,8 +559,13 @@ export async function extractDouyinWork(
   const rawDesc = descriptions.find(candidate => candidate.text)?.text || "";
   const oldTitle = cleanDouyinDescription(fallbackTitle);
   const trustedOldTitle = /^(?:抖音视频\s*\([^)]*\)|抖音作品)$/.test(oldTitle.text) ? "" : oldTitle.text;
-  const reasons: string[] = [];
-  if (descriptions.some(candidate => candidate.templateRemoved) || oldTitle.templateRemoved) reasons.push("douyin_template_text_filtered");
+  const reasons: string[] = [...new Set(acquisitionReasons)];
+  if (descriptions.some(candidate => candidate.templateRemoved) || oldTitle.templateRemoved || seoMeta?.templateFiltered) reasons.push("douyin_template_text_filtered");
+  const seoExcerpt = Boolean(rawDesc && seoMeta && rawDesc === seoMeta.name && !cleanDouyinDescription(itemInfo?.desc).text);
+  if (seoExcerpt) {
+    reasons.push("douyin_seo_excerpt");
+    if (seoMeta?.identitySource === "page_breadcrumb") reasons.push("douyin_seo_page_identity");
+  }
   // Old title/digest identify history; they are not evidence fetched from this page.
   const title = rawDesc.split(/\r?\n/)[0]?.replace(/#[^\s#]+/g, "").trim().slice(0, 72) ||
     trustedOldTitle || (awemeId ? `抖音视频 (${awemeId})` : "抖音作品");
@@ -644,7 +656,7 @@ export async function extractDouyinWork(
       config: options?.config,
     });
     const sections = [
-      rawDesc ? `## 作品文案\n\n${rawDesc}` : "",
+      rawDesc ? `## ${seoExcerpt ? "SEO 简介片段（可能截断）" : "作品文案"}\n\n${rawDesc}` : "",
       `## 图集配图（共 ${albumImages.length} 张）\n\n` +
         albumImages.map((u, i) => `![配图 ${i + 1}](${u})`).join("\n\n"),
       ocr.text ? `## 图集卡片内容提取（Vision OCR）\n\n${ocr.text}` : "",
@@ -695,7 +707,7 @@ export async function extractDouyinWork(
   }
 
   if (!rawDesc.trim() && !transcript) {
-    if (!trustedOldTitle) throw new Error("Douyin content unavailable: no usable description or transcript");
+    if (!trustedOldTitle) throw new Error(`Douyin content unavailable: no usable description or transcript; ${reasons.join(", ")}`);
     reasons.push("douyin_content_unavailable");
   }
 
@@ -705,7 +717,7 @@ export async function extractDouyinWork(
 
   const sections: string[] = [];
   if (coverUrl) sections.push(`![视频封面](${coverUrl})`);
-  if (rawDesc.trim()) sections.push(`## 视频文案与标签\n\n${rawDesc.trim()}`);
+  if (rawDesc.trim()) sections.push(`## ${seoExcerpt ? "SEO 简介片段（可能截断）" : "视频文案与标签"}\n\n${rawDesc.trim()}`);
   if (transcript) {
     sections.push(`## 视频口播逐字稿${asrPartial ? "（部分转写，未取得全文）" : ""}（${engineUsed}）\n\n${renderAsrTranscript(transcript)}`);
   } else {
@@ -747,6 +759,8 @@ interface DouyinSeoVideoMeta {
   durationSeconds?: number;
   coverUrl?: string;
   comments: string[];
+  identitySource: "object" | "page_breadcrumb";
+  templateFiltered: boolean;
 }
 
 export async function fetchDouyinSeoVideoObject(
@@ -773,86 +787,97 @@ export async function fetchDouyinSeoVideoObject(
 
 export function parseDouyinSeoVideoObject(html: string, awemeId: string): DouyinSeoVideoMeta | null {
   const pageUrl = `https://www.douyin.com/video/${awemeId}`;
-  pageHasSocialIdentity(html, pageUrl, awemeId, "douyin");
+  const verifiedPage = pageHasSocialIdentity(html, pageUrl, awemeId, "douyin");
   const ldMatches = [
     ...html.matchAll(
       /<script[^>]+type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi
     ),
   ];
+  const objects: any[] = [];
+  let malformed = false;
   for (const m of ldMatches) {
     try {
       const parsed = JSON.parse(m[1].trim());
-      const objects = Array.isArray(parsed) ? parsed : Array.isArray(parsed?.["@graph"]) ? parsed["@graph"] : [parsed];
-      for (const data of objects) {
-        if (data?.["@type"] === "VideoObject") {
-          const references = [data.url, data["@id"], typeof data.mainEntityOfPage === "string" ? data.mainEntityOfPage : data.mainEntityOfPage?.["@id"]].filter((v): v is string => typeof v === "string" && Boolean(v));
-          if (!references.length || !references.every(ref => declaredSocialPostId(ref, pageUrl, "douyin") === awemeId)) continue;
-          const name =
-            typeof data.name === "string"
-              ? data.name.replace(/\s*-\s*抖音$/, "").trim()
-              : undefined;
-          const creatorName =
-            typeof data.creator?.name === "string"
-              ? data.creator.name.trim()
-              : undefined;
-          const uploadDate =
-            typeof data.uploadDate === "string"
-              ? data.uploadDate.slice(0, 10)
-              : undefined;
-          let durationSeconds: number | undefined;
-          if (typeof data.duration === "string") {
-            const dm = data.duration.match(
-              /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/i
-            );
-            if (dm) {
-              const h = Number(dm[1] || 0);
-              const min = Number(dm[2] || 0);
-              const s = Number(dm[3] || 0);
-              const total = h * 3600 + min * 60 + s;
-              if (total > 0) durationSeconds = total;
-            }
-          }
-          const coverUrl = Array.isArray(data.thumbnailUrl)
-            ? data.thumbnailUrl.find(
-                (u: unknown) => typeof u === "string" && u.startsWith("http")
-              )
-            : undefined;
-          const comments: string[] = [];
-          if (Array.isArray(data.comment)) {
-            for (const c of data.comment.slice(0, 6)) {
-              const cAuthor = c?.creator?.name?.trim() || "网友";
-              const cText = c?.text?.trim();
-              const likes = Number(
-                c?.interactionStatistic?.userInteractionCount || 0
-              );
-              if (cText) {
-                const roleTag =
-                  creatorName && cAuthor === creatorName
-                    ? `**${cAuthor}（作者补充）**`
-                    : `**${cAuthor}**${likes > 0 ? `（👍 ${likes}）` : ""}`;
-                comments.push(`${roleTag}：${cText}`);
-              }
-            }
-          }
-          return {
-            name,
-            creatorName,
-            uploadDate,
-            durationSeconds,
-            coverUrl,
-            comments,
-          };
+      objects.push(...(Array.isArray(parsed) ? parsed : Array.isArray(parsed?.["@graph"]) ? parsed["@graph"] : [parsed]));
+    } catch { malformed = true; }
+  }
+  const videos = objects.filter(data => data?.["@type"] === "VideoObject");
+  const breadcrumbs = objects.filter(data => data?.["@type"] === "BreadcrumbList");
+  const items = breadcrumbs[0]?.itemListElement;
+  const breadcrumbRefs = Array.isArray(items) ? items.map(item =>
+    typeof item?.item === "string" ? item.item : item?.item?.["@id"] || item?.item?.url || "") : [];
+  const breadcrumbIds = breadcrumbRefs.map(ref => typeof ref === "string" ? declaredSocialPostId(ref, pageUrl, "douyin") : null);
+  const pageAnchored = !malformed && verifiedPage && videos.length === 1 && breadcrumbs.length === 1 &&
+    Array.isArray(items) && items.length > 0 && items.every((item, index) => item?.position === index + 1) &&
+    breadcrumbIds.at(-1) === awemeId && breadcrumbIds.every(id => !id || id === awemeId);
+  for (const data of videos) {
+    try {
+      const declared = ["url", "@id", "mainEntityOfPage"].filter(key => Object.hasOwn(data, key));
+      const references = declared.map(key => key === "mainEntityOfPage" && typeof data[key] !== "string" ? data[key]?.["@id"] : data[key]);
+      if (declared.length ? !references.every(ref => typeof ref === "string" && declaredSocialPostId(ref, pageUrl, "douyin") === awemeId) : !pageAnchored) continue;
+      const candidates = [data.name, data.description].map(cleanDouyinDescription);
+      const name = candidates.find(candidate => candidate.text)?.text.slice(0, 2000);
+      if (!name) continue;
+      const creatorName =
+        typeof data.creator?.name === "string"
+          ? data.creator.name.trim()
+          : undefined;
+      const uploadDate =
+        typeof data.uploadDate === "string"
+          ? data.uploadDate.slice(0, 10)
+          : undefined;
+      let durationSeconds: number | undefined;
+      if (typeof data.duration === "string") {
+        const dm = data.duration.match(
+          /PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/i
+        );
+        if (dm) {
+          const h = Number(dm[1] || 0);
+          const min = Number(dm[2] || 0);
+          const s = Number(dm[3] || 0);
+          const total = h * 3600 + min * 60 + s;
+          if (total > 0) durationSeconds = total;
         }
       }
+      const coverUrl = Array.isArray(data.thumbnailUrl)
+        ? data.thumbnailUrl.find(
+            (u: unknown) => typeof u === "string" && u.startsWith("http")
+          )
+        : undefined;
+      const comments: string[] = [];
+      if (Array.isArray(data.comment)) {
+        for (const c of data.comment.slice(0, 6)) {
+          const cAuthor = c?.creator?.name?.trim() || "网友";
+          const cText = c?.text?.trim();
+          const likes = Number(
+            c?.interactionStatistic?.userInteractionCount || 0
+          );
+          if (cText) {
+            const roleTag =
+              creatorName && cAuthor === creatorName
+                ? `**${cAuthor}（作者补充）**`
+                : `**${cAuthor}**${likes > 0 ? `（👍 ${likes}）` : ""}`;
+            comments.push(`${roleTag}：${cText}`);
+          }
+        }
+      }
+      return {
+        name,
+        creatorName,
+        uploadDate,
+        durationSeconds,
+        coverUrl,
+        comments,
+        identitySource: declared.length ? "object" : "page_breadcrumb",
+        templateFiltered: candidates.some(candidate => candidate.templateRemoved),
+      };
     } catch {}
   }
   return null;
 }
 
-async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
-  awemeDetail: any | null;
-} | null> {
-  if (process.env.WXCTX_TEST_ROOT) return null;
+export async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<DouyinBrowserResult> {
+  if (process.env.WXCTX_TEST_ROOT) return { awemeDetail: null, reasons: ["douyin_cdp_test_disabled"] };
   const chromePaths = [
     process.env.CHROME_BIN || "",
     "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -860,112 +885,50 @@ async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<{
     "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
     "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
   ].filter(Boolean);
-  const chromeBin = chromePaths.find((p) => existsSync(p));
-  if (!chromeBin) return null;
-
-  const profileDir = mkdtempSync(join(tmpdir(), "wxctx-dy-cdp-"));
+  const chromeBin = chromePaths.find(p => existsSync(p));
+  if (!chromeBin) return { awemeDetail: null, reasons: ["douyin_cdp_browser_unavailable"] };
+  let profileDir = "";
   let proc: ReturnType<typeof Bun.spawn> | null = null;
   let ws: WebSocket | null = null;
   let cdp: CdpSession | null = null;
+  let stage = "spawn";
   const deadline = AbortSignal.timeout(60_000);
-
+  const startupDeadline = AbortSignal.timeout(12_000);
   try {
-    proc = Bun.spawn(
-      [
-        chromeBin,
-        "--headless=new",
-        "--disable-gpu",
-        "--no-first-run",
-        "--no-default-browser-check",
-        "--mute-audio",
-        `--user-agent=${DESKTOP_CHROME_UA}`,
-        `--user-data-dir=${profileDir}`,
-        "--remote-debugging-port=0",
-        "about:blank",
-      ],
-      { stderr: "pipe", stdout: "ignore" }
-    );
-
-    const browserWsUrl = await waitForDevToolsEndpoint(
-      proc.stderr as ReadableStream<Uint8Array>,
-      AbortSignal.any([deadline, AbortSignal.timeout(12_000)])
-    );
-    if (!browserWsUrl) return null;
-
-    const baseHttp = browserWsUrl
-      .replace(/^ws:\/\//, "http://")
-      .replace(/\/devtools\/browser\/.*$/, "");
+    profileDir = mkdtempSync(join(tmpdir(), "wxctx-dy-cdp-"));
+    proc = Bun.spawn([
+      chromeBin, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--mute-audio",
+      `--user-agent=${DESKTOP_CHROME_UA}`, `--user-data-dir=${profileDir}`, "--remote-debugging-port=0", "about:blank",
+    ], { stderr: "pipe", stdout: "ignore" });
+    stage = "endpoint";
+    const browserWsUrl = await waitForDevToolsEndpoint(proc.stderr as ReadableStream<Uint8Array>, AbortSignal.any([deadline, startupDeadline]));
+    if (!browserWsUrl) return { awemeDetail: null, reasons: ["douyin_cdp_endpoint_missing"] };
+    stage = "tab";
+    const baseHttp = browserWsUrl.replace(/^ws:\/\//, "http://").replace(/\/devtools\/browser\/.*$/, "");
     let pageWsUrl = "";
     for (let i = 0; i < 15; i++) {
+      deadline.throwIfAborted();
       try {
-        const list = (await (await fetch(`${baseHttp}/json/list`, { signal: deadline })).json()) as any[];
-        const page = list.find(
-          (t) => t.type === "page" && typeof t.webSocketDebuggerUrl === "string"
-        );
-        if (page) {
-          pageWsUrl = page.webSocketDebuggerUrl;
-          break;
-        }
+        const list = await (await fetch(`${baseHttp}/json/list`, { signal: deadline })).json() as any[];
+        const page = Array.isArray(list) ? list.find(t => t.type === "page" && typeof t.webSocketDebuggerUrl === "string") : undefined;
+        if (page) { pageWsUrl = page.webSocketDebuggerUrl; break; }
       } catch {}
       await Bun.sleep(200);
     }
-    if (!pageWsUrl) return null;
-
+    if (!pageWsUrl) return { awemeDetail: null, reasons: ["douyin_cdp_tab_missing"] };
+    stage = "connect";
     ws = new WebSocket(pageWsUrl);
     cdp = new CdpSession(ws, { signal: deadline });
     await cdp.ready;
-    const call = (method: string, params: Record<string, unknown> = {}) => cdp!.call(method, params);
-
-    const detailReqIds = new Set<string>();
-    let awemeDetail: any = null;
-
-    ws.addEventListener("message", async (ev) => {
-      try {
-        const data = JSON.parse(String(ev.data));
-        if (["Network.requestWillBeSent", "Network.responseReceived"].includes(data.method)) {
-          const url = String(data.params?.request?.url || data.params?.response?.url || "");
-          if (url.includes("/aweme/v1/web/aweme/detail") && data.params?.requestId) detailReqIds.add(String(data.params.requestId));
-        }
-        if (data.method === "Network.loadingFinished" && detailReqIds.delete(String(data.params?.requestId))) {
-          const bodyRes = await call("Network.getResponseBody", { requestId: data.params.requestId });
-          const detail = parseDouyinCdpBody(bodyRes, awemeId);
-          if (detail) awemeDetail = detail;
-        }
-      } catch {}
-    });
-
-    await call("Network.enable");
-    await call("Page.enable");
-    await call("Page.navigate", {
-      url: `https://www.douyin.com/video/${awemeId}`,
-    });
-
-    for (let i = 0; i < 50; i++) {
-      deadline.throwIfAborted();
-      await Bun.sleep(500);
-      if (awemeDetail) break;
-      if (i === 24 && detailReqIds.size === 0) {
-        await call("Page.navigate", {
-          url: `https://www.douyin.com/video/${awemeId}`,
-        });
-      }
-    }
-
-    return { awemeDetail };
-  } catch (err) {
-    console.warn(`[DouyinExtractor] CDP extraction warning for ${awemeId}:`, err);
-    return null;
+    return await collectDouyinDetail(awemeId, cdp, ws, { signal: deadline });
+  } catch {
+    const reason = deadline.aborted ? "douyin_cdp_deadline" : stage === "endpoint" && startupDeadline.aborted ? "douyin_cdp_endpoint_timeout" : `douyin_cdp_${stage}_failed`;
+    return { awemeDetail: null, reasons: [reason] };
   } finally {
     cdp?.dispose();
-    try {
-      ws?.close();
-    } catch {}
-    try {
-      proc?.kill();
-    } catch {}
-    try {
-      rmSync(profileDir, { recursive: true, force: true });
-    } catch {}
+    try { ws?.close(); } catch {}
+    try { proc?.kill(); } catch {}
+    try { if (profileDir) rmSync(profileDir, { recursive: true, force: true }); } catch {}
   }
 }
 
