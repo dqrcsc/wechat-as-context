@@ -42,6 +42,16 @@ python3 -m venv /tmp/wxctx-ca-check
 
 只有固定 reason 和整数 exitCode 从错误分支返回；外部 YouTube 原文的 `extraction_quality.reasons` 额外记录 `resolver_exit_code_N`。stderr 只在内存中作有限分类，不返回或记录其正文。成功回退可保留之前失败的诊断，不等于最终提取失败；最终以质量状态与取得的内容共同判断。
 
+### 来源质量提示（v0.4.13）
+
+| reason | 证据边界 | 处理方向 |
+| --- | --- | --- |
+| caption_language_mismatch | 中文声明与长篇拉丁字母正文冲突；不是已经识别实际语种 | 保留声明与原文，核验语言；不自动翻译或重跑 |
+| douyin_template_text_filtered | 已过滤识别到的平台模板；最终正文可能仍可用 | 结合文案、ASR/OCR 与质量状态判断，不根据模板日期填写发布时间 |
+| douyin_content_unavailable | 没有有效文案/转写，仅有可识别的旧标题 | 不以旧标题/摘要推演正文；后续真实获取需单独授权，不能宣称已恢复 |
+
+语言警示可与 complete 并存；详见 [公开复验修复说明](review-v0412-replay-fixes.md)。
+
 ## 渠道恢复矩阵
 
 | 入口 | 定位与成功边界 | 恢复方式 |
