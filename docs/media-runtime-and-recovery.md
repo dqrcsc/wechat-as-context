@@ -1,6 +1,16 @@
-# 媒体工具与渠道恢复（含 v0.4.15 修复）
+# 媒体工具与渠道恢复（含 v0.4.16 修复）
 
 本次修复 v0.4.8 审查中的代理环境丢失、默认强制覆盖示例和工具路径问题。更新代码/Skill 不会升级服务、安装下载器、重发历史 failed 或重新处理历史文章。
+
+## v0.4.16：转写完成状态、覆盖与准确性分开
+
+当前 ASR 适配器没有逐段时间覆盖证据。本地成功返回非空文本、云端 STOP 均为 `partial` + `asr_coverage_unverified`，表示**已有转写、完整性未核验**。这不是确认缺失；`asr_truncated` 才是明确截断。字幕/OCR 原有获取状态不变。
+
+`extraction_quality.asrEvidence` 是证据数组：`engineCompletion`、Unicode码点数 `textCharacters`、`timingAvailable: false`，以及可取得的输入时长 `inputDurationSeconds`、成功解码时长 `decodedDurationSeconds`、JSON文本段数 `segmentCount`。未知字段省略；时长由ffmpeg日志观测，不等于ASR逐段覆盖。微信多视频另带 `videoIndex`；`partialVideos` 包括未知覆盖的成功转写。非法字段、越界索引及证据与complete冲突时读回明确降级。
+
+正文保留原始文本，仅规范重复中文标点；额外最多列5处外文词/专名复核候选（Unicode UTF-16原始位置），不提供替换词，不判断品牌拼写正确与否，也不自动纠正中文同音词。候选未出现不代表无误。纯外语正文不逐词标红。模型输入、原文、初筛与伴读均保留质量边界。
+
+若ffmpeg非零退出，不采用其残留WAV作为成功解码，记录 `asr_tool_ffmpeg_decode_failed`；可以继续用原媒体尝试原有引擎。未新增外部请求、模型安装或历史重试。测试与真实验证见 [ASR修复验收](review-v0415-asr-quality.md)。
 
 ## 工具路径与网络配置
 
@@ -107,7 +117,7 @@ python3 -m venv /tmp/wxctx-ca-check
 - YouTube Web/Android 的 videoId 明确冲突时拒绝该来源整组数据，分别记录 `web_player_video_id_mismatch` / `android_player_video_id_mismatch`；仍可尝试独立的正确来源。yt-dlp 继续独立校验身份。
 - metadata-only 恢复判定只读 frontmatter，明确 complete/partial 状态优先于旧字段或正文引用。原文在模型调用/图片下载期间有修改或被删除时拒绝覆盖；先审阅当前文件。`--force` 不能绕过进行中的编辑保护。
 - 云端结束状态 STOP + 非空文本为正常返回，无最低字数限制；MAX_TOKENS 保留文本并记录 `asr_truncated`，缺少结束状态记录 `asr_finish_reason_missing`，均为 partial。拒绝与空文本分别记录 `cloud_asr_rejected` / `cloud_asr_empty`，与本地工具失败原因并存。
-- 部分转写在所有视频入口保持 partial。微信原生视频的 `partialVideos` 是 `processedVideos` 子集；有片段但未完整转写不应算作完全缺失，也不能当成完整。质量标记和提示会随归档及模型输入传播。
+- 部分转写在所有视频入口保持 partial。微信原生视频的 `partialVideos` 是 `processedVideos` 子集；v0.4.16 起也包括完整性未核验的已取得转写，不应算作完全缺失，也不能当成完整。质量标记和提示会随归档及模型输入传播。
 - 强制获取成功不依赖模型分析成功：真实标题/转写已恢复但模型仍不可用时，安全保存来源、保留旧伴读。升级或测试不触发任何旧文章重跑或历史 failed 重试。
 
 修复条目、跨分支矩阵和验证限制见 [复查修复说明](review-v0411-fixes.md)。
