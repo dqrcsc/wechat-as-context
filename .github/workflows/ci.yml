@@ -43,5 +43,7 @@ jobs:
         run: |
           python -m venv "$RUNNER_TEMP/wxctx-ca"
           "$RUNNER_TEMP/wxctx-ca/bin/python" -m pip install --isolated --index-url https://pypi.org/simple -r tests/integration/youtube-ca-requirements.txt
+      - name: Verify offline timed ASR contract without models
+        run: PYTHONDONTWRITEBYTECODE=1 python tests/integration/local_asr_timed_test.py
       - name: Verify CA stores without network or application data
         run: '"$RUNNER_TEMP/wxctx-ca/bin/python" tests/integration/youtube_ca_test.py'

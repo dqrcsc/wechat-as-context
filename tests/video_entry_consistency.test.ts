@@ -14,7 +14,11 @@ import { savedPublicationDate } from '../src/extractor/publication_date.ts';
 import { extractDouyinWork, extractXiaohongshuNote } from '../src/extractor/social_media.ts';
 const savedFetch=globalThis.fetch;
 afterEach(()=>{globalThis.fetch=savedFetch;setAsrTestRunner(null);setSubagentTestRunner(null);});
+import {asrQuality} from '../src/extractor/asr_quality.ts';
 const raw='？专名 Codeex 15%。，原始口播结束。 20%。';
+function timedQuality(text:string) { return asrQuality(text,{engineCompletion:'completed',inputDurationSeconds:10,decodedDurationSeconds:10,timing:{schema:'wxctx-vad-v1',audioDurationMs:10000,scanComplete:true,vadSegments:[{startMs:1000,endMs:9000}],segments:[{startMs:1000,endMs:9000,status:'ok',text}]}}); }
+function partialTimedQuality() { const e=timedQuality(raw).asrEvidence![0]; e.timing!.vadSegments.push({startMs:9000,endMs:10000}); e.timing!.segments.push({startMs:9000,endMs:10000,status:'empty',text:''}); return asrQuality(raw,e); }
+function failedTimedQuality() { const e=timedQuality(raw).asrEvidence![0]; e.timing!.segments[0]={startMs:1000,endMs:9000,status:'failed',text:''}; return asrQuality('',e); }
 async function native(options:{outcomes:string[];mixed?:boolean;idea?:boolean;modelFails?:boolean;fileFails?:boolean;fileFirst?:boolean}){
  const root=mkdtempSync(join(tmpdir(),'video-entry-'));
  const config=loadConfig({IGNORE_HOME_DOTENV:'true',VAULT_ROOT:'none',WECHAT_CONTEXT_DATA_DIR:root},root);
@@ -29,7 +33,7 @@ async function native(options:{outcomes:string[];mixed?:boolean;idea?:boolean;mo
   if(url.includes('video-0')&&options.outcomes[0]==='download')return new Response('',{status:403});
   return new Response(new Uint8Array(payload));
  }) as unknown as typeof fetch;
- setAsrTestRunner(async req=>{paths.push(req.mediaPath!);const outcome=options.outcomes[asrCalls++];if(outcome==='throw')throw new Error('private upstream secret');return {transcript:outcome==='empty'?'':raw,engineUsed:'fixture_asr', ...(outcome==='partial'?{extractionQuality:{status:'partial' as const,reasons:['asr_truncated']}}:{})};});
+ setAsrTestRunner(async req=>{paths.push(req.mediaPath!);const outcome=options.outcomes[asrCalls++];if(outcome==='throw')throw new Error('private upstream secret');return {transcript:['empty','timed_empty'].includes(outcome!)?'':raw,engineUsed:'fixture_asr', ...(outcome==='timed_partial'?{extractionQuality:partialTimedQuality()}:outcome==='timed_empty'?{extractionQuality:failedTimedQuality()}:outcome==='timed'?{extractionQuality:timedQuality(raw)}:outcome==='partial'?{extractionQuality:{status:'partial' as const,reasons:['asr_truncated']}}:{})};});
  setSubagentTestRunner(async req=>{prompts.push(req.prompt);if(options.modelFails)throw new Error('model unavailable');return {backend:req.backend,modelUsed:'fixture',outputText:'MODEL_SUMMARY',generatedImages:[],generatedFiles:[]};});
  const videos=options.outcomes.map((_,i)=>({type:5,video_item:{aeskey:key.toString('hex'),media:{encrypt_query_param:`video-${i}`}}}));
  const items:any[]=[{type:1,text_item:{text:options.idea?'记为灵感':'请归档视频'}},...videos];
@@ -60,16 +64,16 @@ test('native multiple videos retain successful evidence and missing index',async
 test('native model failure cannot discard a successful transcript',async()=>{
  const r=await native({outcomes:['ok'],modelFails:true});expect(r.source).toContain(raw);expect(readSavedExtractionQuality(r.source)?.status).toBe('partial');expect(r.result.replyText).toContain('未解析');
 });
-for(const platform of ['xhs','douyin'] as const)for(const outcome of ['ok','partial','empty','throw','download','no_stream'] as const){test(`${platform} ${outcome} has video-scoped quality and safe date`,async()=>{
+for(const platform of ['xhs','douyin'] as const)for(const outcome of ['timed_partial','timed_empty','timed','ok','partial','empty','throw','download','no_stream'] as const){test(`${platform} ${outcome} has video-scoped quality and safe date`,async()=>{
  const id=platform==='xhs'?'bbbbbbbbbbbbbbbbbbbbbbbb':'76543210987654321';let calls=0;
  const video=outcome==='no_stream'?{}:{play_addr:{url_list:['https://media.example.test/video.mp4']},media:{stream:{h264:[{masterUrl:'https://media.example.test/video.mp4'}]}}};
  const state=platform==='xhs'?{note:{noteDetailMap:{[id]:{note:{noteId:id,type:'video',title:'Fixture video',desc:'Fixture description',time:'bad',video}}}}}:{loaderData:{page:{videoInfoRes:{item_list:[{aweme_id:id,desc:'Fixture description',create_time:'bad',video}]}}}};
  const html=`<script>window.${platform==='xhs'?'__INITIAL_STATE__':'_ROUTER_DATA'}=${JSON.stringify(state)}</script>`;
  globalThis.fetch=(async()=>new Response(html)) as unknown as typeof fetch;
- setAsrTestRunner(async()=>{calls++;if(outcome==='throw')throw new Error('private token');if(outcome==='download')throw new MediaDownloadError('http_403');return {transcript:outcome==='empty'?'':raw,engineUsed:'fixture', ...(outcome==='partial'?{extractionQuality:{status:'partial' as const,reasons:['asr_truncated']}}:{})};});
+ setAsrTestRunner(async()=>{calls++;if(outcome==='throw')throw new Error('private token');if(outcome==='download')throw new MediaDownloadError('http_403');return {transcript:['empty','timed_empty'].includes(outcome!)?'':raw,engineUsed:'fixture', ...(outcome==='timed_partial'?{extractionQuality:partialTimedQuality()}:outcome==='timed_empty'?{extractionQuality:failedTimedQuality()}:outcome==='timed'?{extractionQuality:timedQuality(raw)}:outcome==='partial'?{extractionQuality:{status:'partial' as const,reasons:['asr_truncated']}}:{})};});
  const r=await (platform==='xhs'?extractXiaohongshuNote:extractDouyinWork)(platform==='xhs'?`https://www.xiaohongshu.com/explore/${id}`:`https://www.douyin.com/video/${id}`);
- expect(r.mediaKind).toBe('video');expect(r.publishDate).toBe('');expect(r.extractionQuality?.status).toBe(['ok','partial'].includes(outcome)?'partial':'metadata_only');expect(r.markdownBody).not.toContain('private token');
- if(outcome==='ok'){expect(r.markdownBody).toContain(raw);expect(r.markdownBody).toContain('完整性未核验');expect(r.extractionQuality?.asrEvidence?.[0].timingAvailable).toBe(false);}else expect(r.extractionQuality?.reasons.length).toBeGreaterThan(0);
+ expect(r.mediaKind).toBe('video');expect(r.publishDate).toBe('');expect(r.extractionQuality?.status).toBe(outcome==='timed'?'complete':['timed_partial','ok','partial'].includes(outcome)?'partial':'metadata_only');expect(r.markdownBody).not.toContain('private token');
+ if(outcome==='timed_partial'){expect(r.markdownBody).toContain('部分转写');expect(r.markdownBody).toContain('[00:09.000–00:10.000]');expect(r.extractionQuality?.reasons).toContain('asr_segments_missing');}else if(outcome==='timed_empty'){expect(r.markdownBody).toContain('【转写失败】');expect(r.extractionQuality?.asrEvidence?.[0].timingAvailable).toBe(true);}else if(outcome==='timed'){expect(r.markdownBody).toContain('[00:01.000–00:09.000]');expect(r.extractionQuality?.asrEvidence?.[0].timingAvailable).toBe(true);}else if(outcome==='ok'){expect(r.markdownBody).toContain(raw);expect(r.markdownBody).toContain('完整性未核验');expect(r.extractionQuality?.asrEvidence?.[0].timingAvailable).toBe(false);}else expect(r.extractionQuality?.reasons.length).toBeGreaterThan(0);
  if(outcome==='no_stream'){expect(calls).toBe(0);expect(r.markdownBody).not.toContain('Vision OCR');}
 });}
 
@@ -140,3 +144,15 @@ for (const partialVideos of [[2], [1, 1], [], ['1']]) {
     expect(readSavedExtractionQuality(`---\nextraction_quality: ${JSON.stringify(q)}\n---\nBody`)?.reasons).toEqual(['invalid_saved_quality']);
   });
 }
+
+for(const mode of ['video','mixed','idea'] as const)for(const outcomes of [['timed'],['timed','ok'],['timed','empty']])test(`native ${mode} timed coverage preserves per-video evidence ${outcomes}`,async()=>{
+ const r=await native({outcomes,mixed:mode==='mixed',idea:mode==='idea'});const q=readSavedExtractionQuality(r.source)!;
+ expect(q.status).toBe(outcomes.length===1?'complete':'partial');expect(q.asrEvidence?.[0].timingAvailable).toBe(true);expect(q.asrEvidence?.[0].videoIndex).toBe(1);
+ expect(r.source).toContain('[00:01.000–00:09.000]');expect(r.source).toContain(raw);
+ expect(q.partialVideos??[]).toEqual(outcomes.includes('ok')?[2]:[]);expect(q.missingVideos).toEqual(outcomes.includes('empty')?[2]:[]);
+});
+
+for(const mode of ['video','mixed','idea'] as const)test(`native ${mode} keeps all-failed timed regions as missing video evidence`,async()=>{
+ const r=await native({outcomes:['timed_empty'],mixed:mode==='mixed',idea:mode==='idea'});const q=readSavedExtractionQuality(r.source)!;
+ expect(q.status).toBe('unavailable');expect(q.missingVideos).toEqual([1]);expect(q.asrEvidence?.[0].timing?.segments[0].status).toBe('failed');expect(r.source).toContain('[00:01.000–00:09.000]');
+});

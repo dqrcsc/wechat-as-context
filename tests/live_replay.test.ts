@@ -151,3 +151,27 @@ for (const viaResolver of [false, true]) {
     expect(result.markdownBody).not.toContain('## 完整字幕');
   });
 }
+
+import {asrQuality} from '../src/extractor/asr_quality.ts';
+for(const viaResolver of [false,true])test(`YouTube native/resolver retains verified VAD timeline ${viaResolver}`,async()=>{
+ ytPage();setYouTubeResolverTestRunner(async()=>resolverData());let calls=0;
+ const transcript='Exact Zorpex speech.';
+ const q=asrQuality(transcript,{engineCompletion:'completed',inputDurationSeconds:5,decodedDurationSeconds:5,timing:{schema:'wxctx-vad-v1',audioDurationMs:5000,scanComplete:true,vadSegments:[{startMs:100,endMs:4900}],segments:[{startMs:100,endMs:4900,status:'ok',text:transcript}]}});
+ setAsrTestRunner(async()=>{if(viaResolver&&++calls===1)throw new MediaDownloadError('http_403');return{transcript,engineUsed:'fixture',extractionQuality:q};});
+ const r=await extractYouTubeVideo('https://youtu.be/abcdefghijk');expect(r.extractionQuality?.status).toBe('complete');expect(r.extractionQuality?.asrEvidence).toEqual(q.asrEvidence);
+ expect(r.markdownBody).toContain('[00:00.100–00:04.900]');expect(r.markdownBody).toContain('VAD检测区间已覆盖');expect(r.markdownBody).not.toContain('完整性未核验');
+});
+
+test('YouTube all-failed timed attempt keeps evidence, then resolver recovery scopes prior quality',async()=>{
+ ytPage();let calls=0;
+ const t={schema:'wxctx-vad-v1' as const,audioDurationMs:5000,scanComplete:true,vadSegments:[{startMs:0,endMs:5000}],segments:[{startMs:0,endMs:5000,status:'failed' as const,text:''}]};
+ const failed=asrQuality('',{engineCompletion:'completed',inputDurationSeconds:5,decodedDurationSeconds:5,timing:t});
+ setYouTubeResolverTestRunner(async()=>{throw new Error('resolver_timeout');});
+ setAsrTestRunner(async()=>({transcript:'',engineUsed:'fixture',extractionQuality:failed}));
+ const empty=await extractYouTubeVideo('https://youtu.be/abcdefghijk');expect(empty.extractionQuality?.status).toBe('metadata_only');expect(empty.extractionQuality?.asrEvidence).toEqual(failed.asrEvidence);expect(empty.markdownBody).toContain('【转写失败】');
+ setYouTubeResolverTestRunner(async()=>resolverData());
+ const transcript='Recovered exact speech.';
+ const q=asrQuality(transcript,{engineCompletion:'completed',inputDurationSeconds:5,decodedDurationSeconds:5,timing:{...t,segments:[{startMs:0,endMs:5000,status:'ok',text:transcript}]}});
+ setAsrTestRunner(async()=>++calls===1?{transcript:'',engineUsed:'fixture',extractionQuality:failed}:{transcript,engineUsed:'fixture',extractionQuality:q});
+ const recovered=await extractYouTubeVideo('https://youtu.be/abcdefghijk');expect(recovered.extractionQuality?.status).toBe('complete');expect(recovered.extractionQuality?.reasons).toContain('initial_attempt_asr_segments_missing');expect(recovered.extractionQuality?.reasons).not.toContain('asr_segments_missing');
+});

@@ -846,15 +846,18 @@ ${vaultCtx.nowSummary}`,
           const transcript = asrRes.transcript.trim();
           for (const reason of asrRes.extractionQuality?.reasons ?? []) videoReasons.push(`video_${index}:${reason}`);
           for (const issue of asrRes.toolIssues ?? []) videoReasons.push(`video_${index}:asr_tool_${issue}`);
+          videoEvidence.push(...(asrRes.extractionQuality?.asrEvidence ?? []).map(e => ({...e, videoIndex: index})));
           if (transcript) {
             processedVideos.push(index);
-            videoEvidence.push(...(asrRes.extractionQuality?.asrEvidence ?? []).map(e => ({...e, videoIndex: index})));
             if (asrRes.extractionQuality?.status === "partial") partialVideos.push(index);
             videoEngines.add(asrRes.engineUsed);
             const heading = `【微信视频 ${index} 口播转写稿（${asrRes.engineUsed}）】`;
             videoSourceSnippets.push(`${heading}\n${renderAsrTranscript(transcript, asrRes.extractionQuality)}`);
             modelVideoSnippets.push(`${heading}\n自动转写未经核对，仅代表口播，不包括全部画面。\n${transcriptReviewNotice(transcript)}\n${asrEvidenceNotice(asrRes.extractionQuality)}\n${normalizeTranscriptPunctuation(transcript)}`);
-          } else videoReasons.push(`video_${index}:asr_empty`);
+          } else {
+            videoReasons.push(`video_${index}:asr_empty`);
+            if (asrRes.extractionQuality?.asrEvidence?.some(e=>e.timingAvailable)) videoSourceSnippets.push(`【微信视频 ${index} 未取得转写】\n${renderAsrTranscript("", asrRes.extractionQuality)}`);
+          }
         } catch (error) {
           if (videoPath) {
             for (const reason of asrFailureReasons(error)) videoReasons.push(`video_${index}:${reason}`);

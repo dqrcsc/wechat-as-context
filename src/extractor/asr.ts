@@ -1,3 +1,5 @@
+import { localAsrCommand } from "./asr_local_command.ts";
+import type { TimedAsrCoverage } from "./asr_timing.ts";
 import { asrQuality } from "./asr_quality.ts";
 import { extractionNotice, type ExtractionQuality } from "./quality.ts";
 import { spawnSync } from "node:child_process";
@@ -273,16 +275,10 @@ async function transcribeAudioInternal(req: AsrTranscriptionRequest): Promise<As
 
     // Step 2: Engine 1 -> Local offline `local-asr` (FunASR + SenseVoiceSmall)
     if (localAsrBin) {
+      const invocation = localAsrCommand(localAsrBin, audioPathForAsr, workDir);
       const asrRes = spawnSync(
-        localAsrBin,
-        [
-          audioPathForAsr,
-          "--out-dir",
-          workDir,
-          "--format",
-          "json,txt",
-          "--quiet",
-        ],
+        invocation.command,
+        invocation.args,
         {
           encoding: "utf-8",
           timeout: 180_000,
@@ -299,15 +295,16 @@ async function transcribeAudioInternal(req: AsrTranscriptionRequest): Promise<As
               text?: string;
               raw_text?: string;
               segments?: unknown[];
+              timing?: TimedAsrCoverage;
             };
             const text = (parsed.text || parsed.raw_text || "").trim();
-            if (text.length > 0) {
+            if (text.length > 0 || parsed.timing) {
               return withIssues({
                 transcript: text,
                 engineUsed: "local_asr_sensevoice",
                 durationSeconds,
                 extractionQuality: asrQuality(text, {engineCompletion: 'completed', inputDurationSeconds, decodedDurationSeconds,
-                  segmentCount: Array.isArray(parsed.segments) ? parsed.segments.length : undefined}),
+                  segmentCount: Array.isArray(parsed.segments) ? parsed.segments.length : undefined, timing: parsed.timing}),
               });
             }
           } catch {}

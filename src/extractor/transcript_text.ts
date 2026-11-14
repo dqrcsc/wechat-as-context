@@ -1,3 +1,4 @@
+import { renderAsrTimeline } from './asr_timing.ts';
 import { asrEvidenceNotice } from './asr_quality.ts';
 import type { ExtractionQuality } from './quality.ts';
 /** Only punctuation is normalized. Words, numbers and model/brand names are evidence. */
@@ -18,9 +19,11 @@ export function renderAsrTranscript(raw: string, quality?: ExtractionQuality): s
   const clean=normalizeTranscriptPunctuation(raw);
   const evidence=asrEvidenceNotice(quality);
   const notice=transcriptReviewNotice(raw)+(evidence ? '\n'+evidence : '');
-  if(clean===raw)return `${notice}\n\n${raw}`;
+  const timeline=(quality?.asrEvidence ?? []).filter(e=>e.timingAvailable && e.timing).map(e=>renderAsrTimeline(e.timing!)).join('\n\n');
+  const suffix=timeline ? '\n\n'+timeline : '';
+  if(clean===raw)return `${notice}\n\n${raw}${suffix}`;
   const escaped=raw.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-  return `${notice}\n\n${clean}\n\n<details data-asr-raw="true"><summary>原始自动转写（仅上文标点经过清理）</summary>\n\n<pre>${escaped}</pre>\n\n</details>`;
+  return `${notice}\n\n${clean}\n\n<details data-asr-raw="true"><summary>原始自动转写（仅上文标点经过清理）</summary>\n\n<pre>${escaped}</pre>\n\n</details>${suffix}`;
 }
 
 /** Conservative, exact excerpts only; no inferred words, timestamps or confidence scores. */

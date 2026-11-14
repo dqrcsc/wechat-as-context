@@ -368,7 +368,7 @@ export async function extractYouTubeVideo(
           hintTitle: title,
         });
         transcriptQuality = asrRes.extractionQuality;
-        asrPartial = asrRes.extractionQuality?.reasons.includes("asr_truncated") ?? false;
+        asrPartial = asrRes.extractionQuality?.reasons.some(r => ["asr_truncated", "asr_segments_missing"].includes(r)) ?? false;
         for (const reason of asrRes.extractionQuality?.reasons ?? []) acquisitionReasons.add(reason);
         for (const issue of asrRes.toolIssues ?? []) acquisitionReasons.add(`asr_tool_${issue}`);
         if (!asrRes.transcript.trim()) acquisitionReasons.add("asr_empty");
@@ -391,8 +391,13 @@ export async function extractYouTubeVideo(
     if (fallback.urls.length) {
       try {
         const result = await transcribeAudioFromMedia({ mediaUrls: fallback.urls, headers: fallback.headers, config: options?.config, hintTitle: title });
+        // Preserve earlier acquisition diagnostics without treating them as the recovered result's quality.
+        for (const reason of transcriptQuality?.reasons ?? []) {
+          acquisitionReasons.delete(reason);
+          acquisitionReasons.add(`initial_attempt_${reason}`);
+        }
         transcriptQuality = result.extractionQuality;
-        asrPartial = result.extractionQuality?.reasons.includes("asr_truncated") ?? false;
+        asrPartial = result.extractionQuality?.reasons.some(r => ["asr_truncated", "asr_segments_missing"].includes(r)) ?? false;
         for (const reason of result.extractionQuality?.reasons ?? []) acquisitionReasons.add(reason);
         for (const issue of result.toolIssues ?? []) acquisitionReasons.add(`resolver_asr_tool_${issue}`);
         asrTranscript = result.transcript.trim();
@@ -437,7 +442,7 @@ export async function extractYouTubeVideo(
 
   if (formattedTranscript) {
     mdSections.push(
-      `## ${asrPartial ? "部分逐字稿（未取得完整转写）" : asrTranscript ? "自动转写（完整性未核验）" : "完整字幕 / 逐字稿"}${
+      `## ${asrPartial ? "部分逐字稿（未取得完整转写）" : asrTranscript ? (transcriptQuality?.status === "complete" ? "自动转写（VAD检测区间已覆盖）" : "自动转写（完整性未核验）") : "完整字幕 / 逐字稿"}${
         transcriptSourceLabel ? `（${transcriptSourceLabel}）` : ""
       }\n\n${formattedTranscript}`
     );
@@ -447,6 +452,7 @@ export async function extractYouTubeVideo(
     );
   }
 
+  if (!formattedTranscript && transcriptQuality?.asrEvidence?.some(e=>e.timingAvailable)) mdSections.push(renderAsrTranscript("", transcriptQuality));
   const markdownBody = mdSections.join("\n\n");
   const digest =
     (description || formattedTranscript)
@@ -468,7 +474,7 @@ export async function extractYouTubeVideo(
     durationSeconds,
      durationText,
     transcriptEngine: transcriptSourceLabel || "metadata_only",
-    extractionQuality: { status: formattedTranscript ? (asrTranscript ? "partial" : "complete") : "metadata_only", reasons: [...acquisitionReasons], ...(asrTranscript ? {asrEvidence: transcriptQuality?.asrEvidence} : {}) },
+    extractionQuality: { status: formattedTranscript ? (asrTranscript && transcriptQuality?.status !== "complete" ? "partial" : "complete") : "metadata_only", reasons: [...acquisitionReasons], ...(transcriptQuality?.asrEvidence ? {asrEvidence: transcriptQuality.asrEvidence} : {}) },
   };
 }
 

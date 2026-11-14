@@ -339,7 +339,7 @@ export async function extractXiaohongshuNote(
       });
       transcript = asrRes.transcript.trim();
       transcriptQuality = asrRes.extractionQuality;
-      asrPartial = asrRes.extractionQuality?.reasons.includes("asr_truncated") ?? false;
+      asrPartial = asrRes.extractionQuality?.reasons.some(r => ["asr_truncated", "asr_segments_missing"].includes(r)) ?? false;
       reasons.push(...(asrRes.extractionQuality?.reasons ?? []));
       for (const issue of asrRes.toolIssues ?? []) reasons.push(`asr_tool_${issue}`);
       if (transcript) engineUsed = asrRes.engineUsed;
@@ -354,9 +354,10 @@ export async function extractXiaohongshuNote(
     if (coverUrl) sections.push(`![视频封面](${coverUrl})`);
     if (desc.trim()) sections.push(`## 笔记正文与标签\n\n${desc.trim()}`);
     if (transcript) {
-      sections.push(`## 视频口播逐字稿${asrPartial ? "（部分转写，未取得全文）" : "（完整性未核验）"}（${engineUsed}）\n\n${renderAsrTranscript(transcript, transcriptQuality)}`);
+      sections.push(`## 视频口播逐字稿${asrPartial ? "（部分转写，未取得全文）" : transcriptQuality?.status === "complete" ? "（VAD检测区间已覆盖）" : "（完整性未核验）"}（${engineUsed}）\n\n${renderAsrTranscript(transcript, transcriptQuality)}`);
     } else {
       sections.push(`> ⚠️ 暂未提取到口播语音转写稿，以上为笔记原始文案。`);
+      if (transcriptQuality?.asrEvidence?.some(e=>e.timingAvailable)) sections.push(renderAsrTranscript("", transcriptQuality));
     }
 
     return {
@@ -373,7 +374,7 @@ export async function extractXiaohongshuNote(
       durationSeconds,
       durationText: durationSeconds ? formatDurationHms(durationSeconds) : undefined,
       transcriptEngine: engineUsed,
-      extractionQuality: { status: transcript ? "partial" : "metadata_only", reasons, ...(transcript ? {asrEvidence: transcriptQuality?.asrEvidence} : {}) },
+      extractionQuality: { status: transcript ? (transcriptQuality?.status === "complete" ? "complete" : "partial") : "metadata_only", reasons, ...(transcriptQuality?.asrEvidence ? {asrEvidence: transcriptQuality.asrEvidence} : {}) },
     };
   }
 
@@ -700,7 +701,7 @@ export async function extractDouyinWork(
       });
       transcript = asrRes.transcript.trim();
       transcriptQuality = asrRes.extractionQuality;
-      asrPartial = asrRes.extractionQuality?.reasons.includes("asr_truncated") ?? false;
+      asrPartial = asrRes.extractionQuality?.reasons.some(r => ["asr_truncated", "asr_segments_missing"].includes(r)) ?? false;
       reasons.push(...(asrRes.extractionQuality?.reasons ?? []));
       for (const issue of asrRes.toolIssues ?? []) reasons.push(`asr_tool_${issue}`);
       if (transcript) engineUsed = asrRes.engineUsed;
@@ -724,7 +725,7 @@ export async function extractDouyinWork(
   if (coverUrl) sections.push(`![视频封面](${coverUrl})`);
   if (rawDesc.trim()) sections.push(`## ${seoExcerpt ? "SEO 简介片段（可能截断）" : "视频文案与标签"}\n\n${rawDesc.trim()}`);
   if (transcript) {
-    sections.push(`## 视频口播逐字稿${asrPartial ? "（部分转写，未取得全文）" : "（完整性未核验）"}（${engineUsed}）\n\n${renderAsrTranscript(transcript, transcriptQuality)}`);
+    sections.push(`## 视频口播逐字稿${asrPartial ? "（部分转写，未取得全文）" : transcriptQuality?.status === "complete" ? "（VAD检测区间已覆盖）" : "（完整性未核验）"}（${engineUsed}）\n\n${renderAsrTranscript(transcript, transcriptQuality)}`);
   } else {
     sections.push(
       reasons.includes("douyin_content_unavailable")
@@ -732,6 +733,7 @@ export async function extractDouyinWork(
         : `> ⚠️ 暂未获取到视频音频流或转写结果，以上为视频标题与文案。`
     );
   }
+  if (!transcript && transcriptQuality?.asrEvidence?.some(e=>e.timingAvailable)) sections.push(renderAsrTranscript("", transcriptQuality));
   if (seoMeta?.comments && seoMeta.comments.length > 0) {
     sections.push(
       `## 创作者补充与高赞评论\n\n` +
@@ -753,7 +755,7 @@ export async function extractDouyinWork(
     durationSeconds,
     durationText: durationSeconds ? formatDurationHms(durationSeconds) : undefined,
     transcriptEngine: engineUsed,
-    extractionQuality: { status: transcript ? "partial" : "metadata_only", reasons, ...(transcript ? {asrEvidence: transcriptQuality?.asrEvidence} : {}) },
+    extractionQuality: { status: transcript ? (transcriptQuality?.status === "complete" ? "complete" : "partial") : "metadata_only", reasons, ...(transcriptQuality?.asrEvidence ? {asrEvidence: transcriptQuality.asrEvidence} : {}) },
   };
 }
 

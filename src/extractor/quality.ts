@@ -1,10 +1,12 @@
+import { validateAsrTiming, timingCanComplete, type TimedAsrCoverage } from './asr_timing.ts';
 export interface AsrEvidence {
   engineCompletion: 'completed' | 'truncated' | 'unknown';
   inputDurationSeconds?: number;
   decodedDurationSeconds?: number;
   textCharacters: number;
   segmentCount?: number;
-  timingAvailable: false;
+  timingAvailable: boolean;
+  timing?: TimedAsrCoverage;
   videoIndex?: number;
 }
 
@@ -33,10 +35,11 @@ export function extractionNotice(quality?: ExtractionQuality): string {
 }
 
 function coverageNotice(quality?: ExtractionQuality): string {
+  if (quality?.status === 'complete' && quality.asrEvidence?.some(e=>e.timingAvailable)) return 'ℹ️ 已覆盖本次 VAD 检测到的语音区间；不保证 VAD 无漏检、逐字无遗漏或识别准确，专名仍需听音核对。';
   if (!quality || quality.status === 'complete') return '';
   if (quality.totalVideos !== undefined) return `⚠️ 视频口播转写仅取得 ${quality.processedVideos?.length ?? 0}/${quality.totalVideos} 份${quality.partialVideos?.length ? `，其中部分转写或完整性未核验的视频序号：${quality.partialVideos.join("、")}` : ""}；未取得转写的视频序号：${quality.missingVideos?.join('、') || '无'}。不代表已理解全部视频画面或其他附件。`;
   if (quality.totalPages !== undefined) return `⚠️ 图集仅解析 ${quality.processedPages?.length ?? 0}/${quality.totalPages} 页；未解析页：${quality.missingPages?.join('、') || '无'}。以下分析不代表覆盖全部图片。`;
-  if (quality.status === 'partial' && quality.reasons.includes('asr_coverage_unverified') && !quality.reasons.includes('asr_truncated')) return '⚠️ 已取得自动转写，完整性未核验；缺少逐段时间覆盖证据，不能视为完整逐字稿。';
+  if (quality.status === 'partial' && quality.reasons.includes('asr_coverage_unverified') && !quality.reasons.includes('asr_truncated')) return quality.asrEvidence?.some(e=>e.timingAvailable) ? '⚠️ 已取得分段转写，完整性未核验；扫描/引擎完成状态或音轨时长校验未通过，不能视为完整逐字稿。' : '⚠️ 已取得自动转写，完整性未核验；缺少逐段时间覆盖证据，不能视为完整逐字稿。';
   if (quality.status === 'partial') return '⚠️ 本次仅取得部分逐字稿，转写不完整；以下分析仅覆盖已获取片段。';
   if (quality.status === 'unavailable') return '⚠️ 采集内容或解析质量记录不可用；需核对原始来源，以下分析不能视为完整正文分析。';
   return '⚠️ 本次未取得完整逐字稿，仅根据已获取的简介/元数据分析；不能据此判断源站是否提供字幕。';
@@ -50,20 +53,28 @@ export function readSavedExtractionQuality(source: string): ExtractionQuality | 
     try {
       const q=JSON.parse(raw);
       if(!['complete','partial','metadata_only','unavailable'].includes(q?.status)||!Array.isArray(q.reasons)||!q.reasons.every((x:unknown)=>typeof x==='string'))throw new Error('invalid');
-      if (q.status === 'complete' && q.reasons.some((r: string) => /(?:^|:)asr_coverage_unverified$/.test(r))) throw new Error('invalid');
+      if (q.status === 'complete' && q.reasons.some((r: string) => /(?:^|:)asr_(?:coverage_unverified|timing_invalid|segments_missing|vad_scan_incomplete|decode_duration_mismatch|no_speech_detected|empty|truncated|finish_reason_missing)$/.test(r))) throw new Error('invalid');
       if (q.asrEvidence !== undefined) {
-        if (!Array.isArray(q.asrEvidence) || !q.asrEvidence.length || q.status === 'complete') throw new Error('invalid');
+        if (!Array.isArray(q.asrEvidence) || !q.asrEvidence.length) throw new Error('invalid');
         const indices = new Set<number>();
         for (const e of q.asrEvidence) {
-          if (!e || !['completed','truncated','unknown'].includes(e.engineCompletion) || e.timingAvailable !== false ||
+          if (!e || !['completed','truncated','unknown'].includes(e.engineCompletion) || typeof e.timingAvailable !== 'boolean' ||
               !Number.isSafeInteger(e.textCharacters) || e.textCharacters < 0 ||
-              (e.segmentCount !== undefined && (!Number.isSafeInteger(e.segmentCount) || e.segmentCount <= 0))) throw new Error('invalid');
+              (e.segmentCount !== undefined && (!Number.isSafeInteger(e.segmentCount) || e.segmentCount < 0))) throw new Error('invalid');
           for (const key of ['inputDurationSeconds','decodedDurationSeconds']) {
             if (e[key] !== undefined && (typeof e[key] !== 'number' || !Number.isFinite(e[key]) || e[key] <= 0)) throw new Error('invalid');
           }
+          if (e.timingAvailable) {
+            const rows = e.timing?.segments;
+            if (!Array.isArray(rows)) throw new Error('invalid');
+            const text = rows.filter((s:any)=>s?.status==='ok').map((s:any)=>s.text).join('\n');
+            const timing=validateAsrTiming(e.timing,text);
+            if (!timing || e.segmentCount !== timing.segments.length || e.textCharacters !== Array.from(text).length) throw new Error('invalid');
+            if (q.status==='complete' && !timingCanComplete(timing,e.inputDurationSeconds,e.decodedDurationSeconds,e.engineCompletion,q.reasons.map((r:string)=>r.replace(/^video_\d+:/,'')))) throw new Error('invalid');
+          } else if (e.timing!==undefined || e.segmentCount===0 || q.status==='complete') throw new Error('invalid');
           if (q.totalVideos !== undefined) {
             if (!Number.isSafeInteger(e.videoIndex) || e.videoIndex <= 0 || e.videoIndex > q.totalVideos ||
-                !q.processedVideos?.includes(e.videoIndex) || indices.has(e.videoIndex)) throw new Error('invalid');
+                !(e.textCharacters > 0 ? q.processedVideos?.includes(e.videoIndex) : q.missingVideos?.includes(e.videoIndex)) || indices.has(e.videoIndex)) throw new Error('invalid');
             indices.add(e.videoIndex);
           } else if (e.videoIndex !== undefined) throw new Error('invalid');
         }
