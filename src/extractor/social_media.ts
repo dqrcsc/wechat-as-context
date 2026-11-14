@@ -5,6 +5,7 @@ import { SystemTlsError } from "./system_tls.ts";
 import { declaredSocialPostId, matchingDouyinDetail, pageHasSocialIdentity, requestedSocialPostId, socialPostId, SocialIdentityError } from "./social_identity.ts";
 import { CdpSession, waitForDevToolsEndpoint } from "./cdp.ts";
 import { collectDouyinDetail, hasDouyinMedia, type DouyinBrowserResult } from "./douyin_browser.ts";
+import { chromeProfileArgs } from "./chrome_profile.ts";
 import { spawnSync } from "node:child_process";
 import {
   cpSync,
@@ -898,7 +899,7 @@ export async function fetchDouyinAwemeDetailViaCdp(awemeId: string): Promise<Dou
     profileDir = mkdtempSync(join(tmpdir(), "wxctx-dy-cdp-"));
     proc = Bun.spawn([
       chromeBin, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--mute-audio",
-      `--user-agent=${DESKTOP_CHROME_UA}`, `--user-data-dir=${profileDir}`, "--remote-debugging-port=0", "about:blank",
+      `--user-agent=${DESKTOP_CHROME_UA}`, ...chromeProfileArgs(profileDir, true), "--remote-debugging-port=0", "about:blank",
     ], { stderr: "pipe", stdout: "ignore" });
     stage = "endpoint";
     const browserWsUrl = await waitForDevToolsEndpoint(proc.stderr as ReadableStream<Uint8Array>, AbortSignal.any([deadline, startupDeadline]));
@@ -1022,7 +1023,7 @@ function renderDomWithLocalChromeSession(
       "--no-first-run",
       "--no-default-browser-check",
       `--user-agent=${DESKTOP_CHROME_UA}`,
-      `--user-data-dir=${profileDir}`,
+      ...chromeProfileArgs(profileDir, ephemeralProfile),
       `--virtual-time-budget=${virtualTimeBudgetMs}`,
       "--dump-dom",
       url,
