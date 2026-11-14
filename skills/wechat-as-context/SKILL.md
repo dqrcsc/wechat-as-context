@@ -150,16 +150,19 @@ bun run {{PROJECT_ROOT}}/src/cli.ts push --article <id> [--with-file] [--formats
 - 旧版仅附件入队而正文状态不明时暂停并要求人工核对，不自动补发。历史失败 outbox 保留；不得把调度恢复作为授权重试历史消息。
 - 具体迁移、超时、日志轮转与测试边界见项目 `docs/review-2026-10-30-fixes.md`。
 
-## v0.4.16 转写覆盖证据与疑似错词
+## v0.4.17 本地逐段时间与覆盖校验
 
 本节覆盖下文旧版 ASR 的 complete 判定；仅更新仓库 Skill 不部署服务或覆盖已安装副本。
 
-- 本地 ASR 非空文本、云端 STOP 均只证明取得输出，不证明口播覆盖完整；当前适配器没有逐段时间覆盖证据，统一为 partial + asr_coverage_unverified。应说“已取得自动转写，完整性未核验”，不能说已确认截断。MAX_TOKENS 仍另有 asr_truncated；空结果/拒绝仍按失败处理。字幕/OCR 维持各自采集规则，complete 不等于文字准确。
-- extraction_quality.asrEvidence 保存 engineCompletion（completed/truncated/unknown）、textCharacters（Unicode码点）、timingAvailable=false，以及可取得的 inputDurationSeconds、decodedDurationSeconds、segmentCount；缺失不补0。时长来自 ffmpeg 输入/最终进度信息，输出段数不代表时间段覆盖。不得把时长相近、段数或字符数当覆盖率、准确率或逐字无遗漏证据。
+- 本地 ASR 非空文本、云端 STOP 均只证明取得输出，不证明口播覆盖完整；旧工具、自定义工具和云端结果缺少有效时间证据时，仍为 partial + asr_coverage_unverified。应说“已取得自动转写，完整性未核验”，不能说已确认截断。MAX_TOKENS 仍另有 asr_truncated；空结果/拒绝仍按失败处理。字幕/OCR 维持各自采集规则，complete 不等于文字准确。
+- extraction_quality.asrEvidence 保存 engineCompletion（completed/truncated/unknown）、textCharacters（Unicode码点）、timingAvailable，以及可取得的 inputDurationSeconds、decodedDurationSeconds、segmentCount；缺失不补0。时长来自 ffmpeg 输入/最终进度信息，输出段数不代表时间段覆盖。不得把时长相近、段数或字符数当覆盖率、准确率或逐字无遗漏证据。
+- 默认 managed local-asr（~/.local/bin/local-asr、~/.local/share/local-asr 的现有 Python 与三个模型目录齐全）使用仓库 scripts/local_asr_timed.py：完整解码 WAV → 全音轨 VAD → 按检测区间转写。不安装/下载模型，不修改全局工具。显式 LOCAL_ASR_BIN 覆盖仍优先；非 managed 安装继续原调用。
+- timingAvailable=true 时保存 wxctx-vad-v1：audioDurationMs、scanComplete、vadSegments 和逐段 startMs/endMs/status/text，时间单位毫秒，来自 VAD 与解码样本，非逐字对齐。只在扫描完成、区间有序合法且逐一匹配、每段成功、正文与拼接结果一致、引擎正常结束且时长校验通过时才可 complete，含义仅为“本次 VAD 检测区间已覆盖”。静音不算缺段；不保证 VAD 无漏检、段内无漏字或文字准确。
+- 输入/解码差≤0.5秒、解码/VAD音轨差≤20毫秒是编码及日志精度容差，不是统计波动或准确率。空段/失败段保留时间位置与 asr_segments_missing；缺时长、扫描未完或非法证据不得 complete，无语音也不标完整。时间轴保存到原文折叠区，词语不自动猜改。
 - 微信原生视频证据带 videoIndex；partialVideos 现在包括已知片段和完整性未核验的已转写视频，missingVideos 仅为完全未取得转写。按具体 reason 区分。质量与证据贯通原文、模型输入及用户提示，不修改旧记录。
 - 自动转写最多列3处疑似断句、5处中文语境中的外文词/专名复核候选；保留原始 UTF-16 字符位置（非时间戳），这些候选不代表已判错。忽略常见缩写、重复候选和纯外语文本，不能保证发现中文同音错词或全部专名问题。未列出不等于无误；不得据文案、常识或品牌词典自动猜改。
 - ffmpeg 非零退出不采用其残留 WAV，记录 asr_tool_ffmpeg_decode_failed，继续原有可用引擎；不关闭证书校验，不延长超时、不安装/下载模型。恢复验证需用户授权，用独立目录；私人材料外发仍需对应授权。
-- 验收与 #80 公开音频离线复验见 docs/review-v0415-asr-quality.md。历史failed保留，不重跑原文/笔记；发布不代表本机服务已升级。
+- 验收与 #80 公开音频离线复验见 docs/review-v0416-timed-asr.md。历史failed保留，不重跑原文/笔记；发布不代表本机服务已升级。
 
 ## v0.4.15 macOS 临时匿名浏览器
 

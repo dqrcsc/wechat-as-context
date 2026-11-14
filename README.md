@@ -17,7 +17,7 @@
 
 ---
 
-**v0.4.16 转写覆盖证据与复核提示**：非空 ASR 文本（含云端 STOP）不再自动标为 complete；以 partial + asr_coverage_unverified 表示已有转写、完整性未核验。保留引擎结束状态及可取得的输入/解码时长、文本段数等证据，外文词/专名候选只提示核对、不自动改词。详见 [修复验收说明](docs/review-v0415-asr-quality.md)。
+**v0.4.17 本地分段时间与覆盖校验**：默认 managed local-asr 复用现有离线模型，保留 VAD 逐段时间、成功/空结果/失败状态和原词。只有全音轨扫描、区间逐一匹配和时长校验通过才标记“本次检测区间已覆盖”；不等于逐字准确，无时间证据的旧工具与云端结果仍保守降级。详见 [修复验收说明](docs/review-v0416-timed-asr.md)。
 
 **v0.4.15 macOS 匿名浏览器初始化修复**：仅对程序创建的 macOS 临时匿名 Chrome 资料目录启用 mock keychain，避免 Cookie 存储初始化等待真实钥匙串；持久/会复用 Cookie 的资料目录保持原行为。代理、TLS 校验和导航期限不变。边界、回归与 #80 隔离复验见 [修复验收说明](docs/review-v0414-keychain-fix.md)。
 

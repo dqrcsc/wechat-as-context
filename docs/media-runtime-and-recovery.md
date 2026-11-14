@@ -1,10 +1,28 @@
-# 媒体工具与渠道恢复（含 v0.4.16 修复）
+# 媒体工具与渠道恢复（含 v0.4.17 修复）
 
 本次修复 v0.4.8 审查中的代理环境丢失、默认强制覆盖示例和工具路径问题。更新代码/Skill 不会升级服务、安装下载器、重发历史 failed 或重新处理历史文章。
 
-## v0.4.16：转写完成状态、覆盖与准确性分开
+## v0.4.17：默认本地分段验证
 
-当前 ASR 适配器没有逐段时间覆盖证据。本地成功返回非空文本、云端 STOP 均为 `partial` + `asr_coverage_unverified`，表示**已有转写、完整性未核验**。这不是确认缺失；`asr_truncated` 才是明确截断。字幕/OCR 原有获取状态不变。
+无需修改配置：默认 `~/.local/bin/local-asr` 且现有 `~/.local/share/local-asr/venv/bin/python`、`model-cache/modelscope/models/iic` 下 SenseVoiceSmall、fsmn VAD、CT 标点三个模型齐全时，自动使用仓库 `scripts/local_asr_timed.py`。先完整解码到16kHz单声道PCM WAV，再扫描全音轨并逐区间识别；只加载本地模型，不联网下载。代码发布不改变本机已运行服务或全局 CLI。
+
+显式 `LOCAL_ASR_BIN` 为权威覆盖，即使指向同一路径也不自动替换。非 managed 安装/缺环境/非 WAV 继续旧工具；没有有效 `wxctx-vad-v1` 证据就维持 `partial`。无需为获得 complete 强行移除自定义工具；先检查实际输出是否具备所需证据。
+
+`asrEvidence.timing` 保留毫秒时间、检测区间与逐段文本/空/失败，失败也不删除其位置。`complete` 只代表完整扫描且检测区间全部取得文本，输入/解码时长差≤0.5秒、解码/VAD音轨差≤20毫秒；不保证VAD漏检率或逐字准确。短区间缺少上下文可能出现错词；时间轴用于回听，不自动改专名。旧笔记不迁移、不重跑。
+
+| reason | 含义与检查 |
+| --- | --- |
+| asr_segments_missing | 至少一个检测区间空/失败，查看保存时间轴；全空不能标成功 |
+| asr_timing_invalid | 时间单位、范围、顺序、配对或文本校验失败，不能信任覆盖 |
+| asr_vad_scan_incomplete | 未完成全音轨VAD扫描 |
+| asr_decode_duration_mismatch | 输入/解码/VAD音轨时长不一致或缺失，不用字数补推 |
+| asr_no_speech_detected | VAD未检测到语音；不能宣称完整逐字稿 |
+
+YouTube 首次转写无正文而后续解析器恢复时，旧质量原因加 `initial_attempt_` 保留为历史诊断，当前质量依据最后结果；不能让旧失败抹掉恢复，也不能让失败结果冒充恢复。详见 [验收说明](review-v0416-timed-asr.md)。
+
+## 无有效时间证据时：转写完成状态、覆盖与准确性分开
+
+v0.4.16 的旧适配器没有逐段时间覆盖证据；v0.4.17 对默认 managed 本地安装新增下述分段校验。旧工具与云端无时间证据时，本地成功返回非空文本、云端 STOP 均为 `partial` + `asr_coverage_unverified`，表示**已有转写、完整性未核验**。这不是确认缺失；`asr_truncated` 才是明确截断。字幕/OCR 原有获取状态不变。
 
 `extraction_quality.asrEvidence` 是证据数组：`engineCompletion`、Unicode码点数 `textCharacters`、`timingAvailable: false`，以及可取得的输入时长 `inputDurationSeconds`、成功解码时长 `decodedDurationSeconds`、JSON文本段数 `segmentCount`。未知字段省略；时长由ffmpeg日志观测，不等于ASR逐段覆盖。微信多视频另带 `videoIndex`；`partialVideos` 包括未知覆盖的成功转写。非法字段、越界索引及证据与complete冲突时读回明确降级。
 
