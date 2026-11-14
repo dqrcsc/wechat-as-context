@@ -1,6 +1,6 @@
 # <img src="./docs/assets/icon-qingjian-chisu.svg" width="36" height="36" align="top" alt="QingJian ChiSu Icon" /> 青简 · 尺素 (`WeChat as Context` / `wechat-as-context`) — 个人微信 ⇄ 本地知识库与桌面 AI 智能体双向活上下文网关
 
-[![Version: v0.4.14](https://img.shields.io/badge/Version-v0.4.14-10b981)](./CHANGELOG.zh.md)
+[![Version: v0.4.15](https://img.shields.io/badge/Version-v0.4.15-10b981)](./CHANGELOG.zh.md)
 [![Runtime: Bun >= 1.1](https://img.shields.io/badge/Runtime-Bun_%E2%89%A51.1-f472b6?logo=bun&logoColor=white)](https://bun.sh)
 [![Pure BYOK & BYOCLI](https://img.shields.io/badge/Pure_BYOK_%26_BYOCLI-Zero_Model_Lock--in-4f46e5)](./src/config.ts)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.x-3178c6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
@@ -16,6 +16,8 @@
 - 💻 **在电脑桌面端**：在 Codex、AntiGravity、Claude Code、OpenCode 中一句指令即可接力深读刚转发的文章，或通过 `bun run push` 将桌面端产出的报告、图表、文档主动推送到手机微信，且自动注入微信对话上下文，手机端直接回复即可无缝追问。
 
 ---
+
+**v0.4.15 macOS 匿名浏览器初始化修复**：仅对程序创建的 macOS 临时匿名 Chrome 资料目录启用 mock keychain，避免 Cookie 存储初始化等待真实钥匙串；持久/会复用 Cookie 的资料目录保持原行为。代理、TLS 校验和导航期限不变。边界、回归与 #80 隔离复验见 [修复验收说明](docs/review-v0414-keychain-fix.md)。
 
 **v0.4.14 抖音 SEO 片段与浏览器诊断**：仅在页面身份、唯一 VideoObject 和末级面包屑共同匹配时恢复缺少对象 URL 的 SEO 简介，并明确提示可能截断。浏览器兜底按启动、导航、详情响应和媒体缺失输出脱敏原因；修复空图集阻断兜底、有效音轨重复补抓及晚到详情丢失。代理、超时和等待的两轮单因素实验未提供足够证据调整默认参数。详见 [修复、实验与验收](docs/review-v0413-douyin-fixes.md)。
 
