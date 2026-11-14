@@ -129,7 +129,7 @@ for(const transcription of [false,true])test(`SEO excerpt and browser diagnostic
  const r=await extractDouyinWork(url);
  expect(r.markdownBody).toContain('SEO 简介片段（可能截断）');expect(r.markdownBody).toContain(video.name);
  expect(r.extractionQuality?.reasons).toEqual(expect.arrayContaining(['douyin_seo_excerpt','douyin_seo_page_identity','douyin_cdp_navigation_timeout']));
- expect(r.extractionQuality?.status).toBe(transcription?'complete':'metadata_only');expect(browserCalls).toBe(transcription?1:2);
+ expect(r.extractionQuality?.status).toBe(transcription?'partial':'metadata_only');expect(browserCalls).toBe(transcription?1:2);
  const persisted=readSavedExtractionQuality(`---\nextraction_quality: ${JSON.stringify(r.extractionQuality)}\n---\n`);expect(extractionNotice(persisted)).toContain('可能被截断');
  if(transcription)expect(r.markdownBody).toContain('Synthetic audio transcript.');
 });
@@ -166,7 +166,7 @@ test('valid SSR audio-only detail avoids browser while an empty album does not b
   globalThis.fetch=(async()=>new Response(html)) as unknown as typeof fetch;
   let calls=0;setDouyinAcquisitionTestHooks({browser:async()=>{calls++;return {awemeDetail:mediaDetail,reasons:[]};}});
   setAsrTestRunner(async()=>({transcript:'Recovered speech.',engineUsed:'fixture'}));
-  const r=await extractDouyinWork(url);expect(calls).toBe(available?0:1);expect(r.markdownBody).toContain('Recovered speech.');expect(r.extractionQuality?.status).toBe('complete');
+  const r=await extractDouyinWork(url);expect(calls).toBe(available?0:1);expect(r.markdownBody).toContain('Recovered speech.');expect(r.extractionQuality?.status).toBe('partial');
  }
 });
 for(const verifiedPage of [true,false])test(`article acquisition error includes browser reasons (page verified=${verifiedPage})`,async()=>{

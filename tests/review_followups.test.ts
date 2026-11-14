@@ -282,8 +282,8 @@ test('source edits during image localization are checked immediately before repl
 });
 
 for (const [finishReason, text, status, reason] of [
-  ['STOP', '好的，谢谢。', 'complete', undefined],
-  ['STOP', 'OK', 'complete', undefined],
+  ['STOP', '好的，谢谢。', 'partial', undefined],
+  ['STOP', 'OK', 'partial', undefined],
   ['MAX_TOKENS', '这是被截断的部分逐字稿。', 'partial', 'asr_truncated'],
   [undefined, '缺少完成状态的正文。', 'partial', 'asr_finish_reason_missing'],
 ] as const) {
@@ -293,7 +293,8 @@ for (const [finishReason, text, status, reason] of [
     globalThis.fetch = (async () => Response.json({candidates: [{finishReason, content: {parts: [{text: 'hidden reasoning', thought: true}, {text}]}}]})) as unknown as typeof fetch;
     const result = await transcribeAudioFromMedia({mediaPath: media, config: config('gemini-fixture')});
     expect(result.transcript).toBe(text);
-    expect(result.extractionQuality).toEqual({status, reasons: reason ? [reason] : []});
+    expect(result.extractionQuality).toMatchObject({status, reasons: reason ? [reason, 'asr_coverage_unverified'] : ['asr_coverage_unverified']});
+    expect(result.extractionQuality?.asrEvidence?.[0]).toEqual({engineCompletion: finishReason === 'STOP' ? 'completed' : finishReason === 'MAX_TOKENS' ? 'truncated' : 'unknown', textCharacters: Array.from(text).length, timingAvailable:false});
   });
 }
 for (const response of [

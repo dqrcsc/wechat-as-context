@@ -187,7 +187,7 @@ for (const mode of ['stream','size','short','abort','cancel'] as const){test(`me
 test('YouTube ASR success preserves raw punctuation while caption errors remain diagnostic',async()=>{
  youtubeMock('audio403');setAsrTestRunner(async()=>({transcript:'专名 Codeex。，原话结束。',engineUsed:'local_funasr'}));
  const r=await extractYouTubeVideo('https://www.youtube.com/watch?v=abcdefghijk','','','',{config:config()});
- expect(r.extractionQuality?.status).toBe('complete');expect(r.markdownBody).toContain('专名 Codeex。原话结束。');expect(r.markdownBody).toContain('专名 Codeex。，原话结束。');expect(r.markdownBody).toContain('原始自动转写');
+ expect(r.extractionQuality?.status).toBe('partial');expect(r.extractionQuality?.asrEvidence?.[0].timingAvailable).toBe(false);expect(r.markdownBody).toContain('完整性未核验');expect(r.markdownBody).toContain('专名 Codeex。原话结束。');expect(r.markdownBody).toContain('专名 Codeex。，原话结束。');expect(r.markdownBody).toContain('原始自动转写');
 });
 
 test('dates ignore recommendation/sidebar dates and conflicting article metadata',()=>{

@@ -1,14 +1,25 @@
+export interface AsrEvidence {
+  engineCompletion: 'completed' | 'truncated' | 'unknown';
+  inputDurationSeconds?: number;
+  decodedDurationSeconds?: number;
+  textCharacters: number;
+  segmentCount?: number;
+  timingAvailable: false;
+  videoIndex?: number;
+}
+
 /** Coverage describes acquired material, not semantic accuracy or source authenticity. */
 export interface ExtractionQuality {
   status: 'complete' | 'partial' | 'metadata_only' | 'unavailable';
   reasons: string[];
+  asrEvidence?: AsrEvidence[];
   totalPages?: number;
   processedPages?: number[];
   missingPages?: number[];
   /** Coverage of video transcripts only, even when a message also contains files/images. */
   totalVideos?: number;
   processedVideos?: number[];
-  /** Videos with some usable transcript but incomplete coverage; subset of processedVideos. */
+  /** Videos with some usable transcript but incomplete or unverified coverage; subset of processedVideos. */
   partialVideos?: number[];
   missingVideos?: number[];
 }
@@ -23,8 +34,9 @@ export function extractionNotice(quality?: ExtractionQuality): string {
 
 function coverageNotice(quality?: ExtractionQuality): string {
   if (!quality || quality.status === 'complete') return '';
-  if (quality.totalVideos !== undefined) return `⚠️ 视频口播转写仅取得 ${quality.processedVideos?.length ?? 0}/${quality.totalVideos} 份${quality.partialVideos?.length ? `，其中部分转写的视频序号：${quality.partialVideos.join("、")}` : ""}；未取得转写的视频序号：${quality.missingVideos?.join('、') || '无'}。不代表已理解全部视频画面或其他附件。`;
+  if (quality.totalVideos !== undefined) return `⚠️ 视频口播转写仅取得 ${quality.processedVideos?.length ?? 0}/${quality.totalVideos} 份${quality.partialVideos?.length ? `，其中部分转写或完整性未核验的视频序号：${quality.partialVideos.join("、")}` : ""}；未取得转写的视频序号：${quality.missingVideos?.join('、') || '无'}。不代表已理解全部视频画面或其他附件。`;
   if (quality.totalPages !== undefined) return `⚠️ 图集仅解析 ${quality.processedPages?.length ?? 0}/${quality.totalPages} 页；未解析页：${quality.missingPages?.join('、') || '无'}。以下分析不代表覆盖全部图片。`;
+  if (quality.status === 'partial' && quality.reasons.includes('asr_coverage_unverified') && !quality.reasons.includes('asr_truncated')) return '⚠️ 已取得自动转写，完整性未核验；缺少逐段时间覆盖证据，不能视为完整逐字稿。';
   if (quality.status === 'partial') return '⚠️ 本次仅取得部分逐字稿，转写不完整；以下分析仅覆盖已获取片段。';
   if (quality.status === 'unavailable') return '⚠️ 采集内容或解析质量记录不可用；需核对原始来源，以下分析不能视为完整正文分析。';
   return '⚠️ 本次未取得完整逐字稿，仅根据已获取的简介/元数据分析；不能据此判断源站是否提供字幕。';
@@ -38,6 +50,24 @@ export function readSavedExtractionQuality(source: string): ExtractionQuality | 
     try {
       const q=JSON.parse(raw);
       if(!['complete','partial','metadata_only','unavailable'].includes(q?.status)||!Array.isArray(q.reasons)||!q.reasons.every((x:unknown)=>typeof x==='string'))throw new Error('invalid');
+      if (q.status === 'complete' && q.reasons.some((r: string) => /(?:^|:)asr_coverage_unverified$/.test(r))) throw new Error('invalid');
+      if (q.asrEvidence !== undefined) {
+        if (!Array.isArray(q.asrEvidence) || !q.asrEvidence.length || q.status === 'complete') throw new Error('invalid');
+        const indices = new Set<number>();
+        for (const e of q.asrEvidence) {
+          if (!e || !['completed','truncated','unknown'].includes(e.engineCompletion) || e.timingAvailable !== false ||
+              !Number.isSafeInteger(e.textCharacters) || e.textCharacters < 0 ||
+              (e.segmentCount !== undefined && (!Number.isSafeInteger(e.segmentCount) || e.segmentCount <= 0))) throw new Error('invalid');
+          for (const key of ['inputDurationSeconds','decodedDurationSeconds']) {
+            if (e[key] !== undefined && (typeof e[key] !== 'number' || !Number.isFinite(e[key]) || e[key] <= 0)) throw new Error('invalid');
+          }
+          if (q.totalVideos !== undefined) {
+            if (!Number.isSafeInteger(e.videoIndex) || e.videoIndex <= 0 || e.videoIndex > q.totalVideos ||
+                !q.processedVideos?.includes(e.videoIndex) || indices.has(e.videoIndex)) throw new Error('invalid');
+            indices.add(e.videoIndex);
+          } else if (e.videoIndex !== undefined) throw new Error('invalid');
+        }
+      }
       if (q.partialVideos !== undefined &&
           (!Array.isArray(q.partialVideos) || !q.partialVideos.length || q.status !== 'partial' ||
            !Array.isArray(q.processedVideos) || new Set(q.partialVideos).size !== q.partialVideos.length ||

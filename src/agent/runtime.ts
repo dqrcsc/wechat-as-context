@@ -1,5 +1,6 @@
-import { extractionNotice, type ExtractionQuality } from "../extractor/quality.ts";
-import { normalizeTranscriptPunctuation, renderAsrTranscript } from "../extractor/transcript_text.ts";
+import { extractionNotice, type AsrEvidence, type ExtractionQuality } from "../extractor/quality.ts";
+import { asrEvidenceNotice } from "../extractor/asr_quality.ts";
+import { normalizeTranscriptPunctuation, renderAsrTranscript, transcriptReviewNotice } from "../extractor/transcript_text.ts";
 import { decodeArtifactPaths } from "../storage.ts";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
@@ -815,6 +816,7 @@ ${vaultCtx.nowSummary}`,
     const processedVideos: number[] = [];
     const partialVideos: number[] = [];
     const videoReasons: string[] = [];
+    const videoEvidence: AsrEvidence[] = [];
     const videoEngines = new Set<string>();
     let videoCount = 0;
 
@@ -846,11 +848,12 @@ ${vaultCtx.nowSummary}`,
           for (const issue of asrRes.toolIssues ?? []) videoReasons.push(`video_${index}:asr_tool_${issue}`);
           if (transcript) {
             processedVideos.push(index);
+            videoEvidence.push(...(asrRes.extractionQuality?.asrEvidence ?? []).map(e => ({...e, videoIndex: index})));
             if (asrRes.extractionQuality?.status === "partial") partialVideos.push(index);
             videoEngines.add(asrRes.engineUsed);
             const heading = `【微信视频 ${index} 口播转写稿（${asrRes.engineUsed}）】`;
-            videoSourceSnippets.push(`${heading}\n${renderAsrTranscript(transcript)}`);
-            modelVideoSnippets.push(`${heading}\n自动转写未经核对，仅代表口播，不包括全部画面。\n${normalizeTranscriptPunctuation(transcript)}`);
+            videoSourceSnippets.push(`${heading}\n${renderAsrTranscript(transcript, asrRes.extractionQuality)}`);
+            modelVideoSnippets.push(`${heading}\n自动转写未经核对，仅代表口播，不包括全部画面。\n${transcriptReviewNotice(transcript)}\n${asrEvidenceNotice(asrRes.extractionQuality)}\n${normalizeTranscriptPunctuation(transcript)}`);
           } else videoReasons.push(`video_${index}:asr_empty`);
         } catch (error) {
           if (videoPath) {
@@ -909,7 +912,7 @@ ${vaultCtx.nowSummary}`,
 
     const videoQuality: ExtractionQuality | undefined = videoCount ? {
       status: processedVideos.length === videoCount && !partialVideos.length ? "complete" : processedVideos.length ? "partial" : "unavailable",
-      reasons: videoReasons, totalVideos: videoCount, processedVideos,
+      reasons: videoReasons, ...(videoEvidence.length ? {asrEvidence: videoEvidence} : {}), totalVideos: videoCount, processedVideos,
       ...(partialVideos.length ? { partialVideos } : {}),
       missingVideos: Array.from({ length: videoCount }, (_, i) => i + 1).filter(i => !processedVideos.includes(i)),
     } : undefined;

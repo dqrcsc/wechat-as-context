@@ -44,8 +44,10 @@ async function native(options:{outcomes:string[];mixed?:boolean;idea?:boolean;mo
 for(const mode of ['video','mixed','idea'] as const){test(`native ${mode} preserves raw transcript, unknown publication and quality`,async()=>{
  const r=await native({outcomes:['ok'],mixed:mode==='mixed',idea:mode==='idea'});
  expect(r.source).toContain('Codeex 15%。原始口播结束');expect(r.source).toContain(raw);expect(r.source).toContain('非时间戳');
- expect(readSavedExtractionQuality(r.source)?.status).toBe('complete');expect(readSavedExtractionQuality(r.source)?.totalVideos).toBe(1);
+ expect(readSavedExtractionQuality(r.source)?.status).toBe('partial');expect(readSavedExtractionQuality(r.source)?.totalVideos).toBe(1);
  if(mode==='video'){expect(savedPublicationDate(r.source)).toBe('');expect(r.source).toContain('发布时间**：未知');}
+ expect(readSavedExtractionQuality(r.source)?.asrEvidence?.[0]).toMatchObject({videoIndex:1,timingAvailable:false});
+ expect(r.source).toContain('疑似错词复核候选');expect(r.prompts[0]).toContain('疑似错词复核候选');
  expect(r.prompts).toHaveLength(1);expect(r.prompts[0]).not.toContain('data-asr-raw');expect(r.prompts[0]).not.toContain(raw);expect(r.prompts[0]).toContain('Codeex 15%。原始口播结束');
 });}
 for(const outcome of ['empty','throw','download']){test(`native ${outcome} records unavailable without a false success or model guess`,async()=>{
@@ -56,7 +58,7 @@ test('native multiple videos retain successful evidence and missing index',async
  const r=await native({outcomes:['ok','empty']});const q=readSavedExtractionQuality(r.source);expect(q?.status).toBe('partial');expect(q?.processedVideos).toEqual([1]);expect(q?.missingVideos).toEqual([2]);expect(r.source).toContain(raw);expect(r.result.replyText).toContain('1/2');
 });
 test('native model failure cannot discard a successful transcript',async()=>{
- const r=await native({outcomes:['ok'],modelFails:true});expect(r.source).toContain(raw);expect(readSavedExtractionQuality(r.source)?.status).toBe('complete');expect(r.result.replyText).toContain('未解析');
+ const r=await native({outcomes:['ok'],modelFails:true});expect(r.source).toContain(raw);expect(readSavedExtractionQuality(r.source)?.status).toBe('partial');expect(r.result.replyText).toContain('未解析');
 });
 for(const platform of ['xhs','douyin'] as const)for(const outcome of ['ok','partial','empty','throw','download','no_stream'] as const){test(`${platform} ${outcome} has video-scoped quality and safe date`,async()=>{
  const id=platform==='xhs'?'bbbbbbbbbbbbbbbbbbbbbbbb':'76543210987654321';let calls=0;
@@ -66,8 +68,8 @@ for(const platform of ['xhs','douyin'] as const)for(const outcome of ['ok','part
  globalThis.fetch=(async()=>new Response(html)) as unknown as typeof fetch;
  setAsrTestRunner(async()=>{calls++;if(outcome==='throw')throw new Error('private token');if(outcome==='download')throw new MediaDownloadError('http_403');return {transcript:outcome==='empty'?'':raw,engineUsed:'fixture', ...(outcome==='partial'?{extractionQuality:{status:'partial' as const,reasons:['asr_truncated']}}:{})};});
  const r=await (platform==='xhs'?extractXiaohongshuNote:extractDouyinWork)(platform==='xhs'?`https://www.xiaohongshu.com/explore/${id}`:`https://www.douyin.com/video/${id}`);
- expect(r.mediaKind).toBe('video');expect(r.publishDate).toBe('');expect(r.extractionQuality?.status).toBe(outcome==='ok'?'complete':outcome==='partial'?'partial':'metadata_only');expect(r.markdownBody).not.toContain('private token');
- if(outcome==='ok')expect(r.markdownBody).toContain(raw);else expect(r.extractionQuality?.reasons.length).toBeGreaterThan(0);
+ expect(r.mediaKind).toBe('video');expect(r.publishDate).toBe('');expect(r.extractionQuality?.status).toBe(['ok','partial'].includes(outcome)?'partial':'metadata_only');expect(r.markdownBody).not.toContain('private token');
+ if(outcome==='ok'){expect(r.markdownBody).toContain(raw);expect(r.markdownBody).toContain('完整性未核验');expect(r.extractionQuality?.asrEvidence?.[0].timingAvailable).toBe(false);}else expect(r.extractionQuality?.reasons.length).toBeGreaterThan(0);
  if(outcome==='no_stream'){expect(calls).toBe(0);expect(r.markdownBody).not.toContain('Vision OCR');}
 });}
 
@@ -81,7 +83,7 @@ for(const mode of ['mixed','idea'] as const)for(const outcomes of [['empty'],['o
   const r=await native({outcomes,mixed:mode==='mixed',idea:mode==='idea'});const q=readSavedExtractionQuality(r.source)!;
   expect(q.totalVideos).toBe(outcomes.length);expect(q.processedVideos).toEqual(outcomes.flatMap((o,i)=>o==='ok'?[i+1]:[]));
   expect(q.missingVideos).toEqual(outcomes.flatMap((o,i)=>o==='ok'?[]:[i+1]));
-  expect(q.status).toBe(outcomes.every(o=>o==='ok')?'complete':outcomes.includes('ok')?'partial':'unavailable');
+  expect(q.status).toBe(outcomes.includes('ok')?'partial':'unavailable');
   if(outcomes.includes('ok'))expect(r.source).toContain(raw);
   if(q.status!=='complete'){expect(r.result.replyText).toContain('未取得转写的视频序号');expect(r.source).toContain('未取得转写的视频序号');}
  });
@@ -113,7 +115,7 @@ test('video quality roundtrips both source writers',async()=>{
 
 for(const fileFirst of [true,false])for(const idea of [true,false])test(`mixed failed file preserves video regardless of order/target: ${fileFirst}/${idea}`,async()=>{
  const r=await native({outcomes:['ok'],mixed:true,fileFails:true,fileFirst,idea});
- expect(r.source).toContain(raw);expect(readSavedExtractionQuality(r.source)?.status).toBe('complete');
+ expect(r.source).toContain(raw);expect(readSavedExtractionQuality(r.source)?.status).toBe('partial');
  expect(r.result.replyText).toContain('未归档或解析该附件');expect(r.source).toContain('未归档或解析该附件');expect(r.prompts[0]).toContain('未归档或解析该附件');
 });
 
@@ -123,12 +125,12 @@ for (const mode of ['video', 'mixed', 'idea'] as const) {
       const r = await native({outcomes, mixed: mode === 'mixed', idea: mode === 'idea'});
       const quality = readSavedExtractionQuality(r.source)!;
       expect(quality.status).toBe('partial');
-      expect(quality.partialVideos).toEqual(outcomes.flatMap((o, i) => o === 'partial' ? [i + 1] : []));
+      expect(quality.partialVideos).toEqual(outcomes.flatMap((o, i) => ['partial','ok'].includes(o) ? [i + 1] : []));
       expect(quality.missingVideos).toEqual(outcomes.flatMap((o, i) => o === 'empty' ? [i + 1] : []));
       expect(r.source).toContain(raw);
-      expect(r.source).toContain('部分转写的视频序号');
-      expect(r.prompts[0]).toContain('部分转写的视频序号');
-      expect(r.result.replyText).toContain('部分转写的视频序号');
+      expect(r.source).toContain('部分转写或完整性未核验的视频序号');
+      expect(r.prompts[0]).toContain('部分转写或完整性未核验的视频序号');
+      expect(r.result.replyText).toContain('部分转写或完整性未核验的视频序号');
     });
   }
 }

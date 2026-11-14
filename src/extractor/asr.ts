@@ -1,3 +1,4 @@
+import { asrQuality } from "./asr_quality.ts";
 import { extractionNotice, type ExtractionQuality } from "./quality.ts";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -176,10 +177,15 @@ export async function downloadMediaStream(
 export async function transcribeAudioFromMedia(
   req: AsrTranscriptionRequest
 ): Promise<AsrTranscriptionResult> {
-  if (customAsrTestRunner) {
-    return customAsrTestRunner(req);
-  }
+  const result = customAsrTestRunner ? await customAsrTestRunner(req) : await transcribeAudioInternal(req);
+  const evidence = result.extractionQuality?.asrEvidence?.[0];
+  return { ...result, extractionQuality: asrQuality(result.transcript, evidence ?? {
+    engineCompletion: result.extractionQuality?.reasons.includes('asr_truncated') ? 'truncated' : 'unknown',
+    inputDurationSeconds: result.durationSeconds,
+  }, result.extractionQuality?.reasons) };
+}
 
+async function transcribeAudioInternal(req: AsrTranscriptionRequest): Promise<AsrTranscriptionResult> {
   // Resolve local tools before downloading so configuration problems are known up front;
   // an invalid override only disables that engine and is reported via toolIssues.
   const toolIssues: string[] = [];
@@ -223,6 +229,8 @@ export async function transcribeAudioFromMedia(
     // Step 1: Extract 16kHz mono audio track via ffmpeg if available
     let audioPathForAsr = localMediaPath;
     let durationSeconds: number | undefined;
+    let inputDurationSeconds: number | undefined;
+    let decodedDurationSeconds: number | undefined;
 
     if (ffmpegBin) {
       const wavOut = join(workDir, "extracted_16k.wav");
@@ -252,16 +260,15 @@ export async function transcribeAudioFromMedia(
           /Duration:\s*(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/
         );
         if (durMatch) {
-          durationSeconds = Math.round(
-            Number(durMatch[1]) * 3600 +
-              Number(durMatch[2]) * 60 +
-              Number(durMatch[3])
-          );
+          inputDurationSeconds = Number(durMatch[1]) * 3600 + Number(durMatch[2]) * 60 + Number(durMatch[3]);
+          durationSeconds = Math.round(inputDurationSeconds);
         }
       }
-      if (existsSync(wavOut) && statSync(wavOut).size > 4096) {
+      if (ffRes.status === 0 && existsSync(wavOut) && statSync(wavOut).size > 4096) {
         audioPathForAsr = wavOut;
-      }
+        const last = [...(ffRes.stderr || '').matchAll(/time=(\d{2}):(\d{2}):(\d{2}(?:\.\d+)?)/g)].at(-1);
+        if (last) decodedDurationSeconds = Number(last[1]) * 3600 + Number(last[2]) * 60 + Number(last[3]);
+      } else toolIssues.push('ffmpeg_decode_failed');
     }
 
     // Step 2: Engine 1 -> Local offline `local-asr` (FunASR + SenseVoiceSmall)
@@ -291,6 +298,7 @@ export async function transcribeAudioFromMedia(
             const parsed = JSON.parse(readFileSync(jsonPath, "utf-8")) as {
               text?: string;
               raw_text?: string;
+              segments?: unknown[];
             };
             const text = (parsed.text || parsed.raw_text || "").trim();
             if (text.length > 0) {
@@ -298,6 +306,8 @@ export async function transcribeAudioFromMedia(
                 transcript: text,
                 engineUsed: "local_asr_sensevoice",
                 durationSeconds,
+                extractionQuality: asrQuality(text, {engineCompletion: 'completed', inputDurationSeconds, decodedDurationSeconds,
+                  segmentCount: Array.isArray(parsed.segments) ? parsed.segments.length : undefined}),
               });
             }
           } catch {}
@@ -309,6 +319,7 @@ export async function transcribeAudioFromMedia(
               transcript: text,
               engineUsed: "local_asr_sensevoice",
               durationSeconds,
+              extractionQuality: asrQuality(text, {engineCompletion: 'completed', inputDurationSeconds, decodedDurationSeconds}),
             });
           }
         }
@@ -331,7 +342,7 @@ export async function transcribeAudioFromMedia(
         return withIssues({
           transcript: cloudRes.transcript,
           engineUsed: cloudRes.engineUsed,
-          extractionQuality: cloudRes.extractionQuality,
+          extractionQuality: asrQuality(cloudRes.transcript, {...cloudRes.extractionQuality?.asrEvidence?.[0], inputDurationSeconds, decodedDurationSeconds}, cloudRes.extractionQuality?.reasons),
           durationSeconds,
         });
       }
@@ -433,9 +444,8 @@ async function tryCloudMultimodalAudioTranscription(
         return {
           transcript: text,
           engineUsed: `gemini_audio:${model}`,
-          extractionQuality: finishReason === "STOP"
-            ? { status: "complete", reasons: [] }
-            : { status: "partial", reasons: [finishReason === "MAX_TOKENS" ? "asr_truncated" : "asr_finish_reason_missing"] },
+          extractionQuality: asrQuality(text, {engineCompletion: finishReason === 'STOP' ? 'completed' : finishReason === 'MAX_TOKENS' ? 'truncated' : 'unknown'},
+            finishReason === 'STOP' ? [] : [finishReason === 'MAX_TOKENS' ? 'asr_truncated' : 'asr_finish_reason_missing']),
         };
       }
     } catch (error) {

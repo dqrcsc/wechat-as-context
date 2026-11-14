@@ -84,8 +84,8 @@ test('template item description cannot taint a successful transcript', async () 
   mockDouyin({ desc: template, video: { play_addr: { url_list: ['https://media.example.test/video.mp4'] } } });
   setAsrTestRunner(async () => ({ transcript: '本次实际取得的口播。', engineUsed: 'fixture' }));
   const result = await extractDouyinWork(url, '可信旧标题');
-  expect(result.extractionQuality?.status).toBe('complete');
-  expect(result.extractionQuality?.reasons).toEqual(['douyin_template_text_filtered']);
+  expect(result.extractionQuality?.status).toBe('partial');
+  expect(result.extractionQuality?.reasons).toEqual(['douyin_template_text_filtered','asr_coverage_unverified']);
   expect(result.markdownBody).toContain('本次实际取得的口播。'); expect(result.markdownBody).not.toContain(template);
 });
 for (const value of [template, `创作者${template}`, '抖音-记录美好生活', `真实内容 - 作者${template} - 抖音`, `真实内容-作者${template}`]) test(`recognized platform template: ${value.slice(0, 12)}`, () => {
@@ -121,9 +121,9 @@ test('album filters template before OCR and retains page coverage', async () => 
 import { analyzeArticleWithVault } from '../src/vault/analyzer.ts';
 import { saveRawWebArticleToVault } from '../src/extractor/web.ts';
 import { readFileSync } from 'node:fs';
-for (const reason of ['caption_language_mismatch', 'douyin_content_unavailable', 'douyin_seo_excerpt']) test(`quality warning survives source persistence and model omission: ${reason}`, async () => {
+for (const reason of ['caption_language_mismatch', 'douyin_content_unavailable', 'douyin_seo_excerpt', 'asr_coverage_unverified']) test(`quality warning survives source persistence and model omission: ${reason}`, async () => {
   const cfg = config();
-  const quality = { status: reason === 'caption_language_mismatch' ? 'complete' as const : 'metadata_only' as const, reasons: [reason] };
+  const quality = { status: reason === 'caption_language_mismatch' ? 'complete' as const : reason === 'asr_coverage_unverified' ? 'partial' as const : 'metadata_only' as const, reasons: [reason] };
   const article = { title: 'Synthetic source', url: 'https://example.test/article', author: 'Fixture', publishDate: '', digest: '', markdownBody: 'Synthetic evidence.', imageUrls: [], extractorUsed: 'native_http' as const, extractionQuality: quality };
   const path = await saveRawWebArticleToVault({ articlesDir: join(cfg.dataDir, 'articles'), article, slug: 'source-label' });
   expect(readSavedExtractionQuality(readFileSync(path, 'utf8'))).toEqual(quality);
